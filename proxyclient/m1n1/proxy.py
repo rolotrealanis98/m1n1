@@ -630,6 +630,7 @@ class M1N1Proxy(Reloadable):
     P_KBOOT_SET_INITRD = 0x702
     P_KBOOT_PREPARE_DT = 0x703
     P_KBOOT_SET_UBOOT = 0x704
+    P_KBOOT_GET_DT = 0x705
 
     P_PMGR_POWER_ENABLE = 0x800
     P_PMGR_POWER_DISABLE = 0x801
@@ -1088,6 +1089,8 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_KBOOT_PREPARE_DT, dt_addr)
     def kboot_set_uboot(self, name, value):
         self.request(self.P_KBOOT_SET_UBOOT, name, value)
+    def kboot_get_dt(self):
+        return self.request(self.P_KBOOT_GET_DT)
 
     def pmgr_power_enable(self, clkid):
         return self.request(self.P_PMGR_POWER_ENABLE, clkid)

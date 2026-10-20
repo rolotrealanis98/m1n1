@@ -423,6 +423,12 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_KBOOT_SET_UBOOT:
             reply->retval = kboot_set_uboot((void *)request->args[0], (void *)request->args[1]);
             break;
+        case P_KBOOT_GET_DT:
+            /* The prepared FDT is the only artifact that reflects every fixup
+             * m1n1 applies; the input DTB and the Apple ADT both differ from
+             * it. Hand its address to the host so it can be read back. */
+            reply->retval = (u64)kboot_get_dt();
+            break;
 
         case P_PMGR_POWER_ENABLE:
             reply->retval = pmgr_power_enable(request->args[0]);

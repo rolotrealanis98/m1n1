@@ -3115,16 +3115,47 @@ int kboot_prepare_dt(void *fdt)
 
 int kboot_boot(void *kernel)
 {
-    mcc_enable_cache();
-    tunables_apply_static();
-    clk_init();
+    /* omarchy-m5 T6050 bring-up diagnostics.
+     *
+     * An SError here is asynchronous: it is reported at whatever PC happens
+     * to be executing, which made it look like dapf's fault. A DSB+ISB after
+     * each phase forces the abort to be taken inside the phase that caused
+     * it, so the last "kboot phase:" line printed names the culprit. */
+#define KBOOT_PHASE(name, call)                                                                    \
+    do {                                                                                           \
+        printf("kboot phase: %s\n", name);                                                         \
+        call;                                                                                      \
+        sysop("dsb sy");                                                                           \
+        sysop("isb");                                                                              \
+        printf("kboot phase: %s done\n", name);                                                    \
+    } while (0)
 
-    usb_init();
-    pcie_init();
-    dapf_init_all();
+    KBOOT_PHASE("mcc_enable_cache", mcc_enable_cache());
+    KBOOT_PHASE("tunables_apply_static", tunables_apply_static());
+    KBOOT_PHASE("clk_init", clk_init());
+    KBOOT_PHASE("usb_init", usb_init());
+    KBOOT_PHASE("pcie_init", pcie_init());
+    KBOOT_PHASE("dapf_init_all", dapf_init_all());
+#undef KBOOT_PHASE
 
     printf("Setting SMP mode to WFE...\n");
     smp_set_wfe_mode(true);
+
+    /* omarchy-m5: paint the marker band the kernel's early checkpoints also
+     * use, through the exact same raw-store path (boot_args video base,
+     * stride from boot_args, no fb console involvement). If this yellow band
+     * appears but none of the kernel's bands do, the marker mechanism is
+     * proven good and the kernel really did not get that far. Rows
+     * 144..159 are ours; the kernel paints rows 0..111. */
+    {
+        u32 *fb = (u32 *)cur_boot_args.video.base;
+        u32 stride_px = cur_boot_args.video.stride / 4;
+        for (u32 y = 144; y < 160; y++)
+            for (u32 x = 0; x < 256; x++)
+                fb[y * stride_px + x] = 0x3FFFFC00; /* yellow in x2r10g10b10 */
+        sysop("dsb sy");
+    }
+
     printf("Preparing to boot kernel at %p with fdt at %p\n", kernel, dt);
 
     next_stage.entry = kernel;
@@ -3136,4 +3167,9 @@ int kboot_boot(void *kernel)
     next_stage.restore_logo = false;
 
     return 0;
+}
+
+void *kboot_get_dt(void)
+{
+    return dt;
 }

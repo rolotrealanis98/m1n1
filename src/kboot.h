@@ -25,6 +25,7 @@ int kboot_set_chosen(const char *name, const char *value);
 int kboot_set_uboot(const char *name, const char *value);
 int kboot_prepare_dt(void *fdt);
 int kboot_boot(void *kernel);
+void *kboot_get_dt(void);
 
 // from rust/usb4.rs
 u64 rust_usb4_router_uuid(void);

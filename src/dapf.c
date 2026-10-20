@@ -6,6 +6,7 @@
 #include "malloc.h"
 #include "memory.h"
 #include "pmgr.h"
+#include "soc.h"
 #include "string.h"
 #include "utils.h"
 
@@ -69,37 +70,62 @@ struct dapf_t8110b_config {
     u32 pad;
 } PACKED;
 
-static int dapf_init_t8110a(u64 base, struct dapf_t8110_config *config, u32 length)
+static int dapf_init_t8110a(u64 base, u64 size, struct dapf_t8110_config *config, u32 length)
 {
     int count = length / sizeof(*config);
 
+    /* Each entry consumes 0x40 bytes of register space. The ADT property
+     * length and the register window are independent, and on an unsupported
+     * SoC a mis-sized property walks straight off the end of the window into
+     * unmapped MMIO -> external abort -> asynchronous SError. */
+    if (size && (u64)count * 0x40 > size) {
+        printf("dapf: clamping %d entries to %ld (window 0x%lx at 0x%lx)\n", count, size / 0x40,
+               size, base);
+        count = size / 0x40;
+    }
+
     for (int i = 0; i < count; i++) {
+        /* Per-slice barrier: the abort these writes can raise is an
+         * asynchronous SError, so without this the reported PC is wherever
+         * the CPU happened to be, not the slice that caused it. */
+        printf("dapf:   slice %d @ 0x%lx\n", i, base);
         write32(base + 0x04, config[i].r4);
         write64(base + 0x08, config[i].start);
         write64(base + 0x10, config[i].end);
         write32(base + 0x00, (config[i].r0_hi << 4) | config[i].r0_lo);
         write32(base + 0x20, config[i].r20);
+        sysop("dsb sy");
+        sysop("isb");
         base += 0x40;
     }
     return 0;
 }
 
-static int dapf_init_t8110b(u64 base, struct dapf_t8110b_config *config, u32 length)
+static int dapf_init_t8110b(u64 base, u64 size, struct dapf_t8110b_config *config, u32 length)
 {
     int count = length / sizeof(*config);
 
+    if (size && (u64)count * 0x40 > size) {
+        printf("dapf: clamping %d entries to %ld (window 0x%lx at 0x%lx)\n", count, size / 0x40,
+               size, base);
+        count = size / 0x40;
+    }
+
     for (int i = 0; i < count; i++) {
+        printf("dapf:   slice %d @ 0x%lx\n", i, base);
         write32(base + 0x04, config[i].r4);
         write64(base + 0x08, config[i].start);
         write64(base + 0x10, config[i].end);
         write32(base + 0x00, (config[i].r0_hi << 4) | config[i].r0_lo);
         write32(base + 0x20, config[i].r20);
+        sysop("dsb sy");
+        sysop("isb");
         base += 0x40;
     }
     return 0;
 }
 
-static int dapf_init_t8110(const char *path, u64 base, int node)
+static int dapf_init_t8110(const char *path, u64 base, u64 size, int node)
 {
     u32 length;
     const char *prop = "dapf-instance-0";
@@ -110,13 +136,15 @@ static int dapf_init_t8110(const char *path, u64 base, int node)
         return -1;
     }
 
+    printf("dapf: %s base 0x%lx window 0x%lx, %s length %u\n", path, base, size, prop, length);
+
     // The least common multiple of 52 and 56 is 728 which is in the range of
     // the observed lengthe for "dapf-instance-0". The 52 byte variant is more
     // common and prefering that works so far.
     if (length % sizeof(struct dapf_t8110_config) == 0) {
-        return dapf_init_t8110a(base, (struct dapf_t8110_config *)config, length);
+        return dapf_init_t8110a(base, size, (struct dapf_t8110_config *)config, length);
     } else if (length % sizeof(struct dapf_t8110b_config) == 0) {
-        return dapf_init_t8110b(base, (struct dapf_t8110b_config *)config, length);
+        return dapf_init_t8110b(base, size, (struct dapf_t8110b_config *)config, length);
     } else {
         printf("dapf: Invalid length for %s property %s\n", path, prop);
         return -1;
@@ -139,9 +167,9 @@ int dapf_init(const char *path, int index)
     if (pwr && (pmgr_adt_power_enable(path) < 0))
         return -1;
 
-    u64 base;
-    if (adt_get_reg(adt, dart_path, "reg", index, &base, NULL) < 0) {
-        printf("dapf: Error getting DAPF %s base address.\n", path);
+    u64 base, size = 0;
+    if (adt_get_reg(adt, dart_path, "reg", index, &base, &size) < 0) {
+        printf("dapf: Error getting DAPF %s base address (index %d).\n", path, index);
         return -1;
     }
 
@@ -150,7 +178,7 @@ int dapf_init(const char *path, int index)
     } else if (adt_is_compatible(adt, node, "dart,t6000")) {
         ret = dapf_init_t8020(path, base, node);
     } else if (adt_is_compatible(adt, node, "dart,t8110")) {
-        ret = dapf_init_t8110(path, base, node);
+        ret = dapf_init_t8110(path, base, size, node);
     } else {
         printf("dapf: DAPF %s at 0x%lx is of an unknown type\n", path, base);
         return -1;
@@ -183,6 +211,20 @@ int dapf_init_all(void)
 
     while (entry->path != NULL) {
         if (adt_path_offset(adt, entry->path) < 0) {
+            entry++;
+            continue;
+        }
+        /* T6050 (M5 Pro) bring-up: programming /arm-io/dart-aop's DAPF
+         * raises an asynchronous SError on slice 6 (L2C_ERR_ADR =
+         * base + 0x180) even though the runtime ADT lists 18 slices and
+         * they fit inside the 0x4000 window. The on-disk ADT carries
+         * "allow-dram-apf-slices-0 = 0" for this DART, which m1n1 ignores,
+         * so the hardware very likely exposes fewer slices than the
+         * property describes. AOP DMA is not needed to boot Linux, so skip
+         * it here until the real slice count is known. */
+        if (chip_id == T6050 && !strcmp(entry->path, "/arm-io/dart-aop")) {
+            printf("dapf: skipping %s on T6050 (known SError, bring-up workaround)\n",
+                   entry->path);
             entry++;
             continue;
         }
