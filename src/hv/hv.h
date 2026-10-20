@@ -139,6 +139,7 @@ void hv_disable_genter_trap(void);
 /* HV main */
 void hv_init(void);
 bool hv_cpu_power_init(void);
+extern bool hv_vm_tmr_fiq_locked;
 void hv_start(void *entry, u64 regs[4]);
 void hv_start_secondary(int cpu, void *entry, u64 regs[4]);
 void hv_exit_cpu(int cpu);

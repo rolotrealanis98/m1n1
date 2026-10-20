@@ -199,6 +199,21 @@ void hv_init(void)
         hv_secondary_tick_interval = hv_tick_interval;
     }
 
+    /*
+     * Is the guest timer FIQ gate writable? Write back what it reads under the
+     * exception guard; on T6050 any write is UNDEFINED. hv_exc.c then masks
+     * firing guest timers via IMASK, which needs ECV to trap the guest's view.
+     */
+    int exc_before = exc_count;
+    exc_guard = GUARD_SKIP | GUARD_SILENT;
+    msr(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, mrs(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2));
+    sysop("isb");
+    exc_guard = GUARD_OFF;
+    hv_vm_tmr_fiq_locked = exc_count != exc_before;
+    if (hv_vm_tmr_fiq_locked)
+        printf("HV: VM_TMR_FIQ_ENA is locked; gating guest timers via IMASK%s\n",
+               hv_has_ecv ? "" : " - BROKEN without ECV, guest timer FIQs will storm");
+
     // Set deep WFI back to defaults
     if (cpu_features->apple_sysregs_unlocked)
         reg_mask(SYS_IMP_APL_CYC_OVRD, CYC_OVRD_WFI_MODE_MASK, CYC_OVRD_WFI_MODE(0));

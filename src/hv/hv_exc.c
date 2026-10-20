@@ -25,9 +25,79 @@ struct hv_pcpu_data {
     u64 pmc_irq_mode;
     u64 exc_entry_pmcr0_cnt;
     u64 mdscr;
+    u32 tmr_hv_masked;   /* BIT(HV_TMR_*): we hold this guest timer's IMASK */
+    u32 tmr_guest_imask; /* BIT(HV_TMR_*): the guest's own IMASK while we do */
 } ALIGNED(64);
 
 struct hv_pcpu_data pcpu[MAX_CPUS];
+
+/*
+ * Some SoCs (T6050) lock SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2: it reads back with both
+ * guest timer FIQs enabled and every write is UNDEFINED. Without that gate a
+ * firing guest timer re-raises its FIQ at EL2 before the guest can take the
+ * vFIQ. There, a firing guest timer is masked through its own IMASK instead,
+ * and the guest-visible CTL hides that (ECV traps every guest timer access).
+ */
+bool hv_vm_tmr_fiq_locked;
+
+#define HV_TMR_P 0
+#define HV_TMR_V 1
+
+static u64 hv_tmr_read_ctl(int t)
+{
+    return t == HV_TMR_P ? mrs(CNTP_CTL_EL02) : mrs(CNTV_CTL_EL02);
+}
+
+static void hv_tmr_write_ctl(int t, u64 val)
+{
+    if (t == HV_TMR_P)
+        msr(CNTP_CTL_EL02, val);
+    else
+        msr(CNTV_CTL_EL02, val);
+}
+
+/* Returns whether the guest timer is firing from the guest's point of view. */
+static bool hv_tmr_gate(int t)
+{
+    u64 ctl = hv_tmr_read_ctl(t);
+    bool masked = PERCPU(tmr_hv_masked) & BIT(t);
+    bool guest_imask = masked ? PERCPU(tmr_guest_imask) & BIT(t) : ctl & CNTx_CTL_IMASK;
+    bool firing = (ctl & CNTx_CTL_ENABLE) && (ctl & CNTx_CTL_ISTATUS) && !guest_imask;
+
+    if (firing && !masked) {
+        PERCPU(tmr_guest_imask) &= ~BIT(t);
+        PERCPU(tmr_hv_masked) |= BIT(t);
+        hv_tmr_write_ctl(t, ctl | CNTx_CTL_IMASK);
+    } else if (!firing && masked) {
+        PERCPU(tmr_hv_masked) &= ~BIT(t);
+        hv_tmr_write_ctl(t, (ctl & ~CNTx_CTL_IMASK) | (guest_imask ? CNTx_CTL_IMASK : 0));
+    }
+
+    return firing;
+}
+
+/* Guest access to a timer CTL: hide an IMASK we are holding. */
+static void hv_guest_tmr_ctl(int t, bool is_read, u64 *val)
+{
+    if (!(PERCPU(tmr_hv_masked) & BIT(t))) {
+        if (is_read)
+            *val = hv_tmr_read_ctl(t);
+        else
+            hv_tmr_write_ctl(t, *val);
+        return;
+    }
+
+    if (is_read) {
+        u64 ctl = hv_tmr_read_ctl(t) & ~CNTx_CTL_IMASK;
+        *val = ctl | ((PERCPU(tmr_guest_imask) & BIT(t)) ? CNTx_CTL_IMASK : 0);
+    } else {
+        if (*val & CNTx_CTL_IMASK)
+            PERCPU(tmr_guest_imask) |= BIT(t);
+        else
+            PERCPU(tmr_guest_imask) &= ~BIT(t);
+        hv_tmr_write_ctl(t, *val | CNTx_CTL_IMASK);
+    }
+}
 
 void hv_exit_guest(void) __attribute__((noreturn));
 void hv_gexit(void);
@@ -155,18 +225,23 @@ void hv_update_fiq(void)
     u64 hcr = mrs(HCR_EL2);
     bool fiq_pending = false;
 
-    if (mrs(CNTP_CTL_EL02) == (CNTx_CTL_ISTATUS | CNTx_CTL_ENABLE)) {
-        fiq_pending = true;
-        reg_clr(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_P);
+    if (hv_vm_tmr_fiq_locked) {
+        fiq_pending |= hv_tmr_gate(HV_TMR_P);
+        fiq_pending |= hv_tmr_gate(HV_TMR_V);
     } else {
-        reg_set(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_P);
-    }
+        if (mrs(CNTP_CTL_EL02) == (CNTx_CTL_ISTATUS | CNTx_CTL_ENABLE)) {
+            fiq_pending = true;
+            reg_clr(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_P);
+        } else {
+            reg_set(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_P);
+        }
 
-    if (mrs(CNTV_CTL_EL02) == (CNTx_CTL_ISTATUS | CNTx_CTL_ENABLE)) {
-        fiq_pending = true;
-        reg_clr(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_V);
-    } else {
-        reg_set(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_V);
+        if (mrs(CNTV_CTL_EL02) == (CNTx_CTL_ISTATUS | CNTx_CTL_ENABLE)) {
+            fiq_pending = true;
+            reg_clr(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_V);
+        } else {
+            reg_set(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_V);
+        }
     }
 
     fiq_pending |= PERCPU(ipi_pending) || PERCPU(pmc_pending);
@@ -234,10 +309,14 @@ static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)
         SYSREG_PASS(SYS_IMP_APL_CORE_NRG_ACC_DAT);
         SYSREG_PASS(SYS_IMP_APL_CORE_SRM_NRG_ACC_DAT);
         /* Architectural timer, for ECV */
-        SYSREG_MAP(SYS_CNTV_CTL_EL0, SYS_CNTV_CTL_EL02)
+        case SYSREG_ISS(SYS_CNTV_CTL_EL0):
+            hv_guest_tmr_ctl(HV_TMR_V, is_read, &regs[rt]);
+            return true;
         SYSREG_MAP(SYS_CNTV_CVAL_EL0, SYS_CNTV_CVAL_EL02)
         SYSREG_MAP(SYS_CNTV_TVAL_EL0, SYS_CNTV_TVAL_EL02)
-        SYSREG_MAP(SYS_CNTP_CTL_EL0, SYS_CNTP_CTL_EL02)
+        case SYSREG_ISS(SYS_CNTP_CTL_EL0):
+            hv_guest_tmr_ctl(HV_TMR_P, is_read, &regs[rt]);
+            return true;
         SYSREG_MAP(SYS_CNTP_CVAL_EL0, SYS_CNTP_CVAL_EL02)
         SYSREG_MAP(SYS_CNTP_TVAL_EL0, SYS_CNTP_TVAL_EL02)
         /* Spammy stuff seen on t600x p-cores */
