@@ -2,8 +2,8 @@
 
 #include "wdt.h"
 #include "adt.h"
-#include "types.h"
 #include "string.h"
+#include "types.h"
 #include "utils.h"
 #include "xnuboot.h"
 

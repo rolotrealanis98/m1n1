@@ -223,8 +223,7 @@ int dapf_init_all(void)
          * property describes. AOP DMA is not needed to boot Linux, so skip
          * it here until the real slice count is known. */
         if (chip_id == T6050 && !strcmp(entry->path, "/arm-io/dart-aop")) {
-            printf("dapf: skipping %s on T6050 (known SError, bring-up workaround)\n",
-                   entry->path);
+            printf("dapf: skipping %s on T6050 (known SError, bring-up workaround)\n", entry->path);
             entry++;
             continue;
         }

@@ -285,6 +285,11 @@ void hv_pmcr0_write(u64 val)
             _msr(sr_tkn(sr), regs[rt]);                                                            \
         return true;
 
+#define SYSREG_TMR_CTL(sr, t)                                                                      \
+    case SYSREG_ISS(sr):                                                                           \
+        hv_guest_tmr_ctl(t, is_read, &regs[rt]);                                                   \
+        return true;
+
 static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)
 {
     u64 reg = iss & (ESR_ISS_MSR_OP0 | ESR_ISS_MSR_OP2 | ESR_ISS_MSR_OP1 | ESR_ISS_MSR_CRn |
@@ -309,14 +314,10 @@ static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)
         SYSREG_PASS(SYS_IMP_APL_CORE_NRG_ACC_DAT);
         SYSREG_PASS(SYS_IMP_APL_CORE_SRM_NRG_ACC_DAT);
         /* Architectural timer, for ECV */
-        case SYSREG_ISS(SYS_CNTV_CTL_EL0):
-            hv_guest_tmr_ctl(HV_TMR_V, is_read, &regs[rt]);
-            return true;
+        SYSREG_TMR_CTL(SYS_CNTV_CTL_EL0, HV_TMR_V)
         SYSREG_MAP(SYS_CNTV_CVAL_EL0, SYS_CNTV_CVAL_EL02)
         SYSREG_MAP(SYS_CNTV_TVAL_EL0, SYS_CNTV_TVAL_EL02)
-        case SYSREG_ISS(SYS_CNTP_CTL_EL0):
-            hv_guest_tmr_ctl(HV_TMR_P, is_read, &regs[rt]);
-            return true;
+        SYSREG_TMR_CTL(SYS_CNTP_CTL_EL0, HV_TMR_P)
         SYSREG_MAP(SYS_CNTP_CVAL_EL0, SYS_CNTP_CVAL_EL02)
         SYSREG_MAP(SYS_CNTP_TVAL_EL0, SYS_CNTP_TVAL_EL02)
         /* Spammy stuff seen on t600x p-cores */
