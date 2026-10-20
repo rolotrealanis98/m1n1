@@ -3,7 +3,9 @@
 #include "wdt.h"
 #include "adt.h"
 #include "types.h"
+#include "string.h"
 #include "utils.h"
+#include "xnuboot.h"
 
 #define WDT_COUNT 0x10
 #define WDT_ALARM 0x14
@@ -27,6 +29,14 @@ void wdt_disable(void)
     }
 
     printf("Primary WDT register @ 0x%lx\n", wdt_base);
+    // Experimental images are chainloaded with "m1n1.wdt=keep" after the host
+    // armed the watchdog (hv/wdt-arm.py): leave it armed, so a hang anywhere
+    // past this point still resets the machine into the installed stage-1.
+    // The host disarms it once the new proxy answers (hv/wdt-arm.py --off).
+    if (strstr(cur_boot_args.rv1.cmdline, "m1n1.wdt=keep")) {
+        printf("Primary WDT left armed (m1n1.wdt=keep)\n");
+        return;
+    }
     write32(wdt_base + WDT_CTL, 0);
     printf("Primary WDT disabled\n");
 

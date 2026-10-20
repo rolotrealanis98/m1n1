@@ -56,6 +56,19 @@ int chainload_image(void *image, size_t size, char **vars, size_t var_cnt)
     const size_t bootargs_size = SZ_16K;
     image_size += bootargs_size;
 
+    // M4+/M5: iBoot leaves a CTRR range (a 44-48 KiB WFI sled) ending at
+    // top_of_kernel_data that only the boot CPU may write. Keep the image
+    // below it and hand on the original top_of_kernel_data, so the next
+    // m1n1's heap (secondary stacks!) starts above it.
+    u64 top_kdata = cur_boot_args.top_of_kernel_data;
+    u64 protected_start = top_kdata - 3 * SZ_16K;
+    if (new_base < top_kdata && new_base + image_size > protected_start) {
+        printf("chainload: image 0x%lx..0x%lx would cover the secondary-only CTRR range "
+               "0x%lx..0x%lx\n",
+               new_base, new_base + image_size, protected_start, top_kdata);
+        return -1;
+    }
+
     printf("chainload: Total image size: 0x%lx\n", image_size);
 
     size_t stub_size = _chainload_stub_end - _chainload_stub_start;
@@ -92,7 +105,7 @@ int chainload_image(void *image, size_t size, char **vars, size_t var_cnt)
     // Copy bootargs
     struct boot_args *new_boot_args = new_image + bootargs_off;
     *new_boot_args = cur_boot_args;
-    new_boot_args->top_of_kernel_data = new_base + image_size;
+    new_boot_args->top_of_kernel_data = max(top_kdata, new_base + image_size);
 
     // Copy chainload stub
     void *stub = new_image + image_size;

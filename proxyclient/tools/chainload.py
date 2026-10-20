@@ -49,6 +49,18 @@ bootargs_off = image_size
 bootargs_size = 0x4000
 image_size += bootargs_size
 
+# M4+/M5: iBoot leaves a CTRR range (a 44-48 KiB WFI sled) ending at
+# top_of_kernel_data that only the boot CPU may write. Whatever lands there
+# (a secondary's stack, shared SMP state) faults on the secondaries' first
+# store. Keep the image below it and hand on the original top_of_kernel_data,
+# so the next m1n1's heap starts above it (as GravityLinux/bootloader e779ec7).
+top_kdata = u.ba.top_of_kernel_data
+protected_start = top_kdata - 3 * 0x4000
+if new_base < top_kdata and new_base + image_size > protected_start:
+    raise SystemExit(f"chainload: image 0x{new_base:x}..0x{new_base + image_size:x} would cover "
+                     f"the secondary-only CTRR range 0x{protected_start:x}..0x{top_kdata:x}; "
+                     "try --no-sepfw")
+
 print(f"Total region size: 0x{image_size:x} bytes")
 image_addr = u.malloc(image_size)
 
@@ -101,7 +113,7 @@ u.push_adt()
 print("Setting up bootargs...")
 tba = u.ba.copy()
 
-tba.top_of_kernel_data = new_base + image_size
+tba.top_of_kernel_data = max(top_kdata, new_base + image_size)
 
 if len(args.boot_args) > 0:
     boot_args = " ".join(args.boot_args)
