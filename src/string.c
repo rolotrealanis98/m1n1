@@ -149,6 +149,22 @@ size_t strlen(const char *s)
     return rc;
 }
 
+/*
+ * Not called by m1n1 itself: LLVM's loop-idiom pass turns hand-written
+ * "count until a zero word" loops into wcslen() calls (seen in the Rust ADT
+ * code with recent toolchains), so a freestanding build has to provide it.
+ */
+size_t wcslen(const wchar_t *s)
+{
+    size_t rc = 0;
+
+    while (s[rc]) {
+        ++rc;
+    }
+
+    return rc;
+}
+
 size_t strnlen(const char *s, size_t n)
 {
     size_t rc = 0;
