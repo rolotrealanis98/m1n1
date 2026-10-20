@@ -13,6 +13,7 @@
 #include "string.h"
 #include "usb.h"
 #include "utils.h"
+#include "wdt.h"
 
 #define HV_TICK_RATE      1000
 #define HV_SLOW_TICK_RATE 1
@@ -569,6 +570,7 @@ void hv_maybe_exit(void)
 
 void hv_tick(struct exc_info *ctx)
 {
+    wdt_kick();
     hv_wdt_pet();
     iodev_handle_events(uartproxy_iodev);
     if (iodev_can_read(uartproxy_iodev)) {

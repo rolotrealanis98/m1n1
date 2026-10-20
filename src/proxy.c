@@ -27,6 +27,7 @@
 #include "uartproxy.h"
 #include "usb.h"
 #include "utils.h"
+#include "wdt.h"
 #include "xnuboot.h"
 
 #include "minilzlib/minlzma.h"
@@ -37,6 +38,7 @@ void rust_free_gigalocker(void *, size_t);
 
 int proxy_process(ProxyRequest *request, ProxyReply *reply)
 {
+    wdt_kick();
     enum exc_guard_t guard_save = exc_guard;
 
     reply->opcode = request->opcode;

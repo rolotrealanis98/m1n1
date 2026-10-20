@@ -12,6 +12,15 @@
 #define WDT_CTL   0x1c
 
 static u64 wdt_base = 0;
+static bool wdt_kept = false;
+
+// Dead-man switch for unattended runs: the proxy loop and the HV tick reset the count of a
+// watchdog left armed by m1n1.wdt=keep, so only a wedged m1n1 lets it bite.
+void wdt_kick(void)
+{
+    if (wdt_kept)
+        write32(wdt_base + WDT_COUNT, 0);
+}
 
 void wdt_disable(void)
 {
@@ -35,6 +44,7 @@ void wdt_disable(void)
     // The host disarms it once the new proxy answers (hv/wdt-arm.py --off).
     if (strstr(cur_boot_args.rv1.cmdline, "m1n1.wdt=keep")) {
         printf("Primary WDT left armed (m1n1.wdt=keep)\n");
+        wdt_kept = true;
         return;
     }
     write32(wdt_base + WDT_CTL, 0);
