@@ -309,7 +309,14 @@ void usb_init(void)
         return;
     }
 
-    tps6598x_foreach_hpm(usb_init_match, usb_init_one, NULL, true);
+    /*
+     * T6050 (M5 Pro): probing the sn201202x USB-PD controllers on nub-spmi
+     * hangs usb_init before the proxy gadget comes up (seen by omarchy-m5 on
+     * main with gen-4 SPMI support). The gadget only needs the dwc3 phys
+     * brought up below, so skip the PD manager on T6050.
+     */
+    if (chip_id != T6050)
+        tps6598x_foreach_hpm(usb_init_match, usb_init_one, NULL, true);
 
     for (int idx = 0; idx < USB_IODEV_COUNT; ++idx)
         usb_phy_bringup(idx); /* Fails on missing devices, just continue */
