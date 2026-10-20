@@ -91,6 +91,12 @@ bool hv_amcc_init(void)
     u32 enabled, planes, stride;
     u32 enabled_planes = ~0U;
 
+    // T6050 describes the AMCCs in /arm-io/mcc instead; leave their IRQs to the guest.
+    if (!adt_getprop(adt, error_handler_node, "amcc-metadata", NULL)) {
+        printf("hv_amcc: no amcc-metadata in error-handler, not hooking AMCC IRQs\n");
+        return true;
+    }
+
     if (ADT_GETPROP(adt, error_handler_node, "amcc-metadata", &metadata) != sizeof(metadata) ||
         ADT_GETPROP(adt, amcc_node, "plane-count", &planes) != sizeof(planes) ||
         ADT_GETPROP(adt, amcc_node, "plane-stride", &stride) != sizeof(stride))
