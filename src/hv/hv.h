@@ -122,6 +122,7 @@ void hv_do_panic(void);
 void hv_update_fiq(void);
 void hv_write_hcr(u64 val);
 void hv_write_hacr(u64 val);
+void hv_write_avncr(u64 val);
 u64 hv_get_spsr(void);
 void hv_set_spsr(u64 val);
 u64 hv_get_esr(void);

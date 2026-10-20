@@ -175,7 +175,7 @@ void hv_init(void)
         printf("Enabling NV\n");
         hv_write_hcr(mrs(SYS_HCR_EL2) | HCR_NV2 | HCR_NV);
         msr(VNCR_EL2, &nvMem[0]);
-        msr(SYS_IMP_APL_AVNCR_EL2, &anvMem[0]);
+        hv_write_avncr((u64)&anvMem[0]);
     }
 
     // No guest vectors initially
@@ -365,7 +365,7 @@ static void hv_init_secondary(struct hv_secondary_info_t *info)
 
     if (hv_sptm_mode == SPTM_NESTED_VIRT) {
         msr(VNCR_EL2, &nvMem[smp_id()]);
-        msr(SYS_IMP_APL_AVNCR_EL2, &anvMem[smp_id()]);
+        hv_write_avncr((u64)&anvMem[smp_id()]);
     }
 
     if (cpu_features->apple_sysregs_unlocked)
@@ -482,6 +482,16 @@ void hv_write_hacr(u64 val)
         gl2_call(hv_write_hacr, val, 0, 0, 0);
     else
         msr(HACR_EL2, val);
+}
+
+void hv_write_avncr(u64 val)
+{
+    // On T6050 (M5) AVNCR_EL2 is only writable from GL2; a direct EL2 write
+    // UNDEFs. Route it like hv_write_hcr/hv_write_hacr.
+    if (gxf_enabled() && !in_gl12())
+        gl2_call(hv_write_avncr, val, 0, 0, 0);
+    else
+        msr(SYS_IMP_APL_AVNCR_EL2, val);
 }
 
 u64 hv_get_spsr(void)
