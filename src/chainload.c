@@ -62,18 +62,24 @@ int chainload_image(void *image, size_t size, char **vars, size_t var_cnt)
     // m1n1's heap (secondary stacks!) starts above it.
     u64 top_kdata = cur_boot_args.top_of_kernel_data;
     u64 protected_start = top_kdata - 3 * SZ_16K;
-    if (new_base < top_kdata && new_base + image_size > protected_start) {
-        printf("chainload: image 0x%lx..0x%lx would cover the secondary-only CTRR range "
-               "0x%lx..0x%lx\n",
-               new_base, new_base + image_size, protected_start, top_kdata);
-        return -1;
-    }
 
     printf("chainload: Total image size: 0x%lx\n", image_size);
 
     size_t stub_size = _chainload_stub_end - _chainload_stub_start;
 
     void *new_image = malloc(image_size + stub_size);
+
+    if (new_base < top_kdata && new_base + image_size > protected_start) {
+        // Too big to stay in place below the window (a stage-2 with a kernel appended, loaded
+        // from the ESP, is ~30 MiB against ~12 MiB of room). Put it above the window and above
+        // the heap buffer it is staged in, so the stub's copy cannot overlap its own source; the
+        // next m1n1's heap then starts above the relocated image (top_of_kernel_data below).
+        u64 relocated = ALIGN_UP(max(top_kdata, (u64)new_image + image_size + stub_size), SZ_16K);
+        printf("chainload: image 0x%lx..0x%lx would cover the secondary-only CTRR range "
+               "0x%lx..0x%lx, relocating to 0x%lx\n",
+               new_base, new_base + image_size, protected_start, top_kdata, relocated);
+        new_base = relocated;
+    }
 
     // Copy m1n1
     memcpy(new_image, image, size);
