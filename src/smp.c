@@ -5,6 +5,7 @@
 #include "aic.h"
 #include "aic_regs.h"
 #include "cpu_regs.h"
+#include "exception.h"
 #include "memory.h"
 #include "pmgr.h"
 #include "soc.h"
@@ -149,6 +150,94 @@ void smp_secondary_prep_el3(void)
     return;
 }
 
+/*
+ * A chainloaded m1n1 that was relocated (e.g. stage-2 loaded from the ESP and placed above the
+ * M4+/M5 secondary-only CTRR window) runs at a different address than the image iBoot loaded.
+ * iBoot locks every secondary core's RVBAR to that original image base, so a released core resets
+ * into the old image's vector table and never reaches our spin table. Redirect it: overwrite the
+ * reset slot (slot 0, 0x80 bytes) at the locked RVBAR with "ldr x16, 1f; br x16; 1: .quad
+ * _vectors_start". Done once per locked address; only for RAM below this image.
+ */
+#define MAX_RVBAR_TRAMPOLINES 4
+
+static u64 rvbar_trampolines[MAX_RVBAR_TRAMPOLINES];
+static int rvbar_trampoline_count;
+
+static bool smp_rvbar_trampoline(u64 rvbar)
+{
+    u64 entry = (u64)_vectors_start;
+
+    for (int i = 0; i < rvbar_trampoline_count; i++)
+        if (rvbar_trampolines[i] == rvbar)
+            return true;
+
+    if (!rvbar || rvbar < ram_base || rvbar + RVBAR_TRAMPOLINE_SIZE > (u64)_base) {
+        printf("RVBAR 0x%lx is not RAM below this image (0x%lx..), not redirecting\n", rvbar,
+               (u64)_base);
+        return false;
+    }
+
+    if (rvbar_trampoline_count >= MAX_RVBAR_TRAMPOLINES) {
+        printf("RVBAR 0x%lx: too many locked RVBAR addresses, not redirecting\n", rvbar);
+        return false;
+    }
+
+    u32 code[RVBAR_TRAMPOLINE_SIZE / 4];
+    for (size_t i = 0; i < ARRAY_SIZE(code); i++)
+        code[i] = 0x14000000; // b .
+    code[0] = 0x58000050;     // ldr x16, #8
+    code[1] = 0xd61f0200;     // br x16
+    code[2] = (u32)entry;     // .quad _vectors_start
+    code[3] = (u32)(entry >> 32);
+
+    // Guarded: a fault here (unexpectedly protected memory) must not take the boot down
+    int exc_before = exc_count;
+    exc_guard = GUARD_SKIP;
+
+    for (size_t i = 0; i < ARRAY_SIZE(code); i++)
+        write32(rvbar + 4 * i, code[i]);
+
+    // The core resets with its MMU and caches off: push the stub to PoC, drop stale I-lines
+    dc_civac_range((void *)rvbar, RVBAR_TRAMPOLINE_SIZE);
+    sysop("dsb sy");
+    ic_ivau_range((void *)rvbar, RVBAR_TRAMPOLINE_SIZE);
+    sysop("dsb sy");
+    sysop("isb");
+
+    bool ok = true;
+    for (size_t i = 0; i < ARRAY_SIZE(code); i++)
+        if (read32(rvbar + 4 * i) != code[i])
+            ok = false;
+
+    sysop("dsb sy");
+    sysop("isb");
+    exc_guard = GUARD_OFF;
+
+    if (exc_count != exc_before || !ok) {
+        printf("RVBAR 0x%lx: writing the reset trampoline failed (%s), not redirecting\n", rvbar,
+               exc_count != exc_before ? "exception" : "readback mismatch");
+        return false;
+    }
+
+    rvbar_trampolines[rvbar_trampoline_count++] = rvbar;
+    printf("RVBAR 0x%lx is locked and differs from entry point 0x%lx: "
+           "installed reset trampoline (ldr x16; br x16 -> 0x%lx)\n",
+           rvbar, entry, entry);
+    return true;
+}
+
+int smp_rvbar_trampoline_count(void)
+{
+    return rvbar_trampoline_count;
+}
+
+u64 smp_rvbar_trampoline_addr(int i)
+{
+    if (i < 0 || i >= rvbar_trampoline_count)
+        return 0;
+    return rvbar_trampolines[i];
+}
+
 static void smp_start_cpu(int index, const struct cpu_info *cpu)
 {
     int i;
@@ -164,8 +253,10 @@ static void smp_start_cpu(int index, const struct cpu_info *cpu)
 
     if (!cpu_features->apple_sysregs_unlocked &&
         (read64(cpu->impl_reg) & RVBAR_ADDR) != (u64)_vectors_start) {
-        printf("Failed! \n    RVBAR (=0x%lx) is locked and differs from entry point (=0x%lx)\n",
-               read64(cpu->impl_reg) & RVBAR_ADDR, (u64)_vectors_start);
+        u64 rvbar = read64(cpu->impl_reg) & RVBAR_ADDR;
+        if (!smp_rvbar_trampoline(rvbar))
+            printf("Failed! \n    RVBAR (=0x%lx) is locked and differs from entry point (=0x%lx)\n",
+                   rvbar, (u64)_vectors_start);
     }
 
     printf("Starting CPU %d (%d:%d:%d)... ", index, cpu->die, cpu->cluster, cpu->core);

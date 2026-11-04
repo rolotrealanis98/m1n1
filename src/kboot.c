@@ -3023,6 +3023,15 @@ int kboot_prepare_dt(void *fdt)
             bail("FDT: couldn't add reservation for M4+ SMP-RO CTRR area\n");
     }
 
+    // Keep the reset trampolines we wrote at locked RVBARs (relocated m1n1, see smp.c) intact:
+    // a core reset into RVBAR again (deep idle, hotplug) must still find them.
+    for (int i = 0; i < smp_rvbar_trampoline_count(); i++) {
+        u64 addr = smp_rvbar_trampoline_addr(i);
+        printf("FDT: reserving RVBAR trampoline at 0x%lx\n", addr);
+        if (fdt_add_mem_rsv(dt, addr, RVBAR_TRAMPOLINE_SIZE))
+            printf("FDT: couldn't add reservation for the RVBAR trampoline at 0x%lx\n", addr);
+    }
+
     /* setup console log buffer early to capture as much log as possible */
     dt_setup_mtd_phram();
 
