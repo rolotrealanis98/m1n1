@@ -199,8 +199,14 @@ struct entry {
 };
 
 struct entry dapf_entries[] = {
-    {"/arm-io/dart-aop", 1}, {"/arm-io/dart-mtp", 1},  {"/arm-io/dart-pmp", 1},
-    {"/arm-io/dart-isp", 5}, {"/arm-io/dart-isp0", 5}, {NULL, -1},
+    {"/arm-io/dart-aop", 1},
+    {"/arm-io/dart-mtp", 1},
+    {"/arm-io/dart-pmp", 1},
+    /* T6050: the PMP's DART is dart-pmp0 (dart,t8110; DAPF aperture reg[1], live-verified). */
+    {"/arm-io/dart-pmp0", 1},
+    {"/arm-io/dart-isp", 5},
+    {"/arm-io/dart-isp0", 5},
+    {NULL, -1},
 };
 
 int dapf_init_all(void)
