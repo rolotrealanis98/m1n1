@@ -68,6 +68,15 @@ static bool usb_is_initialized = false;
 #define PIPEHANDLER_MUX_CTRL_USB4_TUNNEL 0x11
 #define PIPEHANDLER_MUX_CTRL_DUMMY       0x22
 
+/*
+ * T6050 moved the MUX_CTRL fields: clock select in bits 6:4, data select in bits 1:0
+ * (T8103: 5:3 and 2:0). The same dummy/dummy selection is 0x42 there; 0x22 reads as the
+ * USB4 clock with dummy data, a state the kernel's T6050 combo PHY refuses to park from.
+ */
+#define PIPEHANDLER_MUX_CTRL_T6050_CLK   GENMASK(6, 4)
+#define PIPEHANDLER_MUX_CTRL_T6050_DATA  GENMASK(1, 0)
+#define PIPEHANDLER_MUX_CTRL_T6050_DUMMY 0x42
+
 #define PIPEHANDLER_LOCK_REQ 0x10
 #define PIPEHANDLER_LOCK_ACK 0x14
 #define PIPEHANDLER_LOCK_EN  BIT(0)
@@ -142,6 +151,35 @@ static int usb_drd_get_regs(u32 idx, struct usb_drd_regs *regs)
     return 0;
 }
 
+/*
+ * Select the dummy PIPE producer in the T6050 field layout, as the kernel's combo PHY does
+ * (combo_reset_assert(), apple_t6050_usb3_pipe_cold_dummy()): controller in reset and clamped,
+ * then clock off, dummy data, dummy clock. The kernel PHY accepts only 0, 2 or 0x42 here when
+ * dwc3-apple first asserts the controller reset. The caller releases the reset afterwards.
+ */
+static void usb_pipehandler_park_t6050(u32 idx, uintptr_t pipehandler)
+{
+    u32 before = read32(pipehandler + PIPEHANDLER_MUX_CTRL);
+
+    /* An earlier stage (the chainloading m1n1's proxy) may have left the controller running. */
+    clear32(pipehandler + PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
+    set32(pipehandler + PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
+    mask32(pipehandler + PIPEHANDLER_MUX_CTRL, PIPEHANDLER_MUX_CTRL_T6050_CLK, 0);
+    udelay(10);
+    mask32(pipehandler + PIPEHANDLER_MUX_CTRL, PIPEHANDLER_MUX_CTRL_T6050_DATA,
+           FIELD_PREP(PIPEHANDLER_MUX_CTRL_T6050_DATA, 2));
+    udelay(10);
+    mask32(pipehandler + PIPEHANDLER_MUX_CTRL, PIPEHANDLER_MUX_CTRL_T6050_CLK,
+           FIELD_PREP(PIPEHANDLER_MUX_CTRL_T6050_CLK, 4));
+    udelay(10);
+
+    u32 after = read32(pipehandler + PIPEHANDLER_MUX_CTRL);
+    bool parked = (after & (PIPEHANDLER_MUX_CTRL_T6050_CLK | PIPEHANDLER_MUX_CTRL_T6050_DATA)) ==
+                  PIPEHANDLER_MUX_CTRL_T6050_DUMMY;
+    printf("usb: usb-drd%u: PIPE %s the dummy producer, MUX_CTRL %#x -> %#x\n", idx,
+           parked ? "on" : "NOT on", before, after);
+}
+
 int usb_phy_bringup(u32 idx)
 {
     char path[24];
@@ -172,7 +210,10 @@ int usb_phy_bringup(u32 idx)
     write32(usb_regs.atc + USB2PHY_MISCTUNE, 0x008c0813);
     write32(usb_regs.atc + USB2PHY_USBCTL, USB2PHY_USBCTL_RUN);
 
-    write32(usb_regs.drd_regs_unk3 + PIPEHANDLER_MUX_CTRL, PIPEHANDLER_MUX_CTRL_DUMMY);
+    if (chip_id == T6050 || chip_id == T6051)
+        usb_pipehandler_park_t6050(idx, usb_regs.drd_regs_unk3);
+    else
+        write32(usb_regs.drd_regs_unk3 + PIPEHANDLER_MUX_CTRL, PIPEHANDLER_MUX_CTRL_DUMMY);
     write32(usb_regs.drd_regs_unk3 + PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
     write32(usb_regs.drd_regs_unk3 + PIPEHANDLER_NONSELECTED_OVERRIDE, 0x9332);
 
