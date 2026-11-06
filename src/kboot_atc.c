@@ -565,10 +565,130 @@ cleanup:
     printf("FDT: Unable to setup ATC tunables for %s - USB3/Thunderbolt will not work\n", adt_path);
 }
 
+/*
+ * T6050/T6051 Type-C combo PHY (Linux drivers/phy/apple/atc-t6050-dp.c and
+ * atc-t6050-combo.h, binding apple,t6050-dp-phy.yaml). The driver applies each
+ * list at the base of one register bank, and its bank numbers are the ADT reg
+ * indices of /arm-io/atc-phyN (bank 44, the PIPE handler, is usb-drdN reg[3]).
+ * The ADT records therefore copy verbatim (reg_offset 0). The window repeats the
+ * kernel's own bounds check: a core bank runs to the end of the "core" resource.
+ */
+struct t6050_atc_tunable {
+    const char *adt_name;
+    const char *fdt_name;
+    bool from_drd;        /* /arm-io/usb-drdN instead of /arm-io/atc-phyN */
+    const char *resource; /* reg-names entry that holds the bank */
+    u32 bank_offset;      /* bank start inside that resource */
+};
+
+static const struct t6050_atc_tunable t6050_atc_tunables[] = {
+    {"tunable_ATC0AXI2AF", "apple,tunable-axi2af", false, "axi2af", 0},             /* bank 41 */
+    {"tunable_ATC_FABRIC", "apple,tunable-fabric", false, "fabric", 0},             /* bank 40 */
+    {"tunable_ATC_COMMON_CFG", "apple,tunable-common-cfg", false, "common-cfg", 0}, /* bank 43 */
+    {"tunable_ATC0AXI2AF_LIOA", "apple,tunable-lioa", false, "lioa", 0},            /* bank 42 */
+    {"tunable_LN0_RX_CFG_TX_OF_RXCLK", "apple,tunable-lane0-rx-clock", false, "core", 0xd000},
+    {"tunable_LN1_RX_CFG_TX_OF_RXCLK", "apple,tunable-lane1-rx-clock", false, "core", 0x1d000},
+    {"tunable_LN0_RX_EQ_DFLT", "apple,tunable-lane0-rx-eq", false, "core", 0xb000},  /* bank 18 */
+    {"tunable_LN1_RX_EQ_DFLT", "apple,tunable-lane1-rx-eq", false, "core", 0x1b000}, /* bank 27 */
+    {"tunable_AUSPLL_CORE", "apple,tunable-auspll", false, "core", 0x3200},          /* bank 8 */
+    {"tunable_AUS40CMN_SHM", "apple,tunable-aus40cmn-shm", false, "core", 0xa00},    /* bank 5 */
+    {"tunable_CIO4PLL_CORE", "apple,tunable-cio4pll", false, "core", 0x3a00},        /* bank 10 */
+    {"tunable_USB2PHY_DFLT", "apple,tunable-usb2-default", false, "usb2phy", 0},     /* bank 0 */
+    {"tunable_USB2PHY_HOST", "apple,tunable-usb2-host", false, "usb2phy", 0},        /* bank 0 */
+    {"tunable_PIPE_HANDLER_DEFAULT", "apple,tunable-pipe-default", true, "pipehandler", 0},
+};
+
+static int t6050_fdt_reg(void *dt, int node, const char *name, u64 *addr, u64 *size)
+{
+    int parent = fdt_parent_offset(dt, node), len;
+    int index = fdt_stringlist_search(dt, node, "reg-names", name);
+    const fdt32_t *reg = fdt_getprop(dt, node, "reg", &len);
+
+    if (parent < 0 || fdt_address_cells(dt, parent) != 2 || fdt_size_cells(dt, parent) != 2 ||
+        index < 0 || !reg || len < 0 || len % 16 || index >= len / 16)
+        return -1;
+    reg += 4 * index;
+    *addr = ((u64)fdt32_ld(reg) << 32) | fdt32_ld(reg + 1);
+    *size = ((u64)fdt32_ld(reg + 2) << 32) | fdt32_ld(reg + 3);
+    return *size ? 0 : -1;
+}
+
+/* The DT node whose "core" window is ADT atc-phyN reg[2] (soc ranges are 1:1). */
+static int t6050_find_phy(void *dt, u64 core)
+{
+    int node = -1;
+
+    while ((node = fdt_node_offset_by_compatible(dt, node, "apple,t6050-combo-phy")) >= 0) {
+        u64 addr, size;
+        if (!t6050_fdt_reg(dt, node, "core", &addr, &size) && addr == core)
+            return node;
+    }
+    return -1;
+}
+
+static void dt_copy_atc_t6050_tunables(void *dt, int port)
+{
+    char atc_path[32], drd_path[32];
+    int atc_trace[8], atc, drd, phy;
+    u64 core, core_size;
+
+    snprintf(atc_path, sizeof(atc_path), "/arm-io/atc-phy%d", port);
+    snprintf(drd_path, sizeof(drd_path), "/arm-io/usb-drd%d", port);
+    atc = adt_path_offset_trace(adt, atc_path, atc_trace);
+    if (atc < 0 || !adt_is_compatible_at(adt, atc, "atc-phy,t6050", 0))
+        return;
+    if (adt_get_reg(adt, atc_trace, "reg", 2, &core, NULL) < 0) {
+        printf("kboot: %s: no core reg\n", atc_path);
+        return;
+    }
+    phy = t6050_find_phy(dt, core);
+    if (phy < 0)
+        return; /* port not described in this DT (debug port, HDMI, ...) */
+    drd = adt_path_offset(adt, drd_path);
+    if (drd < 0)
+        return; /* no USB controller (the HDMI port): nothing to give pipe-default */
+
+    /* Producer-owned: replace whatever a hand-made DT already carries. */
+    for (size_t i = 0; i < ARRAY_SIZE(t6050_atc_tunables); i++)
+        fdt_delprop(dt, phy, t6050_atc_tunables[i].fdt_name);
+
+    if (t6050_fdt_reg(dt, phy, "core", &core, &core_size))
+        goto cleanup;
+
+    for (size_t i = 0; i < ARRAY_SIZE(t6050_atc_tunables); i++) {
+        const struct t6050_atc_tunable *t = &t6050_atc_tunables[i];
+        int src = t->from_drd ? drd : atc;
+        u64 addr, size;
+
+        if (src < 0 || t6050_fdt_reg(dt, phy, t->resource, &addr, &size) ||
+            t->bank_offset + 4 > size)
+            goto cleanup;
+        /* Appending to this node's properties does not move the node's own offset. */
+        struct adt_tunable_info info = {t->adt_name, t->fdt_name, 0, size - t->bank_offset, true};
+        if (dt_append_atc_tunable(dt, src, phy, &info))
+            goto cleanup;
+    }
+    printf("kboot: %s: T6050 combo PHY tunables passed\n", atc_path);
+    return;
+
+cleanup:
+    /* A half-filled set would probe; none makes the driver fail cleanly (-ENOENT). */
+    for (size_t i = 0; i < ARRAY_SIZE(t6050_atc_tunables); i++)
+        fdt_delprop(dt, phy, t6050_atc_tunables[i].fdt_name);
+    printf("FDT: Unable to set up T6050 ATC tunables for %s - this USB-C port will not probe\n",
+           atc_path);
+}
+
 int kboot_setup_atc(void *dt)
 {
     char adt_path[32];
     char fdt_alias[32];
+
+    if (chip_id == T6050 || chip_id == T6051) {
+        for (int i = 0; i < MAX_ATC_DEVS; ++i)
+            dt_copy_atc_t6050_tunables(dt, i);
+        return 0;
+    }
 
     for (int i = 0; i < MAX_ATC_DEVS; ++i) {
         memset(adt_path, 0, sizeof(adt_path));
