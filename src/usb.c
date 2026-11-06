@@ -276,7 +276,7 @@ static bool usb_init_match(char *hpm_path, void *)
     // skip hpm0 depending on whether DEBUG_USB is in use or not
     if (idx < first_usb_iodev)
         return false;
-    if (idx > USB_IODEV_COUNT)
+    if (idx >= USB_IODEV_COUNT)
         return false;
     return true;
 }
@@ -285,11 +285,20 @@ static int usb_init_one(char *hpm_path, tps6598x_dev_t *tps, void *)
 {
     int idx = hpm_idx(hpm_path);
 
-    if (tps6598x_powerup(tps) < 0)
-        printf("usb: tps6598x_powerup failed for %s.\n", hpm_path);
+    bool ok = true;
 
-    if (tps6598x_disable_irqs(tps, &tps6598x_irq_state[idx]))
+    if (tps6598x_powerup(tps) < 0) {
+        printf("usb: tps6598x_powerup failed for %s.\n", hpm_path);
+        ok = false;
+    }
+
+    if (tps6598x_disable_irqs(tps, &tps6598x_irq_state[idx])) {
         printf("usb: unable to disable IRQ masks for %s.\n", hpm_path);
+        ok = false;
+    }
+
+    if (ok && chip_id == T6050)
+        printf("usb: %s: USB-PD controller in S0, IRQs masked\n", hpm_path);
 
     return 0;
 }
@@ -310,13 +319,12 @@ void usb_init(void)
     }
 
     /*
-     * T6050 (M5 Pro): probing the sn201202x USB-PD controllers on nub-spmi
-     * hangs usb_init before the proxy gadget comes up (seen by omarchy-m5 on
-     * main with gen-4 SPMI support). The gadget only needs the dwc3 phys
-     * brought up below, so skip the PD manager on T6050.
+     * T6050 (M5 Pro/Max) too: the sn201202x USB-PD controllers on the gen-4 nub-spmi buses
+     * are put in S0 like on every other machine, so a port in host mode gets VBUS. SPMI
+     * register selection, stale RX draining and every HPM command are bounded (spmi.c,
+     * tps6598x.c), so an unresponsive controller costs time instead of hanging usb_init.
      */
-    if (chip_id != T6050)
-        tps6598x_foreach_hpm(usb_init_match, usb_init_one, NULL, true);
+    tps6598x_foreach_hpm(usb_init_match, usb_init_one, NULL, true);
 
     for (int idx = 0; idx < USB_IODEV_COUNT; ++idx)
         usb_phy_bringup(idx); /* Fails on missing devices, just continue */

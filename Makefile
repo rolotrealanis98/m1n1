@@ -187,7 +187,7 @@ OBJECTS := \
 	startup.o \
 	string.o \
 	tunables.o tunables_static.o \
-	tps6598x.o \
+	tps6598x.o tps6598x_command_core.o \
 	uart.o \
 	uartproxy.o \
 	usb.o usb_dwc3.o \

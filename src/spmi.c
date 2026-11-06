@@ -144,6 +144,8 @@ static int wait_rx_fifo(spmi_dev_t *dev)
 static int raw_command(spmi_dev_t *dev, u8 addr, u8 opc, u16 extra, const u8 *data_in,
                        size_t len_in, u8 *data_out, size_t len_out)
 {
+    if (!dev || !dev->regs)
+        return -SPMI_ERR_INVALID_PARAM;
     if (addr != (addr & MASK(4))) {
         printf("spmi: Invalid slave address %u\n", addr);
         return -SPMI_ERR_INVALID_PARAM;
@@ -159,8 +161,14 @@ static int raw_command(spmi_dev_t *dev, u8 addr, u8 opc, u16 extra, const u8 *da
         return -SPMI_ERR_UNKNOWN;
     }
 
-    while (!(read32(dev->base + dev->regs->status_offset) & dev->regs->status_rx_empty_mask))
+    for (size_t i = 0;
+         !(read32(dev->base + dev->regs->status_offset) & dev->regs->status_rx_empty_mask); i++) {
+        if (i >= 64) {
+            printf("spmi: stale RX FIFO did not drain\n");
+            return -SPMI_ERR_UNKNOWN;
+        }
         printf("spmi: Leftover RX data: 0x%x\n", read32(dev->base + dev->regs->reply_offset));
+    }
 
     // write command
     write32(dev->base + dev->regs->cmd_offset, FIELD_PREP(dev->regs->cmd_extra_mask, extra) |
@@ -171,7 +179,7 @@ static int raw_command(spmi_dev_t *dev, u8 addr, u8 opc, u16 extra, const u8 *da
     for (size_t i = 0; i < len_in;) {
         u32 data = 0;
         for (size_t j = 0; (j < 4) && (i < len_in);)
-            data |= data_in[i++] << (j++ * 8);
+            data |= (u32)data_in[i++] << (j++ * 8);
         write32(dev->base + dev->regs->cmd_offset, data);
     }
 
