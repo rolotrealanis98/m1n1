@@ -34,6 +34,13 @@
  * refclk, internal reset release and PERST# release first, then the PIPE reset, port ready and
  * idle waits, then the root port's DBI writes; the internal reset's bit 16 is still cleared and
  * APPCLK bit 8 set, as Linux's adoption requires.
+ *
+ * Warm entry (N1_TRAIN_SMC only): after a restart the N1 may still run its firmware (the SoC reset
+ * does not reset it) and, if nothing reset the SoC's side, port 0 may still have a link. The entry
+ * state and gP13 are printed; a live link is parked first (LTSSM off, PERST# asserted, link down
+ * within 100 ms or STOP), a gP13 that reads released gets a 250 ms reset instead of 50 ms, and the
+ * endpoint must then answer in its ROM personality (106b:1900) or the training stops: an N1 that
+ * kept running is never handed to Linux.
  */
 
 #include "pcie_t6050.h"
@@ -316,8 +323,9 @@ enum {
     ST_SART = ST_PS + 6,
     ST_COUNT = ST_SART + 3 * SART_SLOTS,
 };
-static const char *const storage_ps[] = {"APCIE_ST0", "APCIE_ST1",     "FAB6_SOC",
-                                         "ANS",       "APCIE_SYS_ST0", "APCIE_SYS_ST1"};
+/* Name tables as char arrays: pointer tables cost a 24-byte relocation each (rodata is full) */
+static const char storage_ps[][16] = {"APCIE_ST0", "APCIE_ST1",     "FAB6_SOC",
+                                      "ANS",       "APCIE_SYS_ST0", "APCIE_SYS_ST1"};
 static u64 storage_addr[ST_COUNT];
 static u32 storage_ref[ST_COUNT];
 static bool storage_have_ref;
@@ -390,8 +398,8 @@ static int storage_check(const char *tag, bool reference)
 /* A: the GP power closure; the rest of it must already be active */
 static int stage_a(void)
 {
-    static const char *const keep[] = {"GPIO", "APCIE_GP", "FAB6_SOC", "APHY_GP_AUS5_A"};
-    static const char *const raise[] = {"APCIE_SYS_GP", "APCIE_PHY_SW", "APHY_GP_AUS5"};
+    static const char keep[][16] = {"GPIO", "APCIE_GP", "FAB6_SOC", "APHY_GP_AUS5_A"};
+    static const char raise[][16] = {"APCIE_SYS_GP", "APCIE_PHY_SW", "APHY_GP_AUS5"};
 
     /* The port still to be brought up is held in reset as iBoot leaves it */
     if (!(read32(pr.ctl + PORT_LINKSTS) & BIT(0)) &&
@@ -586,7 +594,7 @@ static int stage_e3(const struct port_regs *pp, u32 link_ms)
 }
 
 /* F: bus numbers and the endpoint's ID (the N1's ROM personality, function 0) */
-static int stage_f(const struct port_regs *pp)
+static int stage_f(const struct port_regs *pp, bool rom_only)
 {
     u64 p2 = pp->ctl, rp = pp->rp;
     u32 bus = pp->p->bus;
@@ -607,8 +615,8 @@ static int stage_f(const struct port_regs *pp)
         FAIL("secondary bus is %d, not %d\n", (buses >> 8) & 0xff, bus);
     }
     u32 id = read32(r.ecam + ((u64)bus << 20));
-    if (id != 0x1900106b && id != 0x1901106b)
-        FAIL("endpoint %02x:00.0 is 0x%08x, not the N1\n", bus, id);
+    if (id != 0x1900106b && (rom_only || id != 0x1901106b))
+        FAIL("endpoint %02x:00.0 is 0x%08x, not the N1 in its ROM\n", bus, id);
     printf("pcie-t6050: endpoint %02x:00.0 is 0x%08x\n", bus, id);
     return 0;
 }
@@ -628,6 +636,20 @@ static int stage_g(const struct port_regs *pp)
     return 0;
 }
 
+/* A live link at entry: LTSSM off, PERST# asserted, link down, so the cold path can run */
+static int port_park(const struct port_regs *pp)
+{
+    u32 old = read32(pp->perst);
+
+    write32(pp->ctl + PORT_LTSSMCTL, read32(pp->ctl + PORT_LTSSMCTL) & ~BIT(0));
+    if (old & GPIO_PERST_LOCK)
+        FAIL("PERST# pad locked\n");
+    write32(pp->perst, (old & ~GPIO_PERST_MASK) | GPIO_PERST_LOW);
+    TRY(poll_clear("link down after PERST#", pp->ctl + PORT_LINKSTS, BIT(0), 100));
+    mdelay(10);
+    return 0;
+}
+
 /* Pulse the N1's reset through the SMC, as J813: pKW4(key, template | 0), then template | 1 */
 static int n1_smc_release(const struct port_regs *pp)
 {
@@ -640,13 +662,16 @@ static int n1_smc_release(const struct port_regs *pp)
     rtkit_set_boot_timeout(0);
     if (!smc)
         FAIL("SMC not available\n");
+    u32 was = 0;
+    bool warm = !smc_read_u32(smc, pp->reset_key, &was) && was == (pp->reset_template | 1);
+    printf("pcie-t6050: gP13 reads 0x%08x%s\n", was, warm ? ": N1 released (warm)" : "");
     for (u32 level = 0; level < 2 && !ret; level++) {
         u32 value = pp->reset_template | level;
         ret = smc_write_u32(smc, pp->reset_key, value);
         printf("pcie-t6050: SMC key %c%c%c%c <- 0x%08x: %d\n", (pp->reset_key >> 24) & 0xff,
                (pp->reset_key >> 16) & 0xff, (pp->reset_key >> 8) & 0xff, pp->reset_key & 0xff,
                value, ret);
-        mdelay(50);
+        mdelay(warm && !level ? 250 : 50);
     }
     smc_shutdown(smc);
     if (ret) /* the line above shows the SMC's result; no more rodata: it shares a 128 KiB window */
@@ -670,6 +695,12 @@ int pcie_t6050_n1_train(unsigned int flags)
     TRY(storage_check("before", true));
 
     u64 p2 = pr.ctl;
+    printf("pcie-t6050: entry: linksts 0x%x ltssm 0x%x perst 0x%x\n", read32(p2 + PORT_LINKSTS),
+           read32(p2 + PORT_LTSSMCTL), read32(pr.perst));
+    if (read32(p2 + PORT_LINKSTS) & BIT(0) && flags & N1_TRAIN_SMC) {
+        printf("pcie-t6050: port 0 has a link: parking it first\n");
+        TRY(port_park(&pr));
+    }
     if (read32(p2 + PORT_LINKSTS) & BIT(0)) {
         printf("pcie-t6050: port 0 already has a link: adopting it\n");
     } else {
@@ -703,7 +734,7 @@ int pcie_t6050_n1_train(unsigned int flags)
         }
         TRY(stage_e3(&pr, flags & N1_TRAIN_SMC ? 1000 : 500));
     }
-    TRY(stage_f(&pr));
+    TRY(stage_f(&pr, flags & N1_TRAIN_SMC));
     TRY(storage_check("after F", false));
     TRY(stage_g(&pr));
     printf("pcie-t6050: port 0 up, %s at %02x:00.0\n", pr.p->endpoint, pr.p->bus);
