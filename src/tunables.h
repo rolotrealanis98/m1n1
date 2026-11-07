@@ -37,6 +37,22 @@ int tunables_apply_local(const char *path, const char *prop, u32 reg_idx);
  */
 int tunables_apply_local_addr(const char *path, const char *prop, uintptr_t base);
 
+/* Every local record of `prop` lies in [0, span) at its natural alignment.
+ * Returns 1 if the property is absent, 0 if valid, and -1 if malformed. */
+int tunables_validate_local(const char *path, const char *prop, u64 span);
+
+/* A bit that reads back 0 after a write (a strobe or write-only bit), measured per record */
+struct tunable_excuse {
+    u32 offset;
+    u64 bits;
+};
+
+/* Read back every local record of `prop` at `base`: its masked bits must hold the written value,
+ * less the `excuses` bits of that record (a list ending with bits 0, or NULL). Returns the number
+ * of records that differ, -1 without the property or for a record size it cannot read. */
+int tunables_check_local_addr(const char *path, const char *prop, uintptr_t base,
+                              const struct tunable_excuse *excuses);
+
 int tunables_apply_static(void);
 
 #endif

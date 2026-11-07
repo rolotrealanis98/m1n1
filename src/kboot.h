@@ -24,6 +24,7 @@ void kboot_set_initrd(void *start, size_t size);
 int kboot_set_chosen(const char *name, const char *value);
 int kboot_set_uboot(const char *name, const char *value);
 int kboot_prepare_dt(void *fdt);
+const char *kboot_get_chosen(const char *name);
 int kboot_boot(void *kernel);
 void *kboot_get_dt(void);
 

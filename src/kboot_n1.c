@@ -19,13 +19,15 @@
  *    Otherwise both stay disabled: Linux probes every enabled DART, and the DART of a port that is
  *    not up takes an SError.
  * The MAC addresses travel through the wifi0/bluetooth0 aliases (dt_set_mac_addresses()).
- * Nothing here trains a link; with no trained port the DT stays as it came, less the disabled
- * nodes it may have had enabled.
+ * With chosen.m5pro,n1=1 in the payload variables, apcie0 port 0 is first trained from cold
+ * (pcie_t6050.c); =2 also releases the N1's reset through the SMC before the training. Without
+ * the variable nothing here trains a link, and a port that is not up stays disabled.
  */
 
 #include "kboot_n1.h"
 #include "adt.h"
 #include "kboot.h"
+#include "pcie_t6050.h"
 #include "string.h"
 #include "utils.h"
 
@@ -220,6 +222,17 @@ int kboot_setup_n1(void *dt)
     }
     if (n1_set_control(dt, host))
         return -1;
+
+    const char *train = kboot_get_chosen("m5pro,n1");
+    if (train && (!strcmp(train, "1") || !strcmp(train, "2"))) {
+        printf("n1: chosen.m5pro,n1=%s: training apcie0 port 0%s\n", train,
+               train[0] == '2' ? " after the SMC reset release" : "");
+        if (pcie_t6050_n1_train(train[0] == '2'))
+            printf("n1: port 0 training stopped; booting without the N1\n");
+        host = fdt_node_offset_by_compatible(dt, -1, "apple,t6050-pcie");
+        if (host < 0)
+            return -1;
+    }
 
     /* Pass 1: the adopted root ports. Pass 2 re-finds every node, as each write moves offsets. */
     struct {

@@ -123,6 +123,18 @@ static bool kboot_show_notch(void)
     return false;
 }
 
+/* The value of payload variable chosen.<name>, or NULL */
+const char *kboot_get_chosen(const char *name)
+{
+    for (int i = 0; i < MAX_CHOSEN_PARAMS; i++) {
+        if (!chosen_params[i][0])
+            break;
+        if (!strcmp(chosen_params[i][0], name))
+            return chosen_params[i][1];
+    }
+    return NULL;
+}
+
 static int dt_set_rng_seed_sep(int node)
 {
     u64 kaslr_seed;
