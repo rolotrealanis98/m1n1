@@ -13,22 +13,28 @@
  *    root-port reset (the N1's post-ROM port cycle) from the ADT pci-bridge<n> node, as
  *    (offset, 4, mask, value) groups: apple,apcie-config-tunables, apple,pcie-rc-tunables and
  *    apple,pcie-rc-gen{3,4,5}-shadow-tunables;
- *  - each such root port, and the DART its endpoint's RID maps to, is enabled only if the port's
- *    link is up the way the kernel's adoption requires (root complex running, port ready, link up
- *    and not retraining, LTSSM on). The bus numbers are written if the root port has none yet.
- *    Otherwise both stay disabled: Linux probes every enabled DART, and the DART of a port that is
- *    not up takes an SError.
+ *  - each such root port, and the DART its endpoint's RID maps to, is enabled if the port's link
+ *    is up the way the kernel's adoption requires (root complex running, port ready, link up and
+ *    not retraining, LTSSM on). The bus numbers are written if the root port has none yet.
+ *    A port that is not up is enabled too if the kernel can train it: the root port names its
+ *    endpoint's power line (pwren-gpios) and the DART waits for its root complex
+ *    (apple,manual-availability). Otherwise both stay disabled: Linux probes every other enabled
+ *    DART at once, and the DART of a port that is not up takes an SError;
+ *  - the host gets the apcie0 lists the kernel's own train applies, as (offset, 4, mask, value)
+ *    groups: apple,tunable-{axi2af,cio3pllcore,pcieclkgen,phy,phy-ip-pll,phy-ip-auspma}, the
+ *    cio3pllcore offsets moved into the pcieclkgen window (+0x2200).
  * The MAC addresses travel through the wifi0/bluetooth0 aliases (dt_set_mac_addresses()).
  * With chosen.m5pro,n1=1 in the payload variables, apcie0 port 0 is first trained from cold
  * (pcie_t6050.c); =2 also releases the N1's reset through the SMC before the training. =3 and =4
  * are =1 and =2 with ANS started for the storage checks and stopped again after, for a stage-1 that
  * leaves ANS stopped. =5 is =4 with J813's port order (pcie_t6050.c). Without the variable
- * nothing here trains a link, and a port that is not up stays disabled.
+ * nothing here trains a link, and a port that is not up stays disabled unless the kernel trains it.
  */
 
 #include "kboot_n1.h"
 #include "adt.h"
 #include "kboot.h"
+#include "malloc.h"
 #include "pcie_t6050.h"
 #include "string.h"
 #include "utils.h"
@@ -102,14 +108,45 @@ static int n1_set_control(void *dt, int host)
         found++;
     }
     if (!found)
-        printf("n1: no pci106b,1900 control function below the T6050 host\n");
+        printf("n1: no N1 control function\n");
     return 0;
 }
 
-/* ADT pci-bridge<port> 24-byte tunable records -> (offset, 4, mask, value) cells on the DT port */
+/* ADT 24-byte tunable records `aprop` of ADT node `anode` -> (offset + add, 4, mask, value) cells */
+static int n1_copy_list(void *dt, int node, int anode, const char *aprop, const char *dprop,
+                        u32 add)
+{
+    u32 len;
+    const struct adt_tunable_local *t = adt_getprop(adt, anode, aprop, &len);
+    /* rodata and relocations share one 128 KiB window: one short message for every refusal */
+    if (!t || !len || len % sizeof(*t) || len / sizeof(*t) > 512) {
+        printf("n1: %s not copied\n", aprop);
+        return 0;
+    }
+    u32 n = len / sizeof(*t);
+    fdt32_t *cells = malloc(n * 4 * sizeof(fdt32_t));
+    if (!cells)
+        return -1;
+    bool ok = true;
+    for (u32 k = 0; k < n; k++) {
+        if (t[k].size != 4 || (t[k].offset & 3) || (t[k].mask >> 32) || (t[k].value >> 32))
+            ok = false;
+        cells[4 * k + 0] = cpu_to_fdt32(t[k].offset + add);
+        cells[4 * k + 1] = cpu_to_fdt32(4);
+        cells[4 * k + 2] = cpu_to_fdt32((u32)t[k].mask);
+        cells[4 * k + 3] = cpu_to_fdt32((u32)t[k].value);
+    }
+    int ret = ok ? fdt_setprop(dt, node, dprop, cells, n * 4 * sizeof(fdt32_t)) : 0;
+    if (!ok)
+        printf("n1: %s not copied\n", aprop);
+    free(cells);
+    return ret ? -1 : 0;
+}
+
+/* ADT pci-bridge<port> tunables -> apple,<name> on the DT root port */
 static int n1_copy_tunables(void *dt, int port_node, int port)
 {
-    static const char *const props[] = {
+    static const char props[][29] = {
         "apcie-config-tunables",        "pcie-rc-tunables",
         "pcie-rc-gen3-shadow-tunables", "pcie-rc-gen4-shadow-tunables",
         "pcie-rc-gen5-shadow-tunables",
@@ -123,30 +160,25 @@ static int n1_copy_tunables(void *dt, int port_node, int port)
         return 0;
     }
     for (size_t i = 0; i < ARRAY_SIZE(props); i++) {
-        u32 len;
-        const struct adt_tunable_local *t = adt_getprop(adt, anode, props[i], &len);
-        if (!t || !len || len % sizeof(*t) || len / sizeof(*t) > 16) {
-            printf("n1: %s %s missing or malformed, not copied\n", bridge, props[i]);
-            continue;
-        }
-        u32 n = len / sizeof(*t);
-        fdt32_t cells[16 * 4];
-        bool ok = true;
-        for (u32 k = 0; k < n; k++) {
-            if (t[k].size != 4 || (t[k].offset & 3) || (t[k].mask >> 32) || (t[k].value >> 32))
-                ok = false;
-            cells[4 * k + 0] = cpu_to_fdt32(t[k].offset);
-            cells[4 * k + 1] = cpu_to_fdt32(4);
-            cells[4 * k + 2] = cpu_to_fdt32((u32)t[k].mask);
-            cells[4 * k + 3] = cpu_to_fdt32((u32)t[k].value);
-        }
-        if (!ok) {
-            printf("n1: %s %s has a record the kernel does not take, not copied\n", bridge,
-                   props[i]);
-            continue;
-        }
         snprintf(dtname, sizeof(dtname), "apple,%s", props[i]);
-        if (fdt_setprop(dt, port_node, dtname, cells, n * 4 * sizeof(fdt32_t)))
+        if (n1_copy_list(dt, port_node, anode, props[i], dtname, 0))
+            return -1;
+    }
+    return 0;
+}
+
+/* ADT apcie0 host lists -> apple,tunable-<name> on the DT host, for the kernel's own train */
+static int n1_copy_host_tunables(void *dt, int host)
+{
+    static const char lists[][14] = {"axi2af", "cio3pllcore", "pcieclkgen",
+                                     "phy",    "phy-ip-pll",  "phy-ip-auspma"};
+    char aname[40], dname[40];
+    int anode = adt_path_offset(adt, apcie_path);
+
+    for (size_t i = 0; i < ARRAY_SIZE(lists); i++) {
+        snprintf(aname, sizeof(aname), "apcie-%s-tunables", lists[i]);
+        snprintf(dname, sizeof(dname), "apple,tunable-%s", lists[i]);
+        if (n1_copy_list(dt, host, anode, aname, dname, i == 1 ? 0x2200 : 0))
             return -1;
     }
     return 0;
@@ -222,7 +254,7 @@ int kboot_setup_n1(void *dt)
         printf("n1: no %s in the ADT\n", apcie_path);
         return 0;
     }
-    if (n1_set_control(dt, host))
+    if (n1_set_control(dt, host) || n1_copy_host_tunables(dt, host))
         return -1;
 
     const char *train = kboot_get_chosen("m5pro,n1");
@@ -272,16 +304,22 @@ int kboot_setup_n1(void *dt)
         int port = ports[i].port;
         u32 bus = ports[i].bus;
         bool up = n1_port_up(port, bus) == 1;
-        const char *status = up ? "okay" : "disabled";
 
         port_node = fdt_path_offset(dt, ports[i].path);
         if (port_node < 0 || n1_copy_tunables(dt, port_node, port))
             return -1;
+        /* Not up: left to the kernel's own train if it can do it (see the top of this file) */
         port_node = fdt_path_offset(dt, ports[i].path);
+        host = fdt_node_offset_by_compatible(dt, -1, "apple,t6050-pcie");
+        int dart = host < 0 ? host : n1_iommu_for_rid(dt, host, bus << 8);
+        bool kernel = !up && port_node >= 0 && dart >= 0 &&
+                      fdt_getprop(dt, port_node, "pwren-gpios", NULL) &&
+                      fdt_getprop(dt, dart, "apple,manual-availability", NULL);
+        const char *status = up || kernel ? "okay" : "disabled";
         if (port_node < 0 || fdt_setprop_string(dt, port_node, "status", status))
             return -1;
         host = fdt_node_offset_by_compatible(dt, -1, "apple,t6050-pcie");
-        int dart = host < 0 ? host : n1_iommu_for_rid(dt, host, bus << 8);
+        dart = host < 0 ? host : n1_iommu_for_rid(dt, host, bus << 8);
         if (dart >= 0 && fdt_setprop_string(dt, dart, "status", status))
             return -1;
         printf("n1: port %d %s: root port%s %s\n", port, up ? "up" : "not up",
