@@ -493,6 +493,14 @@ bool rtkit_start_ep(rtkit_dev_t *rtk, u8 ep)
     return true;
 }
 
+/* rtkit_boot()'s wait for HELLO and for each endpoint-map message */
+static u64 rtkit_boot_timeout = USEC_PER_SEC;
+
+void rtkit_set_boot_timeout(u64 us)
+{
+    rtkit_boot_timeout = us ? us : USEC_PER_SEC;
+}
+
 bool rtkit_boot(rtkit_dev_t *rtk)
 {
     struct asc_message msg;
@@ -508,7 +516,7 @@ bool rtkit_boot(rtkit_dev_t *rtk)
         return false;
     }
 
-    if (!asc_recv_timeout(rtk->asc, &msg, USEC_PER_SEC)) {
+    if (!asc_recv_timeout(rtk->asc, &msg, rtkit_boot_timeout)) {
         rtkit_printf("did not receive HELLO\n");
         return false;
     }
@@ -555,7 +563,7 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     bool has_oslog = false;
     bool got_epmap = false;
     while (!got_epmap) {
-        if (!asc_recv_timeout(rtk->asc, &msg, USEC_PER_SEC)) {
+        if (!asc_recv_timeout(rtk->asc, &msg, rtkit_boot_timeout)) {
             rtkit_printf("couldn't receive message while waiting for endpoint map\n");
             return false;
         }

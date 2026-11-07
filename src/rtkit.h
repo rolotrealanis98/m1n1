@@ -30,6 +30,8 @@ void rtkit_free(rtkit_dev_t *rtk);
 
 bool rtkit_start_ep(rtkit_dev_t *rtk, u8 ep);
 bool rtkit_boot(rtkit_dev_t *rtk);
+/* rtkit_boot()'s HELLO and endpoint-map wait in microseconds; 0 restores the 1 s default */
+void rtkit_set_boot_timeout(u64 us);
 
 bool rtkit_can_recv(rtkit_dev_t *rtk);
 
