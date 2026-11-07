@@ -26,6 +26,14 @@
  * same block, and stops ANS with nvme_shutdown(): Linux gets ANS as stage-1 leaves it today. If
  * storage is in doubt after the training, Linux could not mount its root, so this resets the SoC
  * through the watchdog instead: iBoot counts the failed boot, the A/B stage-1 boots its fallback.
+ *
+ * N1_TRAIN_SMC (=2, =4, =5): the N1's reset is pulsed through the SMC as Aura's J813 code does
+ * (aurora-silicon/aura 21c3f707e0): pci-bridge0 function-reset is pKW4("gP13", 0x00800000) on
+ * the J716s as on J813; write template | 0, 50 ms, template | 1, 50 ms, then 100 ms before the
+ * port reset, and allow 1 s for link up. N1_TRAIN_J813 (=5) also takes J813's port order: lane
+ * refclk, internal reset release and PERST# release first, then the PIPE reset, port ready and
+ * idle waits, then the root port's DBI writes; the internal reset's bit 16 is still cleared and
+ * APPCLK bit 8 set, as Linux's adoption requires.
  */
 
 #include "pcie_t6050.h"
@@ -278,9 +286,10 @@ static int find_port_regs(struct port_regs *pp)
     pp->perst = gpio_base + 4 * perst.pin;
     if (ADT_GETPROP(adt, bridge, "t-refclk-to-perst", &pp->refclk_to_perst_us) < 0)
         FAIL("%s has no t-refclk-to-perst\n", pp->bridge);
-    /* function-reset = pKW4(key, template) on the SMC PMU nub */
-    if (adt_getprop_copy(adt, bridge, "function-reset", &reset, sizeof(reset)) == 0 &&
-        reset.fourcc == SMC_FOURCC_PKW4) {
+    /* function-reset = pKW4(key, template) on the SMC PMU nub (J716s: "gP13", 0x00800000);
+     * adt_getprop_copy() returns the length on success */
+    int reset_len = adt_getprop_copy(adt, bridge, "function-reset", &reset, sizeof(reset));
+    if (reset_len == (int)sizeof(reset) && reset.fourcc == SMC_FOURCC_PKW4) {
         pp->reset_key = reset.pin;
         pp->reset_template = reset.flags;
     }
@@ -454,17 +463,30 @@ static int stage_b(const struct port_regs *pp)
     return 0;
 }
 
-/* C: port config tunables, app clock, internal reset handshake */
+/* C: port config tunables, app clock */
 static int stage_c(const struct port_regs *pp)
 {
     u64 p2 = pp->ctl;
 
     TRY(apply_tunables(pp->bridge, "apcie-config-tunables", p2, pp->ctl_span, NULL));
     TRY(rmw("APPCLK", p2 + PORT_APPCLK, 0, BIT(0)));
-    TRY(wait32("clk/rst bit 0 or 16 clear", p2 + PORT_CLKRST, BIT(0) | BIT(16), BIT(0) | BIT(16),
-               false, 10));
-    TRY(rmw("internal reset bit 0", p2 + PORT_INT_RESET, 0, BIT(0)));
-    TRY(poll_set("clk/rst bit 0", p2 + PORT_CLKRST, BIT(0), 20));
+    return wait32("clk/rst bit 0 or 16 clear", p2 + PORT_CLKRST, BIT(0) | BIT(16), BIT(0) | BIT(16),
+                  false, 10);
+}
+
+static int internal_reset_release(const struct port_regs *pp)
+{
+    return rmw("internal reset bit 0", pp->ctl + PORT_INT_RESET, 0, BIT(0));
+}
+
+/* C2: internal reset handshake (the release itself first unless `released`) */
+static int stage_c2(const struct port_regs *pp, bool released)
+{
+    u64 p2 = pp->ctl;
+
+    if (!released)
+        TRY(internal_reset_release(pp));
+    TRY(poll_set("clk/rst bit 0", p2 + PORT_CLKRST, BIT(0), released ? 100 : 20));
     TRY(rmw("internal reset bit 16 clear", p2 + PORT_INT_RESET, BIT(16), 0));
     TRY(poll_set("port ready", p2 + PORT_STATUS, BIT(0), 250));
     TRY(rmw("APPCLK bit 8", p2 + PORT_APPCLK, 0, BIT(8)));
@@ -523,11 +545,9 @@ static int stage_d(const struct port_regs *pp)
     return 0;
 }
 
-/* E: lane PHY, refclk, PERST# release, LTSSM, link up */
+/* E: lane PHY and refclk */
 static int stage_e(const struct port_regs *pp)
 {
-    u64 p2 = pp->ctl;
-
     if (read32(pp->lane) & BIT(28))
         FAIL("lane PHY bit 28 set\n");
     TRY(rmw("lane clk0 req", pp->lane, 0, BIT(0)));
@@ -540,7 +560,12 @@ static int stage_e(const struct port_regs *pp)
     TRY(rmw("lane bit 10", pp->lane, 0, BIT(10)));
     /* refclk to PERST#: the bridge's t-refclk-to-perst (J716s pci-bridge0: 100 us), >= 1 ms */
     udelay(max(pp->refclk_to_perst_us, 1000u));
+    return 0;
+}
 
+/* E2: PERST# release */
+static int stage_e2(const struct port_regs *pp)
+{
     u32 old = read32(pp->perst);
     if (old & GPIO_PERST_LOCK)
         FAIL("PERST# pad locked\n");
@@ -548,9 +573,14 @@ static int stage_e(const struct port_regs *pp)
     write32(pp->perst, want);
     if ((read32(pp->perst) ^ want) & GPIO_PERST_MASK)
         FAIL("PERST# readback 0x%x\n", read32(pp->perst));
+    return 0;
+}
 
-    TRY(rmw("LTSSM start", p2 + PORT_LTSSMCTL, 0, BIT(0)));
-    TRY(poll_set("link up", p2 + PORT_LINKSTS, BIT(0), 500));
+/* E3: LTSSM, link up */
+static int stage_e3(const struct port_regs *pp, u32 link_ms)
+{
+    TRY(rmw("LTSSM start", pp->ctl + PORT_LTSSMCTL, 0, BIT(0)));
+    TRY(poll_set("link up", pp->ctl + PORT_LINKSTS, BIT(0), link_ms));
     mdelay(100);
     return 0;
 }
@@ -598,27 +628,34 @@ static int stage_g(const struct port_regs *pp)
     return 0;
 }
 
-/* Release the N1's reset through the SMC: pKW4(key, template | 1), as dcp.c raises its rails */
+/* Pulse the N1's reset through the SMC, as J813: pKW4(key, template | 0), then template | 1 */
 static int n1_smc_release(const struct port_regs *pp)
 {
+    int ret = 0;
+
     if (!pp->reset_key)
         FAIL("%s function-reset is not an SMC pKW4\n", pp->bridge);
+    rtkit_set_boot_timeout(10 * USEC_PER_SEC);
     smc_dev_t *smc = smc_init();
+    rtkit_set_boot_timeout(0);
     if (!smc)
         FAIL("SMC not available\n");
-    u32 value = pp->reset_template | 1;
-    int ret = smc_write_u32(smc, pp->reset_key, value);
+    for (u32 level = 0; level < 2 && !ret; level++) {
+        u32 value = pp->reset_template | level;
+        ret = smc_write_u32(smc, pp->reset_key, value);
+        printf("pcie-t6050: SMC key %c%c%c%c <- 0x%08x: %d\n", (pp->reset_key >> 24) & 0xff,
+               (pp->reset_key >> 16) & 0xff, (pp->reset_key >> 8) & 0xff, pp->reset_key & 0xff,
+               value, ret);
+        mdelay(50);
+    }
     smc_shutdown(smc);
-    printf("pcie-t6050: SMC key %c%c%c%c <- 0x%08x: %d\n", (pp->reset_key >> 24) & 0xff,
-           (pp->reset_key >> 16) & 0xff, (pp->reset_key >> 8) & 0xff, pp->reset_key & 0xff, value,
-           ret);
-    if (ret)
+    if (ret) /* the line above shows the SMC's result; no more rodata: it shares a 128 KiB window */
         return -1;
-    mdelay(10);
+    mdelay(100); /* J813: before the port reset */
     return 0;
 }
 
-int pcie_t6050_n1_train(bool smc_release)
+int pcie_t6050_n1_train(unsigned int flags)
 {
     static int state = 1;
 
@@ -648,12 +685,23 @@ int pcie_t6050_n1_train(bool smc_release)
         } else {
             printf("pcie-t6050: shared GP init already in place\n");
         }
-        if (smc_release)
+        if (flags & N1_TRAIN_SMC)
             TRY(n1_smc_release(&pr));
         TRY(stage_b(&pr));
         TRY(stage_c(&pr));
-        TRY(stage_d(&pr));
-        TRY(stage_e(&pr));
+        if (flags & N1_TRAIN_J813) {
+            TRY(stage_e(&pr));
+            TRY(internal_reset_release(&pr));
+            TRY(stage_e2(&pr));
+            TRY(stage_c2(&pr, true));
+            TRY(stage_d(&pr));
+        } else {
+            TRY(stage_c2(&pr, false));
+            TRY(stage_d(&pr));
+            TRY(stage_e(&pr));
+            TRY(stage_e2(&pr));
+        }
+        TRY(stage_e3(&pr, flags & N1_TRAIN_SMC ? 1000 : 500));
     }
     TRY(stage_f(&pr));
     TRY(storage_check("after F", false));
@@ -668,22 +716,21 @@ int pcie_t6050_n1_train(bool smc_release)
 /* Storage is in doubt and Linux could not mount its root: reset, so the A/B stage-1 falls back */
 static void __attribute__((noreturn)) storage_lost(const char *why)
 {
-    printf("%sstorage lost (%s): watchdog reset in 15 s, stage-1 then boots its fallback\n",
-           stop_prefix, why);
+    printf("%sstorage lost (%s): watchdog reset in 15 s\n", stop_prefix, why);
     mdelay(15000);
     wdt_reboot();
     while (true)
         ;
 }
 
-int pcie_t6050_n1_train_ans(bool smc_release)
+int pcie_t6050_n1_train_ans(unsigned int flags)
 {
     const u32 nsid = 1, lba = 1; /* the GPT header of the 4 KiB-block namespace */
 
     TRY(storage_find());
     if (ANS_RUNNING()) {
-        printf("pcie-t6050: ANS already running: training as =1/=2\n");
-        return pcie_t6050_n1_train(smc_release);
+        printf("pcie-t6050: ANS already running\n");
+        return pcie_t6050_n1_train(flags);
     }
 
     printf("pcie-t6050: ANS stopped (0x%x): starting it\n", read32(storage_addr[ST_ANS_CTRL]));
@@ -707,7 +754,7 @@ int pcie_t6050_n1_train_ans(bool smc_release)
     printf("pcie-t6050: NVMe block %u read (%s)\n", lba,
            memcmp(blk, "EFI PART", 8) ? "no GPT signature" : "GPT header");
 
-    int ret = pcie_t6050_n1_train(smc_release);
+    int ret = pcie_t6050_n1_train(flags);
 
     /* Whatever the outcome: the same storage registers, the same block, read through ANS */
     if (storage_have_ref && storage_check("after training", false))

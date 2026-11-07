@@ -22,8 +22,8 @@
  * With chosen.m5pro,n1=1 in the payload variables, apcie0 port 0 is first trained from cold
  * (pcie_t6050.c); =2 also releases the N1's reset through the SMC before the training. =3 and =4
  * are =1 and =2 with ANS started for the storage checks and stopped again after, for a stage-1 that
- * leaves ANS stopped. Without the variable nothing here trains a link, and a port that is not up
- * stays disabled.
+ * leaves ANS stopped. =5 is =4 with J813's port order (pcie_t6050.c). Without the variable
+ * nothing here trains a link, and a port that is not up stays disabled.
  */
 
 #include "kboot_n1.h"
@@ -226,12 +226,15 @@ int kboot_setup_n1(void *dt)
         return -1;
 
     const char *train = kboot_get_chosen("m5pro,n1");
-    int mode = train && train[0] >= '1' && train[0] <= '4' && !train[1] ? train[0] - '0' : 0;
+    int mode = train && train[0] >= '1' && train[0] <= '5' && !train[1] ? train[0] - '0' : 0;
     if (mode) {
-        bool smc = mode == 2 || mode == 4;
-        printf("n1: chosen.m5pro,n1=%s: training apcie0 port 0%s%s\n", train,
-               mode >= 3 ? " with ANS started" : "", smc ? " after the SMC reset release" : "");
-        if (mode >= 3 ? pcie_t6050_n1_train_ans(smc) : pcie_t6050_n1_train(smc))
+        unsigned int flags =
+            (mode == 2 || mode >= 4 ? N1_TRAIN_SMC : 0) | (mode == 5 ? N1_TRAIN_J813 : 0);
+        printf("n1: chosen.m5pro,n1=%s: training apcie0 port 0%s%s%s\n", train,
+               mode >= 3 ? " with ANS started" : "",
+               flags & N1_TRAIN_SMC ? " after the SMC reset release" : "",
+               flags & N1_TRAIN_J813 ? ", J813 order" : "");
+        if (mode >= 3 ? pcie_t6050_n1_train_ans(flags) : pcie_t6050_n1_train(flags))
             printf("n1: port 0 training stopped; booting without the N1\n");
         host = fdt_node_offset_by_compatible(dt, -1, "apple,t6050-pcie");
         if (host < 0)
