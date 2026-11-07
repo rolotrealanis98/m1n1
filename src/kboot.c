@@ -2211,8 +2211,322 @@ static struct disp_mapping disp_reserved_regions_t602x[] = {
     {"region-id-157", "region157", true, true, false},
 };
 
+/*
+ * T6050 (M5 Pro/Max, J716s): every running coprocessor's log segment, and the internal display as
+ * iBoot leaves it.
+ *
+ * iBoot puts the __OS_LOG segment (segment-ranges flags 0xa) of each coprocessor it leaves running
+ * (dcp, dcpext0..3, aop, mtp, auss-cpu0) in DRAM it then hands to the OS, and those coprocessors keep
+ * writing it. On a J716s 27.3 beta 1 stub they sit at 0x10006020000..0x10006126514, inside the
+ * usable RAM this loader publishes. Reserve each one, no-map, by physical address. Nothing is
+ * written to the hardware. (Aura does the same for J775D: dt_reserve_t6050_oslogs().)
+ */
+static int dt_reserve_t6050_oslogs_of(int at, u64 ram_lo, u64 ram_hi)
+{
+    u32 len = 0;
+    int n = 0;
+    const struct adt_segment_ranges *seg = adt_getprop(adt, at, "segment-ranges", &len);
+
+    if (!seg || !len || len % sizeof(*seg))
+        return 0;
+    for (u32 i = 0; i < len / sizeof(*seg); i++) {
+        struct adt_segment_ranges r;
+        memcpy(&r, &seg[i], sizeof(r));
+        if (r.unk != 0xa || !r.size || r.phys >= ram_hi || r.phys + r.size <= ram_lo)
+            continue;
+        u64 base = ALIGN_DOWN(r.phys, SZ_16K);
+        u64 size = ALIGN_UP(r.phys + r.size, SZ_16K) - base;
+        char name[32];
+        snprintf(name, sizeof(name), "os-log@%lx", base);
+        int resv = fdt_path_offset(dt, "/reserved-memory");
+        /* The owner (dcp, aop) and its nub (iop-dcp-nub) repeat the same segments. */
+        if (resv >= 0 && fdt_subnode_offset(dt, resv, name) >= 0)
+            continue;
+        if (dt_get_or_add_reserved_mem(name, "apple,os-log", true, base, size) < 0)
+            bail("FDT: T6050: could not reserve %s's __OS_LOG at 0x%lx\n", adt_get_name(adt, at),
+                 r.phys);
+        printf("FDT: T6050: %s __OS_LOG 0x%lx+0x%lx reserved\n", adt_get_name(adt, at), base, size);
+        n++;
+    }
+    return n;
+}
+
+static int dt_reserve_t6050_oslogs(void)
+{
+    if (chip_id != T6050)
+        return 0;
+
+    u64 ram_lo = cur_boot_args.phys_base, ram_hi = ram_lo + cur_boot_args.mem_size;
+    int total = 0, dev = adt_path_offset(adt, "/arm-io");
+    if (dev < 0)
+        return 0;
+
+    ADT_FOREACH_CHILD(adt, dev)
+    {
+        int n = dt_reserve_t6050_oslogs_of(dev, ram_lo, ram_hi);
+        int nub = adt_get_child_count(adt, dev) ? adt_first_child_offset(adt, dev) : -1;
+        for (int k = nub < 0 ? 0 : adt_get_child_count(adt, dev); n >= 0 && k--;
+             nub = adt_next_sibling_offset(adt, nub)) {
+            int m = dt_reserve_t6050_oslogs_of(nub, ram_lo, ram_hi);
+            n = m < 0 ? m : n + m;
+        }
+        if (n < 0)
+            return -1;
+        total += n;
+    }
+    printf("FDT: T6050: reserved %d coprocessor __OS_LOG segments in RAM\n", total);
+    return 0;
+}
+
+/*
+ * The internal display (dcp + disp0), read as iBoot left it: the ASC's CPU control and status, the
+ * PROTECT of dart-dcp and dart-disp0, and the TCR/TTBR of the streams the ADT gives page tables
+ * (DCP SID 23 on dart-dcp; scanout SID 0 and PIODMA SID 16 on dart-disp0) beside the ADT's
+ * l1-tt-N. Every read is guarded; nothing is written. Logged on every T6050 boot.
+ *
+ * With chosen.m5,t6050-display=1, and only when the DCP runs and both DARTs are locked with those
+ * three streams translating on four-level tables at the ADT's roots: reserve /vram (no-map,
+ * "framebuffer"), give it to the dcp node and the display subsystem as their "framebuffer"
+ * memory-region, publish the stub's firmware as apple,firmware-version/-compat, and enable the
+ * dcp node, its mailbox, both DARTs and the display subsystem, all of which the DT carries
+ * disabled. The DART tables, firmware segments and /vram lie above the RAM this loader publishes,
+ * so nothing else needs reserving; the DARTs are never initialised, walked or shut down here
+ * (dt_add_reserved_regions() would do all three).
+ *
+ * apple,firmware-compat is the stub's own version, so Aurora's driver (which takes "27.0.0" only)
+ * refuses a 27.3 beta stub at probe, before it touches the DCP. chosen.m5,t6050-dcp-compat=27.0.0
+ * publishes <27 0 0> instead: that claims an ABI this firmware was not built for; experiment only.
+ */
+#define T6050_ASC_CPU_CONTROL     0x44
+#define T6050_ASC_CPU_STATUS      0x48
+#define T6050_ASC_CPU_CONTROL_RUN BIT(4)
+#define T6050_DART_PROTECT        0x200
+#define T6050_DART_PROTECT_LOCK   BIT(0)
+#define T6050_DART_TCR(sid)       (0x1000 + 4 * (sid))
+#define T6050_DART_TTBR(sid)      (0x1400 + 4 * (sid))
+#define T6050_DART_TCR_TRANSLATE  BIT(0)
+#define T6050_DART_TCR_FOUR_LEVEL BIT(3)
+#define T6050_DART_TTBR_VALID     BIT(0)
+#define T6050_DART_TTBR_ADDR      GENMASK(29, 2)
+#define T6050_DART_TTBR_SHIFT     14
+
+struct t6050_disp_sid {
+    u32 sid, tcr, ttbr;
+    u64 root, l1;
+    bool ok;
+};
+
+struct t6050_disp_state {
+    u64 coproc, dart_dcp, dart_disp;
+    u32 ctl, st, protect_dcp, protect_disp;
+    bool read, running;
+    struct t6050_disp_sid sid[3];
+};
+
+static int t6050_adt_reg(const char *path, int idx, u64 *addr)
+{
+    int p[8];
+
+    if (adt_path_offset_trace(adt, path, p) < 0)
+        return -1;
+    return adt_get_reg(adt, p, "reg", idx, addr, NULL) < 0 ? -1 : 0;
+}
+
+/* read32() with an exception guard: false if the access faulted */
+static bool t6050_read32(u64 addr, u32 *val)
+{
+    exc_count = 0;
+    exc_guard = GUARD_SKIP | GUARD_SILENT;
+    *val = read32(addr);
+    sysop("dsb sy");
+    sysop("isb");
+    exc_guard = GUARD_OFF;
+    return exc_count == 0;
+}
+
+static bool t6050_disp_stream(const char *dart_path, u64 base, struct t6050_disp_sid *s)
+{
+    char prop[16];
+    u64 l1[2] = {0, 0};
+    int node = adt_path_offset(adt, dart_path);
+
+    snprintf(prop, sizeof(prop), "l1-tt-%u", s->sid);
+    if (node >= 0 && ADT_GETPROP_ARRAY(adt, node, prop, l1) == sizeof(l1))
+        s->l1 = l1[0];
+    if (!t6050_read32(base + T6050_DART_TCR(s->sid), &s->tcr) ||
+        !t6050_read32(base + T6050_DART_TTBR(s->sid), &s->ttbr)) {
+        printf("DCP: T6050: %s SID %u: reading TCR/TTBR faulted\n", dart_path, s->sid);
+        return false;
+    }
+    s->root = (u64)FIELD_GET(T6050_DART_TTBR_ADDR, s->ttbr) << T6050_DART_TTBR_SHIFT;
+    s->ok = s->tcr == (T6050_DART_TCR_TRANSLATE | T6050_DART_TCR_FOUR_LEVEL) &&
+            (s->ttbr & T6050_DART_TTBR_VALID) && s->l1 && s->root == s->l1;
+    printf("DCP: T6050: %s SID %u: TCR 0x%x TTBR 0x%x (root 0x%lx), ADT l1-tt 0x%lx: %s\n",
+           dart_path, s->sid, s->tcr, s->ttbr, s->root, s->l1,
+           !(s->ttbr & T6050_DART_TTBR_VALID) ? "no table"
+           : !s->ok                           ? "NOT four-level on the ADT's table"
+                                              : "four-level, the ADT's table");
+    return true;
+}
+
+static void t6050_disp_read(struct t6050_disp_state *e)
+{
+    memset(e, 0, sizeof(*e));
+    e->sid[0].sid = 23;
+    e->sid[1].sid = 0;
+    e->sid[2].sid = 16;
+    if (t6050_adt_reg("/arm-io/dcp", 0, &e->coproc) ||
+        t6050_adt_reg("/arm-io/dart-dcp", 0, &e->dart_dcp) ||
+        t6050_adt_reg("/arm-io/dart-disp0", 0, &e->dart_disp)) {
+        printf("DCP: T6050: dcp, dart-dcp or dart-disp0 missing from the ADT\n");
+        return;
+    }
+    if (!t6050_read32(e->coproc + T6050_ASC_CPU_CONTROL, &e->ctl) ||
+        !t6050_read32(e->coproc + T6050_ASC_CPU_STATUS, &e->st) ||
+        !t6050_read32(e->dart_dcp + T6050_DART_PROTECT, &e->protect_dcp) ||
+        !t6050_read32(e->dart_disp + T6050_DART_PROTECT, &e->protect_disp)) {
+        printf("DCP: T6050: reading the DCP ASC or DART PROTECT faulted\n");
+        return;
+    }
+    e->running = e->ctl & T6050_ASC_CPU_CONTROL_RUN;
+    printf("DCP: T6050: dcp at 0x%lx: CPU_CONTROL 0x%x (%s) CPU_STATUS 0x%x; PROTECT dart-dcp "
+           "0x%x dart-disp0 0x%x\n",
+           e->coproc, e->ctl, e->running ? "running" : "stopped", e->st, e->protect_dcp,
+           e->protect_disp);
+    if (!t6050_disp_stream("/arm-io/dart-dcp", e->dart_dcp, &e->sid[0]) ||
+        !t6050_disp_stream("/arm-io/dart-disp0", e->dart_disp, &e->sid[1]) ||
+        !t6050_disp_stream("/arm-io/dart-disp0", e->dart_disp, &e->sid[2]))
+        return;
+    e->read = true;
+}
+
+/* The FDT node the first phandle of @prop names */
+static int t6050_fdt_ref(int node, const char *prop)
+{
+    int len;
+    const fdt32_t *cell = fdt_getprop(dt, node, prop, &len);
+
+    return cell && len >= 4 ? fdt_node_offset_by_phandle(dt, fdt32_ld(cell)) : -1;
+}
+
+static bool t6050_chosen_is(const char *prop, const char *want)
+{
+    int chosen = fdt_path_offset(dt, "/chosen"), len = 0;
+    const char *val = chosen >= 0 ? fdt_getprop(dt, chosen, prop, &len) : NULL;
+
+    return val && len == (int)strlen(want) + 1 && !strcmp(val, want);
+}
+
+static int dt_set_display_t6050(void)
+{
+    static const struct fw_version_info compat_27_0 = {V27_0, "27.0", {27, 0, 0}, 3, "override"};
+    struct t6050_disp_state e;
+
+    t6050_disp_read(&e);
+
+    if (!t6050_chosen_is("m5,t6050-display", "1")) {
+        printf("DCP: T6050: not armed (no chosen.m5,t6050-display=1): no display handoff\n");
+        return 0;
+    }
+    if (os_firmware.version == V_UNKNOWN) {
+        printf("DCP: T6050: OS firmware %s is not in the firmware table: no handoff\n",
+               os_firmware.iboot);
+        return 0;
+    }
+    if (!e.read || !e.running || !(e.protect_dcp & T6050_DART_PROTECT_LOCK) ||
+        !(e.protect_disp & T6050_DART_PROTECT_LOCK) || !e.sid[0].ok || !e.sid[1].ok ||
+        !e.sid[2].ok) {
+        printf("DCP: T6050: dcp is not running on locked four-level ADT tables: no handoff\n");
+        return 0;
+    }
+
+    /* Everything is found and checked before the DT is changed. */
+    int dcp = fdt_node_offset_by_compatible(dt, -1, "apple,t6050-dcp");
+    int disp = fdt_node_offset_by_compatible(dt, -1, "apple,display-subsystem");
+    if (dcp < 0 || disp < 0 || dt_get_address(dt, dcp) != e.coproc) {
+        printf("DCP: T6050: the DT has no apple,t6050-dcp at 0x%lx or no display subsystem: no "
+               "handoff\n",
+               e.coproc);
+        return 0;
+    }
+    int pio = fdt_subnode_offset(dt, dcp, "piodma");
+    int dart_dcp = t6050_fdt_ref(dcp, "iommus");
+    int dart_disp = t6050_fdt_ref(disp, "iommus");
+    int mbox = t6050_fdt_ref(dcp, "mboxes");
+    if (pio < 0 || dart_dcp < 0 || dart_disp < 0 || mbox < 0 ||
+        t6050_fdt_ref(pio, "iommus") != dart_disp || dt_get_address(dt, dart_dcp) != e.dart_dcp ||
+        dt_get_address(dt, dart_disp) != e.dart_disp) {
+        printf("DCP: T6050: the dcp node's DARTs, mailbox or piodma are not the ADT's: no "
+               "handoff\n");
+        return 0;
+    }
+    int vp[8];
+    u64 vram, vram_size;
+    if (adt_path_offset_trace(adt, "/vram", vp) < 0 ||
+        adt_get_reg(adt, vp, "reg", 0, &vram, &vram_size) < 0 || !vram_size ||
+        vram < cur_boot_args.phys_base + cur_boot_args.mem_size) {
+        printf("DCP: T6050: no ADT /vram above the OS's RAM: no handoff\n");
+        return 0;
+    }
+    const struct fw_version_info *compat = &os_firmware;
+    if (t6050_chosen_is("m5,t6050-dcp-compat", "27.0.0")) {
+        printf("DCP: T6050: OVERRIDE: publishing firmware-compat 27.0.0 for OS firmware %s\n",
+               os_firmware.string);
+        compat = &compat_27_0;
+    }
+
+    /* Node offsets move as properties are added: re-find each node by its phandle. */
+    u32 ph_dcp = fdt_get_phandle(dt, dcp), ph_disp = fdt_get_phandle(dt, disp);
+    u32 ph_on[] = {ph_dcp, ph_disp, fdt_get_phandle(dt, dart_dcp), fdt_get_phandle(dt, dart_disp),
+                   fdt_get_phandle(dt, mbox)};
+    for (unsigned i = 0; i < ARRAY_SIZE(ph_on); i++)
+        if (!ph_on[i])
+            bail("DCP: T6050: a display node has no phandle\n");
+
+    char name[32];
+    snprintf(name, sizeof(name), "vram@%lx", vram);
+    int fb = dt_get_or_add_reserved_mem(name, "framebuffer", true, vram, vram_size);
+    if (fb < 0)
+        return -1;
+    u32 ph_fb = fdt_get_phandle(dt, fb);
+    u32 ph_mr[] = {ph_dcp, ph_disp};
+    for (unsigned i = 0; i < ARRAY_SIZE(ph_mr); i++) {
+        int at = fdt_node_offset_by_phandle(dt, ph_mr[i]);
+        if (at < 0 || fdt_setprop_u32(dt, at, "memory-region", ph_fb) ||
+            fdt_setprop_string(dt, at, "memory-region-names", "framebuffer"))
+            bail("DCP: T6050: could not attach the framebuffer region\n");
+    }
+    dcp = fdt_node_offset_by_phandle(dt, ph_dcp);
+    if (dcp < 0 || firmware_set_fdt(dt, dcp, "apple,firmware-version", &os_firmware) ||
+        firmware_set_fdt(dt, fdt_node_offset_by_phandle(dt, ph_dcp), "apple,firmware-compat",
+                         compat))
+        bail("DCP: T6050: could not publish the firmware version\n");
+    for (unsigned i = 0; i < ARRAY_SIZE(ph_on); i++) {
+        int at = fdt_node_offset_by_phandle(dt, ph_on[i]);
+        if (at < 0 || fdt_setprop_string(dt, at, "status", "okay"))
+            bail("DCP: T6050: could not enable a display node\n");
+    }
+    printf("DCP: T6050: dcp handed off: vram 0x%lx+0x%lx reserved as its framebuffer; "
+           "firmware-version %s, firmware-compat %d.%d.%d; dcp, mailbox, dart-dcp, dart-disp0 and "
+           "the display subsystem enabled\n",
+           vram, vram_size, os_firmware.string, compat->num[0], compat->num[1], compat->num[2]);
+    return 0;
+}
+
 static int dt_set_display(void)
 {
+    /*
+     * T6050: read dart-disp0's PROTECT as iBoot left it before the lock below can set it, and
+     * never go through dt_add_reserved_regions(), which initialises, walks and shuts down the
+     * DARTs the running DCP depends on.
+     */
+    if (chip_id == T6050) {
+        if (dt_reserve_t6050_oslogs() || dt_set_display_t6050())
+            return -1;
+        dart_lock_adt("/arm-io/dart-disp0", 0);
+        return 0;
+    }
+
     /* lock dart-disp0 to prevent old software from resetting it */
     dart_lock_adt("/arm-io/dart-disp0", 0);
     const char compat_piodma_alias[] = "disp0_piodma";
