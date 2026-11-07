@@ -2293,9 +2293,10 @@ static int dt_reserve_t6050_oslogs(void)
  * so nothing else needs reserving; the DARTs are never initialised, walked or shut down here
  * (dt_add_reserved_regions() would do all three).
  *
- * apple,firmware-compat is the stub's own version, so Aurora's driver (which takes "27.0.0" only)
- * refuses a 27.3 beta stub at probe, before it touches the DCP. chosen.m5,t6050-dcp-compat=27.0.0
- * publishes <27 0 0> instead: that claims an ABI this firmware was not built for; experiment only.
+ * apple,firmware-compat names the DCP interface the stub's firmware implements: the stub's own
+ * version, except that the 27.3 beta 1 stub publishes <27 3 0>, the interface read from its DCP
+ * firmware (IOMFB method tags and swap layout). chosen.m5,t6050-dcp-compat=27.0.0 publishes
+ * <27 0 0> instead: that claims an ABI this firmware was not built for; experiment only.
  */
 #define T6050_ASC_CPU_CONTROL     0x44
 #define T6050_ASC_CPU_STATUS      0x48
@@ -2420,6 +2421,7 @@ static bool t6050_chosen_is(const char *prop, const char *want)
 static int dt_set_display_t6050(void)
 {
     static const struct fw_version_info compat_27_0 = {V27_0, "27.0", {27, 0, 0}, 3, "override"};
+    static const struct fw_version_info compat_27_3 = {V27_3B1, "27.3", {27, 3, 0}, 3, "compat"};
     struct t6050_disp_state e;
 
     t6050_disp_read(&e);
@@ -2468,7 +2470,8 @@ static int dt_set_display_t6050(void)
         printf("DCP: T6050: no ADT /vram above the OS's RAM: no handoff\n");
         return 0;
     }
-    const struct fw_version_info *compat = &os_firmware;
+    const struct fw_version_info *compat =
+        os_firmware.version == V27_3B1 ? &compat_27_3 : &os_firmware;
     if (t6050_chosen_is("m5,t6050-dcp-compat", "27.0.0")) {
         printf("DCP: T6050: OVERRIDE: publishing firmware-compat 27.0.0 for OS firmware %s\n",
                os_firmware.string);
