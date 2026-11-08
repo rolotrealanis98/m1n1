@@ -29,6 +29,7 @@ from m1n1.utils import *
 from m1n1.shell import run_shell
 from m1n1.sysreg import *
 from m1n1.hv import HV
+from m1n1.hv.types import TraceMode
 
 # must match src/hv/win/hv_win.h
 HV_WIN_MAGIC = 0x57454c32
@@ -101,17 +102,30 @@ hv.init()
 counter_hz = args.counter_hz if args.counter_hz is not None else u.mrs(CNTFRQ_EL0)
 print(f"Counter frequency: {counter_hz} Hz")
 
-# Contract s1: remove ANS/NVMe and the proxy USB from the guest; EL2 keeps the DARTs.
-PRUNE = ["ans", "nvme", "iop-ans", f"usb-drd{hv.iodev - IODEV.USB0}", "sep"]
+# Contract s1 / BUILD.md: remove ANS/NVMe, iop-ans-nub, sart-ans and the proxy USB from the guest, and
+# leave their MMIO unmapped so Mu's early DART enumeration cannot touch them. EL2 keeps the DARTs.
+# ("ans" also matches iop-ans-nub and sart-ans; the proxy USB is the iodev m1n1 is tethered through.)
+PRUNE = ["ans", "nvme", "sart-ans", "iop-ans", f"usb-drd{hv.iodev - IODEV.USB0}", "sep"]
+pruned_mmio = []
 def strip_nodes(node, path=""):
     for child in list(node):
         cpath = f"{path}/{child.name}"
         if any(pat in child.name.lower() for pat in PRUNE):
+            try:
+                for idx in range(len(child.reg)):
+                    pruned_mmio.append(child.get_reg(idx))
+            except Exception:
+                pass
             print(f"Pruning ADT node {cpath}")
             del node[child.name]
         else:
             strip_nodes(child, cpath)
 strip_nodes(hv.adt)
+# Reserve (leave unmapped in stage-2) the pruned devices' MMIO, the way VUART/SPRR-pool regions are
+# reserved: a RESERVED sub-tracer nested in the /arm-io passthrough range keeps pt_update from mapping it.
+for base, size in pruned_mmio:
+    hv.add_tracer(irange(base, size), "WIN-PRUNED", TraceMode.RESERVED)
+    print(f"Reserving (unmapped) pruned MMIO {base:#x}..{base + size:#x}")
 
 if args.logfile:
     hv.set_logfile(args.logfile.open("w"))
