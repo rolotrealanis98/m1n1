@@ -30,6 +30,7 @@
 #include "wdt.h"
 #include "xnuboot.h"
 
+#include "hv/win/hv_win.h"
 #include "minilzlib/minlzma.h"
 #include "tinf/tinf.h"
 
@@ -562,6 +563,16 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             hv_sprr_set_pool(request->args[0], request->args[1]);
         case P_HV_SET_GENTER_TRAP:
             hv_set_genter_trap(request->args[0]);
+            break;
+        case P_HV_WIN_CAPS:
+            reply->retval = hv_win_caps();
+            break;
+        case P_HV_WIN_CONFIGURE:
+            reply->retval = hv_win_configure(request->args[0], request->args[1], request->args[2],
+                                             request->args[3], request->args[4]);
+            break;
+        case P_HV_WIN_STATUS:
+            reply->retval = hv_win_status();
             break;
 
         case P_FB_INIT:

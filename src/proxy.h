@@ -151,6 +151,9 @@ typedef enum {
     P_HV_SPTM_SET_MODE,
     P_HV_SPRR_SET_POOL,
     P_HV_SET_GENTER_TRAP,
+    P_HV_WIN_CAPS,
+    P_HV_WIN_CONFIGURE,
+    P_HV_WIN_STATUS,
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

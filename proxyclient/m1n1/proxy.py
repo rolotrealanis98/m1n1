@@ -674,6 +674,9 @@ class M1N1Proxy(Reloadable):
     P_HV_SPTM_SET_MODE = 0xc11
     P_HV_SPRR_SET_POOL = 0xc12
     P_HV_SET_GENTER_TRAP = 0xc13
+    P_HV_WIN_CAPS = 0xc14
+    P_HV_WIN_CONFIGURE = 0xc15
+    P_HV_WIN_STATUS = 0xc16
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1176,6 +1179,12 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_SPRR_SET_POOL, base, size)
     def hv_set_genter_trap(self, enabled):
         return self.request(self.P_HV_SET_GENTER_TRAP, enabled)
+    def hv_win_caps(self):
+        return self.request(self.P_HV_WIN_CAPS)
+    def hv_win_configure(self, irq_model, gicd_base, gicr_base, nr_vcpus, flags):
+        return self.request(self.P_HV_WIN_CONFIGURE, irq_model, gicd_base, gicr_base, nr_vcpus, flags)
+    def hv_win_status(self):
+        return self.request(self.P_HV_WIN_STATUS)
 
     def fb_init(self):
         return self.request(self.P_FB_INIT)

@@ -12,6 +12,8 @@
 #include "uart.h"
 #include "uartproxy.h"
 
+#include "win/hv_win.h"
+
 #define TIME_ACCOUNTING
 
 extern spinlock_t bhl;
@@ -683,7 +685,13 @@ bool hv_exc_sync(struct exc_info *ctx)
             break;
         case ESR_EC_MSR:
             hv_wdt_breadcrumb('M');
-            handled = hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));
+            handled = hv_win_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr)) ||
+                      hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));
+            break;
+        case ESR_EC_SMC:
+            /* SMCCC/PSCI over SMC (only trapped when HV_WIN_F_PSCI_SMC set HCR_EL2.TSC) */
+            hv_wdt_breadcrumb('C');
+            handled = hv_win_handle_smc(ctx);
             break;
         case ESR_EC_ERET:
             hv_wdt_breadcrumb('N');
@@ -709,7 +717,7 @@ bool hv_exc_sync(struct exc_info *ctx)
             break;
         case ESR_EC_HVC:
             hv_wdt_breadcrumb('H');
-            handled = hv_hvc_dispatch(ctx, FIELD_GET(ESR_ISS, ctx->esr));
+            handled = hv_win_handle_hvc(ctx) || hv_hvc_dispatch(ctx, FIELD_GET(ESR_ISS, ctx->esr));
             protect_elr = true; // HVC alread leaves ELR past the instruction
             break;
     }
@@ -746,7 +754,13 @@ void hv_exc_irq(struct exc_info *ctx)
     hv_wdt_breadcrumb('I');
     hv_get_context(ctx);
     hv_exc_entry();
-    hv_exc_proxy(ctx, START_EXCEPTION_LOWER, EXC_IRQ, NULL);
+    /*
+     * vGIC model: a physical IRQ at EL2 is an AIC device line to route to the guest's emulated GIC.
+     * In the AIC-passthrough (M0) model IRQs stay routed to EL1 and this vector is not taken for
+     * device lines, so hv_win_handle_irq() returns false and the stock proxy path runs.
+     */
+    if (!hv_win_handle_irq(ctx))
+        hv_exc_proxy(ctx, START_EXCEPTION_LOWER, EXC_IRQ, NULL);
     hv_exc_exit(ctx);
     hv_wdt_breadcrumb('i');
 }

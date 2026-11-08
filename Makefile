@@ -135,7 +135,10 @@ HV_OBJECTS := $(patsubst %,hv/%, \
 	hv_virtio.o \
 	hv_vm.o \
 	hv_vuart.o \
-	hv_wdt.o)
+	hv_wdt.o \
+	win/hv_win.o \
+	win/hv_win_psci.o \
+	win/hv_vgic3.o)
 
 OBJECTS := \
 	adt.o \

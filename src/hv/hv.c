@@ -15,6 +15,8 @@
 #include "utils.h"
 #include "wdt.h"
 
+#include "win/hv_win.h"
+
 #define HV_TICK_RATE      1000
 #define HV_SLOW_TICK_RATE 1
 
@@ -380,6 +382,8 @@ static void hv_init_secondary(struct hv_secondary_info_t *info)
 
     if (gxf_enabled())
         gl2_call(hv_set_gxf_vbar, 0, 0, 0, 0);
+
+    hv_win_cpu_init();
 
     hv_arm_tick(true);
 }
