@@ -2478,13 +2478,35 @@ static int dt_set_display_t6050(void)
         compat = &compat_27_0;
     }
 
-    /* Node offsets move as properties are added: re-find each node by its phandle. */
-    u32 ph_dcp = fdt_get_phandle(dt, dcp), ph_disp = fdt_get_phandle(dt, disp);
-    u32 ph_on[] = {ph_dcp, ph_disp, fdt_get_phandle(dt, dart_dcp), fdt_get_phandle(dt, dart_disp),
-                   fdt_get_phandle(dt, mbox)};
-    for (unsigned i = 0; i < ARRAY_SIZE(ph_on); i++)
-        if (!ph_on[i])
-            bail("DCP: T6050: a display node has no phandle\n");
+    /*
+     * Node offsets move as properties are added: re-find each node by its phandle. dtc gives a
+     * node a phandle only if a property references it, and nothing references the dcp or the
+     * display subsystem in the in-tree J716s DT, so give each node without one a new phandle.
+     * They are added from the highest offset down: a property added to one node moves only the
+     * nodes after it, so the offsets still to be used stay valid.
+     */
+    int on[] = {dcp, disp, dart_dcp, dart_disp, mbox};
+    u32 ph_on[ARRAY_SIZE(on)];
+    bool todo[ARRAY_SIZE(on)];
+    for (unsigned i = 0; i < ARRAY_SIZE(on); i++) {
+        ph_on[i] = fdt_get_phandle(dt, on[i]);
+        todo[i] = !ph_on[i];
+    }
+    for (;;) {
+        int at = -1;
+        for (unsigned i = 0; i < ARRAY_SIZE(on); i++)
+            if (todo[i] && (at < 0 || on[i] > on[at]))
+                at = i;
+        if (at < 0)
+            break;
+        todo[at] = false;
+        if (fdt_generate_phandle(dt, &ph_on[at]) ||
+            fdt_setprop_u32(dt, on[at], "phandle", ph_on[at]))
+            bail("DCP: T6050: could not give a display node a phandle\n");
+        const char *nn = fdt_get_name(dt, on[at], NULL);
+        printf("DCP: T6050: %s had no phandle, gave it 0x%x\n", nn ? nn : "(node)", ph_on[at]);
+    }
+    u32 ph_dcp = ph_on[0], ph_disp = ph_on[1];
 
     char name[32];
     snprintf(name, sizeof(name), "vram@%lx", vram);
