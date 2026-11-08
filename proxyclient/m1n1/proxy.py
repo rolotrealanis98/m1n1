@@ -677,6 +677,10 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_CAPS = 0xc14
     P_HV_WIN_CONFIGURE = 0xc15
     P_HV_WIN_STATUS = 0xc16
+    # 0xc17 is reserved for P_HV_WIN_IRQ_MAP (vGIC branch)
+    P_HV_WIN_PL011 = 0xc18
+    P_HV_WIN_CPU_MPIDR = 0xc19
+    P_HV_WIN_PL011_STATS = 0xc1a
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1185,6 +1189,12 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_CONFIGURE, irq_model, gicd_base, gicr_base, nr_vcpus, flags)
     def hv_win_status(self):
         return self.request(self.P_HV_WIN_STATUS)
+    def hv_win_pl011(self, base, gsiv=0):
+        return self.request(self.P_HV_WIN_PL011, base, gsiv, signed=True)
+    def hv_win_cpu_mpidr(self, cpu):
+        return self.request(self.P_HV_WIN_CPU_MPIDR, cpu)
+    def hv_win_pl011_stats(self):
+        return self.request(self.P_HV_WIN_PL011_STATS)
 
     def fb_init(self):
         return self.request(self.P_FB_INIT)

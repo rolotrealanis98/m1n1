@@ -109,4 +109,20 @@ void hv_vgic3_set_ppi_level(int cpu, u32 intid, bool level);
 void hv_vgic3_inject_spi(u32 intid);
 void hv_vgic3_flush(void);
 
+/*
+ * ---- Emulated PL011 for Windows KD (hv_win_pl011.c) ------------------------------------------
+ * Configured by the host with P_HV_WIN_PL011(base, gsiv) after P_HV_INIT (it shares the vuart CDC
+ * pipe that HV.init() binds). gsiv = 0: no interrupt. Independent of P_HV_WIN_CONFIGURE.
+ * Hooks for the vGIC side:
+ *   hv_win_pl011_raise(gsiv)  weak no-op here; called on a 0 -> 1 edge of PL011 MIS
+ *   hv_win_pl011_irq_level()  current MIS != 0, for level re-sampling (EOI/deactivate)
+ *   hv_win_pl011_poll()       call from the hypervisor tick next to hv_vuart_poll() so host input
+ *                             raises RX without a guest access
+ */
+int hv_win_pl011_configure(u64 base, u64 gsiv);
+void hv_win_pl011_poll(void);
+bool hv_win_pl011_irq_level(void);
+void hv_win_pl011_raise(u32 gsiv);
+u64 hv_win_pl011_stats(void); /* tx[31:0] | rx[47:32] | tx_dropped[63:48] */
+
 #endif

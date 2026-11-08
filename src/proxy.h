@@ -154,6 +154,10 @@ typedef enum {
     P_HV_WIN_CAPS,
     P_HV_WIN_CONFIGURE,
     P_HV_WIN_STATUS,
+    /* 0xc17 is reserved for P_HV_WIN_IRQ_MAP (vGIC branch) */
+    P_HV_WIN_PL011 = 0xc18,
+    P_HV_WIN_CPU_MPIDR,
+    P_HV_WIN_PL011_STATS,
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

@@ -37,6 +37,25 @@
 void *rust_read_gigalocker(size_t *);
 void rust_free_gigalocker(void *, size_t);
 
+/*
+ * P_HV_WIN_CPU_MPIDR: the MPIDR_EL1 a CPU reports (and the guest reads through VMPIDR_EL2), for the
+ * launcher's /chosen/m5w,cpus. 0 = no such CPU (MPIDR bit 31 is RES1, so a present CPU never
+ * reads 0). Bit 63 marks the boot CPU, bit 62 the CPU P_HV_WIN_CONFIGURE reserved for the host.
+ * The spin table keeps Aff2..Aff0 only; the upper bits are the boot CPU's (single die).
+ */
+static u64 proxy_win_cpu_mpidr(u64 cpu)
+{
+    if (cpu >= MAX_CPUS || ((int)cpu != boot_cpu_idx && !smp_is_alive(cpu)))
+        return 0;
+
+    u64 mpidr = (mrs(MPIDR_EL1) & ~0xffffffUL) | (smp_get_mpidr(cpu) & 0xffffff);
+    if ((int)cpu == boot_cpu_idx)
+        mpidr |= BIT(63);
+    if ((int)cpu == hv_win.reserved_cpu)
+        mpidr |= BIT(62);
+    return mpidr;
+}
+
 int proxy_process(ProxyRequest *request, ProxyReply *reply)
 {
     wdt_kick();
@@ -573,6 +592,15 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_STATUS:
             reply->retval = hv_win_status();
+            break;
+        case P_HV_WIN_PL011:
+            reply->retval = hv_win_pl011_configure(request->args[0], request->args[1]);
+            break;
+        case P_HV_WIN_CPU_MPIDR:
+            reply->retval = proxy_win_cpu_mpidr(request->args[0]);
+            break;
+        case P_HV_WIN_PL011_STATS:
+            reply->retval = hv_win_pl011_stats();
             break;
 
         case P_FB_INIT:
