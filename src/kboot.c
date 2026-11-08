@@ -30,6 +30,7 @@
 #include "xnuboot.h"
 
 #include "libfdt/libfdt.h"
+#include "tinf/tinf.h"
 
 #define MAX_CHOSEN_PARAMS 16
 #define MAX_UBOOT_CONFIGS 4
@@ -1936,6 +1937,109 @@ static int dt_reserve_asc_firmware(const char *adt_path, const char *adt_path_al
     return 0;
 }
 
+/*
+ * The AVE video encoder runs firmware that iBoot preloads into DRAM below the OS and lists in the
+ * ADT as a "pre-loaded" node with a __TEXT and a __DATA segment range: /arm-io/ave on the M2 and
+ * A18 Pro, /arm-io/ave0 on the M1 Pro/Max, M4 Pro and M5 Pro/Max. Reserve both segments no-map and
+ * give them to the encoder node as its memory-region, mapped at the addresses the firmware runs
+ * them at (the segments' remap addresses), and record each segment's CRC32 under /chosen as
+ * aurora,ave-text-crc32 and aurora,ave-data-crc32, the hand-off the kernel's apple-ave driver
+ * expects from the Aurora loader: it binds only while the firmware is where the loader left it and
+ * DATA is still untouched. The node is found by its compatible, so describing a SoC's encoder is
+ * all it takes; a node whose preload cannot be handed over is disabled.
+ */
+static const char *const ave_compatibles[] = {
+    "apple,t6000-ave", "apple,t6041-ave", "apple,t6050-ave", "apple,t8112-ave", "apple,t8140-ave",
+};
+
+static int dt_set_ave_node(int node)
+{
+    static const char seg_names[] = "__TEXT;__DATA";
+    static const char *const kinds[2] = {"text", "data"};
+    const char *reason = "invalid ADT firmware segments";
+    char path[64];
+
+    if (fdt_get_path(dt, node, path, sizeof(path)))
+        bail("FDT: AVE node path too long\n");
+
+    const char *adt_path = "/arm-io/ave";
+    int anode = adt_path_offset(adt, adt_path);
+    if (anode < 0) {
+        adt_path = "/arm-io/ave0";
+        anode = adt_path_offset(adt, adt_path);
+    }
+    if (anode < 0) {
+        reason = "no /arm-io/ave or /arm-io/ave0";
+        goto disable;
+    }
+
+    u32 preloaded;
+    if (ADT_GETPROP(adt, anode, "pre-loaded", &preloaded) != sizeof(preloaded) || preloaded != 1) {
+        reason = "firmware not preloaded";
+        goto disable;
+    }
+
+    u32 seg_len, names_len;
+    const struct adt_segment_ranges *seg = adt_getprop(adt, anode, "segment-ranges", &seg_len);
+    const char *names = adt_getprop(adt, anode, "segment-names", &names_len);
+    if (!seg || seg_len != 2 * sizeof(*seg) || !names || names_len < sizeof(seg_names) - 1 ||
+        names_len > sizeof(seg_names) || memcmp(names, seg_names, sizeof(seg_names) - 1))
+        goto disable;
+
+    u64 span[2];
+    for (int i = 0; i < 2; i++) {
+        span[i] = ALIGN_UP((u64)seg[i].size, SZ_16K);
+        /* Below the OS: never inside the RAM Linux is given. */
+        if (!seg[i].size || !seg[i].remap || (seg[i].phys & (SZ_16K - 1)) ||
+            (seg[i].remap & (SZ_16K - 1)) || seg[i].phys > cur_boot_args.phys_base ||
+            span[i] > cur_boot_args.phys_base - seg[i].phys)
+            goto disable;
+    }
+    if ((seg[0].phys < seg[1].phys + span[1] && seg[1].phys < seg[0].phys + span[0]) ||
+        (seg[0].remap < seg[1].remap + span[1] && seg[1].remap < seg[0].remap + span[0]))
+        goto disable;
+
+    /* Before anything maps or touches the segments: the driver compares against these. */
+    u32 crcs[2];
+    for (int i = 0; i < 2; i++)
+        crcs[i] = tinf_crc32((void *)seg[i].phys, seg[i].size);
+
+    reason = "firmware reservation failed";
+    if (dt_reserve_asc_firmware(adt_path, NULL, path, true, 0, 0))
+        goto disable;
+
+    reason = "CRC export failed";
+    for (int i = 0; i < 2; i++) {
+        char prop[32], value[9];
+        snprintf(prop, sizeof(prop), "aurora,ave-%s-crc32", kinds[i]);
+        snprintf(value, sizeof(value), "%08x", crcs[i]);
+        int chosen = fdt_path_offset(dt, "/chosen");
+        if (chosen < 0 || fdt_setprop_string(dt, chosen, prop, value))
+            goto disable;
+    }
+
+    printf("FDT: %s: AVE firmware TEXT 0x%lx+0x%lx CRC %08x, DATA 0x%lx+0x%lx CRC %08x\n", path,
+           seg[0].phys, span[0], crcs[0], seg[1].phys, span[1], crcs[1]);
+    return 0;
+
+disable:
+    node = fdt_path_offset(dt, path);
+    if (node < 0 || fdt_setprop_string(dt, node, "status", "disabled"))
+        return -1;
+    printf("FDT: AVE disabled: %s\n", reason);
+    return 0;
+}
+
+static int dt_set_ave(void)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(ave_compatibles); i++) {
+        int node = fdt_node_offset_by_compatible(dt, -1, ave_compatibles[i]);
+        if (node >= 0)
+            return dt_set_ave_node(node);
+    }
+    return 0;
+}
+
 static const char dcpext_aliases[][8] = {
     "dcpext",  "dcpext0", "dcpext1", "dcpext2", "dcpext3",
     "dcpext4", "dcpext5", "dcpext6", "dcpext7",
@@ -3462,6 +3566,8 @@ int kboot_prepare_dt(void *fdt)
     if (dt_reserve_asc_firmware("/arm-io/isp", "/arm-io/isp0", "isp", false, isp_iova_base(), 0))
         return -1;
     if (dt_set_isp_fwdata())
+        return -1;
+    if (dt_set_ave())
         return -1;
     if (dt_set_pmgr())
         return -1;
