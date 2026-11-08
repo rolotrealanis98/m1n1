@@ -351,7 +351,18 @@ static int dt_set_chosen(void)
     if (fdt_setprop(dt, node, "asahi,m1n1-stage2-version", m1n1_version, strlen(m1n1_version) + 1))
         bail("FDT: couldn't set asahi,m1n1-stage2-version\n");
 
-    if (dt_set_rng_seed_sep(node)) {
+    /*
+     * T6050/T6051: iBoot boots SEPOS and registers it warm before the handoff
+     * (ADT sepfw-booted = 1). A getrand on the SEP ROM endpoint times out there
+     * and can desynchronise that registration, after which the SEP refuses the
+     * driver's one-shot shared-memory registration and biometric commands.
+     * Leave the SEP mailbox alone and seed from iBoot's /chosen/random-seed.
+     */
+    if (chip_id == T6050 || chip_id == T6051) {
+        printf("SEP: Preserving iBoot warm registration; seeding RNG from ADT\n");
+        if (dt_set_rng_seed_adt(node))
+            bail("FDT: couldn't set random seed");
+    } else if (dt_set_rng_seed_sep(node)) {
         if (dt_set_rng_seed_adt(node))
             bail("FDT: couldn't set random seed");
     }
