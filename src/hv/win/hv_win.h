@@ -13,7 +13,7 @@
  *   VGIC3 (M1+): HCR_EL2.IMO=FMO=1, AIC events taken at EL2 and injected as virtual SPIs, timer
  *     FIQs injected as PPIs, SGIs routed from trapped ICC_SGI1R_EL1, emulated GICD/GICR frames,
  *     Apple's hardware virtual CPU interface (ICH list registers) for delivery (hv_vgic3.c).
- *     Refused by hv_win_configure() until HV_WIN_VGIC3_READY is defined.
+ *     Offered when HV_WIN_VGIC3_READY is defined (below).
  */
 
 #ifndef HV_WIN_H
@@ -25,6 +25,9 @@
 
 #define HV_WIN_MAGIC       0x57454c32UL /* "WEL2" */
 #define HV_WIN_ABI_VERSION 1
+
+/* hv_vgic3.c is complete: advertise HV_WIN_CAP_VGIC3 and accept the VGIC3 model */
+#define HV_WIN_VGIC3_READY 1
 
 /*
  * M5W hypercalls: HVC immediates owned by this runtime, recorded in m5pro-windows docs/CONTRACT.md
@@ -41,7 +44,7 @@
 /* P_HV_WIN_CAPS: (MAGIC << 32) | (ABI << 16) | caps */
 #define HV_WIN_CAP_PSCI       BIT(0) /* PSCI 1.1 / SMCCC 1.1 over HVC (and SMC with TSC) */
 #define HV_WIN_CAP_AIC_PT     BIT(1) /* AIC passthrough model (M0) */
-#define HV_WIN_CAP_VGIC3      BIT(2) /* GICv3 emulation usable (not set by the scaffold) */
+#define HV_WIN_CAP_VGIC3      BIT(2) /* GICv3 emulation usable (route R1) */
 #define HV_WIN_CAP_SYSTEM_OFF BIT(3) /* SYSTEM_OFF/RESET end the guest and report to the host */
 
 enum hv_win_irq_model {
