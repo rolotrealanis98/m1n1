@@ -78,6 +78,22 @@ bool hv_pa_write(struct exc_info *ctx, u64 addr, u64 *val, int width);
 bool hv_pa_read(struct exc_info *ctx, u64 addr, u64 *val, int width);
 bool hv_pa_rw(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width);
 
+/* Execute tracking of HW-mapped guest RAM, 16 KiB pages (hv_vm.c; policy in win/hv_win_pmu.c) */
+#define HV_XT_PAGE_SIZE 0x4000UL
+#define HV_XT_FLIPS_MAX 7U
+enum hv_xt_state {
+    HV_XT_UNTRACKED = 0,
+    HV_XT_DIRTY,    /* RW, XN: an instruction fetch faults */
+    HV_XT_SCANNING, /* RO, XN: transient, under the big HV lock */
+    HV_XT_CODE,     /* RO, X: a write faults */
+    HV_XT_PINNED,   /* RW, X: not tracked until re-armed */
+};
+int hv_xt_track(u64 ipa, u64 size, bool dry_run, u64 *new_tables);
+enum hv_xt_state hv_xt_get(u64 ipa, u64 *pa, u32 *flips);
+int hv_xt_set(u64 ipa, enum hv_xt_state state, u32 flips);
+void hv_xt_tlbi(bool broadcast);
+bool hv_xt_fault_ipa(struct exc_info *ctx, bool s1ptw, bool write, u64 *ipa);
+
 /* AIC events through tracing the MMIO event address */
 bool hv_trace_irq(u32 type, u32 num, u32 count, u32 flags);
 void hv_aic_init(void);

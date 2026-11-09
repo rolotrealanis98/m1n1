@@ -34,6 +34,15 @@ void heapblock_set_limit(void *limit)
     printf("Heap limit: %p (%ld MiB)\n", limit, ((u8 *)limit - (u8 *)heap_base) >> 20);
 }
 
+size_t heapblock_remaining(void)
+{
+    if (!heap_limit)
+        return SIZE_MAX;
+    return (uintptr_t)heap_limit > (uintptr_t)heap_base
+               ? (uintptr_t)heap_limit - (uintptr_t)heap_base
+               : 0;
+}
+
 void *heapblock_alloc(size_t size)
 {
     return heapblock_alloc_aligned(size, 64);

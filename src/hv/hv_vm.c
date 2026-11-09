@@ -400,9 +400,199 @@ bool hv_pt_is_ram(u64 ipa)
     return ipa < BIT(vaddr_bits) && IS_HW(hv_pt_walk(ipa));
 }
 
+/*
+ * Execute tracking of HW-mapped guest RAM (the Windows personality's PMU rewrite, policy in
+ * win/hv_win_pmu.c, design in m5pro-windows docs/PMU-EL2-REWRITE.md).
+ *
+ * Tracked pages are L3 leaves (16 KiB). hv_xt_track() splits any HW L2 block in the range up front,
+ * while no guest CPU runs, so the fault paths only ever change permission bits of an existing leaf
+ * (no break-before-make, no allocation at fault time). The state lives in the leaf itself:
+ *   PTE_SW_XT        bit 55 (reserved for software use in stage-2 descriptors): tracked page
+ *   PTE_SW_XT_FLIPS  bits 58:56 (same): write-after-execute flips, counted by the policy
+ *   S2AP and XN[1] (bit 54; with FEAT_XNX, XN = 0b10 means "no execution at EL1 or EL0"):
+ *     RW + XN  DIRTY     may hold unscanned code: an instruction fetch takes a permission fault
+ *     RO + XN  SCANNING  transient, only while EL2 holds the big HV lock
+ *     RO + X   CODE      scanned: a write (or a stage-1 walker update) takes a permission fault
+ *     RW + X   PINNED    left alone until the policy re-arms it
+ * hv_map() over a tracked range replaces the leaves and so ends tracking there.
+ */
+#define PTE_S2AP_MASK   (0b11L << 6)
+#define PTE_S2_XN       BIT(54)
+#define PTE_SW_XT       BIT(55)
+#define PTE_SW_XT_FLIPS GENMASK(58, 56)
+
+static u64 *hv_pt_lookup_l2(u64 ipa)
+{
+    if (ipa >= BIT(vaddr_bits))
+        return NULL;
+    if (vaddr_bits <= 36)
+        return hv_Ltop;
+
+    u64 l1d = hv_Ltop[ipa >> VADDR_L1_OFFSET_BITS];
+    return L1_IS_TABLE(l1d) ? (u64 *)(l1d & PTE_TARGET_MASK) : NULL;
+}
+
+static u64 *hv_xt_leaf(u64 ipa)
+{
+    u64 *l2 = hv_pt_lookup_l2(ipa);
+    if (!l2)
+        return NULL;
+
+    u64 l2d = l2[(ipa >> VADDR_L2_OFFSET_BITS) & MASK(VADDR_L2_INDEX_BITS)];
+    if (!L2_IS_TABLE(l2d))
+        return NULL;
+
+    u64 *leaf = &(
+        (u64 *)(l2d & PTE_TARGET_MASK))[(ipa >> VADDR_L3_OFFSET_BITS) & MASK(VADDR_L3_INDEX_BITS)];
+    if (!L3_IS_HW_BLOCK(*leaf) || !(*leaf & PTE_SW_XT))
+        return NULL;
+    return leaf;
+}
+
+/*
+ * Track every writable HW page of [ipa, ipa + size) as DIRTY. With dry_run nothing changes and the
+ * return value and *new_tables say what a real run would do (pages, L3 tables of 16 KiB to
+ * allocate). Read-only HW pages, software mappings, hooks and holes are skipped. Call only while no
+ * CPU is in the guest; the caller flushes the TLBs. Returns the number of pages, or -1 for a bad
+ * range.
+ */
+int hv_xt_track(u64 ipa, u64 size, bool dry_run, u64 *new_tables)
+{
+    u64 end = ipa + size;
+    int pages = 0;
+
+    *new_tables = 0;
+    if (((ipa | size) & MASK(VADDR_L3_OFFSET_BITS)) || !size || end < ipa || end > BIT(vaddr_bits))
+        return -1;
+
+    while (ipa < end) {
+        u64 block_end =
+            min(end, ALIGN_DOWN(ipa, BIT(VADDR_L2_OFFSET_BITS)) + BIT(VADDR_L2_OFFSET_BITS));
+        u64 *l2 = hv_pt_lookup_l2(ipa);
+        u64 l2d = l2 ? l2[(ipa >> VADDR_L2_OFFSET_BITS) & MASK(VADDR_L2_INDEX_BITS)] : 0;
+        u64 *l3 = NULL;
+
+        if (L2_IS_HW_BLOCK(l2d)) {
+            (*new_tables)++;
+            if (dry_run) {
+                if ((l2d & PTE_S2AP_MASK) == PTE_S2AP_RW)
+                    pages += (block_end - ipa) >> VADDR_L3_OFFSET_BITS;
+            } else {
+                l3 = hv_pt_get_l3(ipa); /* same output addresses and attributes, per 16 KiB */
+            }
+        } else if (L2_IS_TABLE(l2d)) {
+            l3 = (u64 *)(l2d & PTE_TARGET_MASK);
+        }
+
+        for (u64 a = ipa; l3 && a < block_end; a += BIT(VADDR_L3_OFFSET_BITS)) {
+            u64 *leaf = &l3[(a >> VADDR_L3_OFFSET_BITS) & MASK(VADDR_L3_INDEX_BITS)];
+            if (!L3_IS_HW_BLOCK(*leaf) || (*leaf & PTE_S2AP_MASK) != PTE_S2AP_RW)
+                continue;
+            if (!dry_run)
+                *leaf = (*leaf & ~PTE_SW_XT_FLIPS) | PTE_S2_XN | PTE_SW_XT;
+            pages++;
+        }
+
+        ipa = block_end;
+    }
+
+    return pages;
+}
+
+enum hv_xt_state hv_xt_get(u64 ipa, u64 *pa, u32 *flips)
+{
+    u64 *leaf = hv_xt_leaf(ipa);
+    if (!leaf)
+        return HV_XT_UNTRACKED;
+
+    u64 d = *(volatile u64 *)leaf;
+    bool rw = (d & PTE_S2AP_MASK) == PTE_S2AP_RW;
+
+    if (pa)
+        *pa = d & PTE_TARGET_MASK;
+    if (flips)
+        *flips = FIELD_GET(PTE_SW_XT_FLIPS, d);
+    if (d & PTE_S2_XN)
+        return rw ? HV_XT_DIRTY : HV_XT_SCANNING;
+    return rw ? HV_XT_PINNED : HV_XT_CODE;
+}
+
+/*
+ * Permission-only change of a valid leaf (same output address): no break-before-make needed. The
+ * caller does the TLB maintenance with hv_xt_tlbi(): broadcast when a permission is taken away,
+ * local when one is only added (other CPUs then take at most a spurious fault).
+ */
+int hv_xt_set(u64 ipa, enum hv_xt_state state, u32 flips)
+{
+    u64 *leaf = hv_xt_leaf(ipa);
+    if (!leaf || state == HV_XT_UNTRACKED)
+        return -1;
+
+    u64 d = *leaf & ~(PTE_S2AP_MASK | PTE_S2_XN | PTE_SW_XT_FLIPS);
+    d |= (state == HV_XT_DIRTY || state == HV_XT_PINNED) ? PTE_S2AP_RW : PTE_S2AP_RO;
+    if (state == HV_XT_DIRTY || state == HV_XT_SCANNING)
+        d |= PTE_S2_XN;
+    d |= FIELD_PREP(PTE_SW_XT_FLIPS, min(flips, HV_XT_FLIPS_MAX));
+
+    *(volatile u64 *)leaf = d;
+    sysop("dsb ishst");
+    return 0;
+}
+
+void hv_xt_tlbi(bool broadcast)
+{
+    sysop("dsb ishst");
+    if (broadcast) {
+        sysop("tlbi vmalls12e1is");
+        sysop("dsb ish");
+    } else {
+        sysop("tlbi vmalls12e1");
+        sysop("dsb nsh");
+    }
+    sysop("isb");
+}
+
+/*
+ * IPA of a stage-2 abort. HPFAR_EL2 is valid for faults on a stage-1 table walk (S1PTW) but may be
+ * UNKNOWN for other permission faults, so those are translated from FAR with AT (as KVM does); AT
+ * S1E1R/W check EL1 permissions, so an execute-only EL0 page still translates. Fails (the caller
+ * retries the access) if the guest changed its tables under us.
+ */
+bool hv_xt_fault_ipa(struct exc_info *ctx, bool s1ptw, bool write, u64 *ipa)
+{
+    if (s1ptw) {
+        *ipa = (mrs(HPFAR_EL2) & GENMASK(47, 4)) << 8;
+        return true;
+    }
+
+    if (!(mrs(SCTLR_EL12) & SCTLR_M)) {
+        *ipa = ctx->far; /* guest MMU off: VA = IPA */
+        return true;
+    }
+
+    u64 save = mrs(PAR_EL1);
+    if (write)
+        __asm__ volatile("at s1e1w, %0" : : "r"(ctx->far));
+    else
+        __asm__ volatile("at s1e1r, %0" : : "r"(ctx->far));
+    sysop("isb");
+    u64 par = mrs(PAR_EL1);
+    msr(PAR_EL1, save);
+
+    if (par & PAR_F)
+        return false;
+    *ipa = (par & PAR_PA) | (ctx->far & 0xfff);
+    return true;
+}
+
 int hv_pt_set_writable(u64 ipa, bool writable)
 {
     ipa &= ~MASK(VADDR_L3_OFFSET_BITS);
+
+    if (hv_xt_leaf(ipa)) {
+        printf("HV: IPA 0x%lx is execute-tracked (PMU rewrite); not reprotecting it\n", ipa);
+        return -1;
+    }
 
     u64 pte = hv_pt_walk(ipa);
     if (!IS_HW(pte)) {
