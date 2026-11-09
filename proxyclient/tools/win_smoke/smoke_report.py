@@ -8,7 +8,8 @@
 #   smoke_report.py RUN_DIR|hv.log
 #
 # Answers: OPEN-QUESTIONS Q4 (PSCI conduit), Q6 (counters), Q7 (WFI), Q8 (framebuffer), M0-RUNTIME-PLAN
-# open item 1 (Apple sysregs) and item 4 (entry registers), the M0 timer path, the PL011 and the stage-2 plan.
+# open item 1 (Apple sysregs) and item 4 (entry registers), the M0 timer path, the PL011, the stage-2 plan
+# and EL2-RUNTIME item 6 (PMUv3 accesses: trapped to EL2 or UNDEF at EL1).
 
 import datetime
 import pathlib
@@ -203,6 +204,39 @@ def main():
     for at in probes:
         if at not in done:
             say("stage2", f"{at}: the access never completed (stage-2 fault: see the EL2 dump in hv.log)")
+
+    # EL2-RUNTIME item 6: Windows touches PMUv3 registers without checking PMUVer
+    pmu = [kv for _, g, kv in recs if g == "pmu" and "reg" in kv]
+    _, pbeg = first(recs, "pmu", probe="begin")
+    _, psum = first(recs, "pmu", probe="summary")
+    hw = re.search(r"PMU at EL2: ID_AA64DFR0_EL1 (0x[0-9a-f]+).*?FGT (\d+), MDCR_EL2 (0x[0-9a-f]+) \(([^)]*)\)", run_txt)
+    if pbeg:
+        say("PMU", f"guest view: PMUVer {pbeg.get('dfr0_pmuver')} (EL2 hides PMUv3 under TID3), MMFR0.FGT "
+                   f"{pbeg.get('mmfr0_fgt')}" + (f"; at EL2: ID_AA64DFR0_EL1 {hw.group(1)}, FGT {hw.group(2)}, "
+                                                      f"MDCR_EL2 {hw.group(3)} ({hw.group(4)})" if hw else ""))
+    for kv in pmu:
+        r = kv.get("result")
+        if r == "trap":
+            detail = f"TRAPPED to EL2 (EL2 ESR {kv.get('el2_esr')}, EC {kv.get('el2_ec')}), emulated" + \
+                     (f", read {kv.get('val')}" if kv.get("op") == "read" else "")
+        elif r == "undef":
+            detail = f"UNDEF AT EL1 (ESR {kv.get('esr')}, EC {kv.get('ec')}): EL2 never saw it"
+        else:
+            detail = f"completed without EL2 (native PMU), {kv.get('val', '')}"
+        say("PMU", f"{kv.get('op')} {kv.get('reg')}: {detail}, {kv.get('us')} us")
+    if psum:
+        verdict = psum.get("verdict")
+        meaning = {
+            "TRAP": "every access trapped to EL2: Windows' PMU reads are covered by the EL2 emulation, no fallback",
+            "UNDEF": "the accesses UNDEF at EL1 before any EL2 trap: Windows' boot manager dies on its first "
+                     "PMCCNTR_EL0 read; a fallback is needed (EL2 cannot see these)",
+            "NATIVE": "a real PMUv3 answered (the traps did not take effect)",
+            "MIXED": "some registers trap, some do not: see the lines above",
+        }.get(verdict, "unknown")
+        say("PMU", f"VERDICT {verdict}: {meaning} (trap {psum.get('trap')}, undef {psum.get('undef')}, ok {psum.get('ok')}, "
+                   f"PMCCNTR monotonic {psum.get('pmccntr_monotonic')})")
+    elif pbeg:
+        say("PMU", "probe started but no summary: an access wedged the guest (see hv.log)")
 
     if not end and not fatal:
         say("stopped", f"after '{last}'; the next probe in order is what hung")

@@ -3,7 +3,8 @@
  * win_smoke: a tiny EL1 guest for the Windows EL2 runtime (m5pro-windows MILESTONES M0 steps 0 and 3).
  * It answers, in one attended run, what the Mu bring-up needs to know about the EL1 environment our
  * m1n1 hypervisor gives a non-XNU guest on the T6050 (OPEN-QUESTIONS Q4, Q6, Q7, Q8 and M0-RUNTIME-PLAN
- * open item 1), then ends with PSCI SYSTEM_OFF over HVC.
+ * open item 1) and whether Windows' unconditional PMUv3 accesses trap to EL2 or UNDEF at EL1 (EL2-RUNTIME
+ * item 6, phase 12), then ends with PSCI SYSTEM_OFF over HVC.
  *
  * Output: one line per fact on the m1n1 console through HVC #0x4d35 (M5W_DEBUG_PUTC), every line starting
  * with "M5W-SMOKE ", fields as key=value; tools/win_smoke/smoke_report.py turns a log into answers.
@@ -20,7 +21,7 @@ typedef unsigned char u8;
 
 #define BIT(n) (1UL << (n))
 
-#define M5W_SMOKE_VERSION 1
+#define M5W_SMOKE_VERSION 2
 #define SMOKE_X3_MAGIC    0x4d355753UL
 
 #define PSCI_VERSION       0x84000000UL
@@ -769,6 +770,110 @@ static void probe_fb(void)
     end();
 }
 
+/* ---- PMUv3 (EL2-RUNTIME item 6) ---------------------------------------------------------------------- */
+/*
+ * Windows' bootmgfw, winload and ntoskrnl read PMCCNTR_EL0 (and set up PMCR_EL0) without checking
+ * ID_AA64DFR0_EL1.PMUVer. EL2 sets MDCR_EL2.TPM|TPMCR (and the FGT PMU bits when FEAT_FGT exists) and
+ * emulates an absent PMUv3 when the access traps; M5W_HVC_PMU_TRAPS (HVC #0x4d37) returns how many PMU
+ * accesses EL2 emulated on this CPU and the ESR of the last one. Per access:
+ *   trap   the instruction completed and EL2's count went up (EL2 saw ESR EC 0x18 and emulated it)
+ *   undef  the instruction faulted at EL1 (taken before any EL2 trap: Windows needs a fallback)
+ *   ok     the instruction completed without EL2 (a real PMUv3 answered)
+ */
+#define M5W_HVC_PMU_TRAPS 0x4d37
+
+static u64 g_pmu_el2_esr;
+static u64 g_pmu_n[3]; /* trap, undef, ok */
+
+static u64 pmu_traps(void)
+{
+    register u64 x0 __asm__("x0") = 0;
+    register u64 x1 __asm__("x1") = 0;
+    __asm__ volatile("hvc #0x4d37" : "+r"(x0), "+r"(x1)::"memory");
+    g_pmu_el2_esr = x1;
+    return x0;
+}
+
+static void pmu_report(const char *name, const char *op, int done, u64 n0, u64 n1, u64 val, u64 ticks)
+{
+    int kind = !done ? 1 : (n1 != n0 ? 0 : 2);
+
+    g_pmu_n[kind]++;
+    begin("pmu");
+    ks("reg", name);
+    ks("op", op);
+    ks("result", kind == 0 ? "trap" : (kind == 1 ? "undef" : "ok"));
+    if (kind == 1) {
+        kx("esr", g_esr);
+        kx("ec", g_esr >> 26);
+    } else {
+        if (op[0] == 'r')
+            kx("val", val);
+        if (kind == 0) {
+            kx("el2_esr", g_pmu_el2_esr);
+            kx("el2_ec", (g_pmu_el2_esr >> 26) & 0x3f);
+        }
+    }
+    kd("us", ticks_to_us(ticks));
+    end();
+}
+
+#define PMU_READ(enc, name, out)                                                                   \
+    ({                                                                                             \
+        u64 _pv = 0, _pn0 = pmu_traps(), _pt0 = vct();                                             \
+        int _pok = TRY_MRS(enc, _pv); /* TRY_MRS has its own __v */                                \
+        u64 _pt1 = vct(), _pn1 = pmu_traps();                                                      \
+        pmu_report(name, "read", _pok, _pn0, _pn1, _pv, _pt1 - _pt0);                              \
+        (out) = _pv;                                                                               \
+        _pok;                                                                                      \
+    })
+
+#define PMU_WRITE(enc, name, val)                                                                  \
+    ({                                                                                             \
+        u64 _pn0 = pmu_traps(), _pt0 = vct();                                                      \
+        int _pok = TRY_MSR(enc, val);                                                              \
+        u64 _pt1 = vct(), _pn1 = pmu_traps();                                                      \
+        pmu_report(name, "write", _pok, _pn0, _pn1, 0, _pt1 - _pt0);                               \
+        _pok;                                                                                      \
+    })
+
+static void probe_pmu(void)
+{
+    u64 dfr0 = sysreg_read("id_aa64dfr0_el1"), mmfr0 = sysreg_read("id_aa64mmfr0_el1");
+    u64 c0 = 0, c1 = 0, pmcr = 0, v;
+    int ok0, ok1, okp;
+
+    begin("pmu");
+    ks("probe", "begin");
+    kx("dfr0_pmuver", (dfr0 >> 8) & 0xf); /* the guest's view (EL2 shows 0 under TID3) */
+    kx("mmfr0_fgt", (mmfr0 >> 56) & 0xf);
+    kd("el2_count", pmu_traps());
+    end();
+
+    ok0 = PMU_READ("s3_3_c9_c13_0", "PMCCNTR_EL0", c0);
+    wait_ticks(g_freq / 1000); /* 1 ms */
+    ok1 = PMU_READ("s3_3_c9_c13_0", "PMCCNTR_EL0", c1);
+    okp = PMU_READ("s3_3_c9_c12_0", "PMCR_EL0", pmcr);
+    PMU_READ("s3_3_c9_c12_1", "PMCNTENSET_EL0", v);
+    PMU_READ("s3_3_c9_c12_5", "PMSELR_EL0", v);
+    PMU_READ("s3_3_c9_c14_0", "PMUSERENR_EL0", v);
+    /* what Windows does next: E = 1 (and the read value's other writable bits) */
+    PMU_WRITE("s3_3_c9_c12_0", "PMCR_EL0", (okp ? pmcr & 0xf9 : 0) | 1);
+    (void)v;
+
+    begin("pmu");
+    ks("probe", "summary");
+    kd("trap", g_pmu_n[0]);
+    kd("undef", g_pmu_n[1]);
+    kd("ok", g_pmu_n[2]);
+    ks("pmccntr_monotonic", ok0 && ok1 ? (c1 > c0 ? "yes" : "NO") : "na");
+    if (okp)
+        kd("pmcr_n", (pmcr >> 11) & 0x1f);
+    ks("verdict", g_pmu_n[1] ? (g_pmu_n[0] || g_pmu_n[2] ? "MIXED" : "UNDEF")
+                             : (g_pmu_n[2] ? (g_pmu_n[0] ? "MIXED" : "NATIVE") : "TRAP"));
+    end();
+}
+
 void smoke_main(void);
 void smoke_main(void)
 {
@@ -794,6 +899,8 @@ void smoke_main(void)
     probe_mem();
     g_phase = 11;
     probe_fb();
+    g_phase = 12;
+    probe_pmu();
 
     begin("end");
     kd("fiq_total", g_fiq_count);
