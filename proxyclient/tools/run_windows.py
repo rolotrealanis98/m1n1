@@ -52,8 +52,16 @@
 # validated by this launcher before start. If Mu ever needs x4 = boot_args, the change is one line in
 # hv_asm.S (after `msr elr_el2, x4`: `mov x4, x0`), which is harmless for macOS/Linux guests.
 #
+# M1a RAM disk (m5pro-windows docs/MU-M1A.md): --ramdisk takes the .ntasi file from tools/windows/
+# make-ramdisk-image.sh (Aurora's 4 KiB NTASI header + a GPT/FAT32 disk) and appends it at exactly fd_base + the FD
+# header's image_size (= PcdFdSize, where Mu's SEC probes). The file is checked before the proxy is touched (header
+# fields and CRCs, length = header + image, image <= 1 GiB, GPT partition 1 = the only basic-data partition with
+# the NTASI unique GUID), uploaded in 16 MiB compressed chunks (one gzip of ~600 MiB of WIM would need a heap block
+# larger than the 128 MiB proxy heap), and published as m5w,ramdisk-base (the header) / m5w,ramdisk-size (the file
+# length), which Mu's J716sRamdiskDxe compares with what SEC found. --mu-profile m1a requires it.
+#
 # Modes:
-#   default / --m0   Mu FD, sha256 pinned to the known image of --mu-profile (m0 by default; m1-gic, m1-aic)
+#   default / --m0   Mu FD, sha256 pinned to the known image of --mu-profile (m0 by default; m1-gic, m1-aic, m1a)
 #                    unless --sha256/--no-verify; m5w,* props. --m0 = profile m0 on the M0 invocation.
 #   --raw-guest      a raw EL1 test image (win_smoke/smoke.bin): entry offset 0, x0 = boot_args,
 #                    x1 = uart0 (vuart) base, x2 = PL011 base or 0, x3 = 0x4d355753 ("M5WS");
@@ -70,6 +78,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -108,12 +117,23 @@ MU_IMAGES = {
     "m0": ("aic", "5087fe0230096604bea3fa4a088def98eb5a7474daddeb8f6427a34d4e61eaf2"),
     "m1-gic": ("gic", "0581fee566471dd7df3186eccf4bef0705d8c200eaee3c9e4fd6e62dda250d5d"),
     "m1-aic": ("aic", "14958582f3b255a70bfd3357c9229dd29cad9f0340c8a7a7e35fd01e1b2236cb"),
+    "m1a": ("gic", "6f242a7b591a509a44a17016d7ef9dbf78dce142d2d335bed1ff77ad59e79d46"),
 }
+MU_NEEDS_RAMDISK = {"m1a"}
 MU_HANDOFF_BASE = 0x104_0000_0000   # T6050_BOOTARGS_PTR; the ADT goes to +0x4000 (T6050_ADT_PTR)
 MU_HANDOFF_SIZE = 0x404000
 MU_TOP_WORKSPACE = 128 << 20        # PcdSystemMemoryUefiRegionSize at the top of boot_args RAM
 MU_ADT_MAX = 2 << 20                # MemoryInitPeiLib caps the ADT reservation at 2 MiB
 FD_ALIGN = 2 << 20                  # 64 KiB is the minimum, 2 MiB recommended
+
+# Aurora's appended RAM disk (third_party/mu Silicon/Apple/AppleSiliconPkg/Include/AppendedRamdisk.h, version 2)
+NTASI_SIGNATURE = b"NTASIRDK"
+NTASI_VERSION = 2
+NTASI_HEADER_SIZE = 0x1000
+NTASI_MAX_IMAGE = 0x4000_0000                       # NTASI_APPENDED_RAMDISK_MAX_IMAGE_SIZE
+NTASI_PART_GUID = bytes.fromhex("5341544e2d4942479414000000000002")  # 4e544153-492d-4742-9414-000000000002
+GPT_BASIC_DATA = bytes.fromhex("a2a0d0ebe5b9334487c068b6b72699c7")   # ebd0a0a2-b9e5-4433-87c0-68b6b72699c7
+RAMDISK_CHUNK = 16 << 20                            # compressed upload unit (the proxy heap is 128 MiB)
 
 PAGE = 0x4000
 HEAP_PAD = 32 << 20                 # stock HV._prepare_load gap above the proxy heap
@@ -169,6 +189,38 @@ def subtract(universe, holes):
                 nxt.append((h1, e))
         out = nxt
     return sorted(out)
+
+
+def check_ntasi(rd):
+    """The --ramdisk file as Mu's SEC, BootRamdiskHelperDxe and J716sRamdiskDxe will judge it. Returns
+    (image_size, image_crc32); raises PlanError with the reason (checked before the proxy is touched)."""
+    if len(rd) < NTASI_HEADER_SIZE + 34 * 512 or rd[:8] != NTASI_SIGNATURE:
+        raise PlanError("not an NTASI RAM-disk file (no 'NTASIRDK' header): pass the .ntasi file from "
+                        "tools/windows/make-ramdisk-image.sh, not the raw .img")
+    _, version, hsize, isize, icrc, hcrc = struct.unpack_from("<QIIQII", rd, 0)
+    if version != NTASI_VERSION or hsize != NTASI_HEADER_SIZE:
+        raise PlanError(f"NTASI header version {version} / size {hsize:#x}; Mu takes version 2, 0x1000")
+    if zlib.crc32(rd[:28]) != hcrc:
+        raise PlanError("NTASI header CRC32 mismatch")
+    if not 512 <= isize <= NTASI_MAX_IMAGE:
+        raise PlanError(f"RAM-disk image {isize:#x} bytes; Mu takes 512 B .. 1 GiB")
+    if len(rd) != hsize + isize or len(rd) % 0x1000:
+        raise PlanError(f"file is {len(rd):#x} bytes, header + image = {hsize + isize:#x} (must be equal, 4 KiB "
+                        "multiple: m5w,ramdisk-size must equal what SEC reserves)")
+    if zlib.crc32(memoryview(rd)[hsize:]) != icrc:
+        raise PlanError("RAM-disk image CRC32 mismatch (BootRamdiskHelperDxe would refuse it)")
+    disk = memoryview(rd)[hsize:]
+    if bytes(disk[510:512]) != b"\x55\xaa" or bytes(disk[512:520]) != b"EFI PART":
+        raise PlanError("RAM-disk image has no GPT (BootRamdiskHelperDxe only selects HD(1,GPT,...))")
+    lba, count, esize = struct.unpack_from("<QII", disk, 512 + 72)
+    if not (2 <= lba and 0 < count <= 4096 and 128 <= esize <= 1024 and lba * 512 + count * esize <= len(disk)):
+        raise PlanError("RAM-disk GPT entry array out of bounds")
+    basic = [i for i in range(count) if bytes(disk[lba * 512 + i * esize:lba * 512 + i * esize + 16]) == GPT_BASIC_DATA]
+    first = bytes(disk[lba * 512 + 16:lba * 512 + 32])
+    if basic != [0] or first != NTASI_PART_GUID:
+        raise PlanError("RAM-disk GPT: partition 1 must be the only basic-data partition, unique GUID "
+                        "4e544153-492d-4742-9414-000000000002 (what BootRamdiskHelperDxe selects)")
+    return isize, icrc
 
 
 def parse_irq_map(specs):
@@ -472,9 +524,12 @@ def parse_args():
                              "loaded with P_HV_WIN_MAP_IRQ (repeatable; default empty: no device interrupts, M1a)")
     parser.add_argument("--irq-map-file", type=pathlib.Path, default=None,
                         help="the same pairs from a file (one or more per line, '#' comments)")
-    parser.add_argument("--ramdisk", type=pathlib.Path, help="optional appended WinPE RAM disk")
+    parser.add_argument("--ramdisk", type=pathlib.Path,
+                        help="appended WinPE RAM disk: the .ntasi file from tools/windows/make-ramdisk-image.sh "
+                             "(required by --mu-profile m1a)")
     parser.add_argument("--ramdisk-offset", type=hexint, default=None,
-                        help="RAM-disk offset from the FD base (default: the FD header's image_size, PcdFdSize)")
+                        help="RAM-disk offset from the FD base (default and only value Mu accepts: the FD header's "
+                             "image_size, PcdFdSize)")
     parser.add_argument("--run-dir", type=pathlib.Path, default=None,
                         help="run directory for logs and hashes (default runs/<stamp>-<label> in the cwd)")
     parser.add_argument("--label", default=None, help="run label (default m0 / smoke / mu)")
@@ -512,6 +567,9 @@ def parse_args():
         parser.error("the aic route is single-CPU")
     if args.raw_guest and (args.ramdisk or args.entry_offset):
         parser.error("--raw-guest takes no RAM disk and enters at offset 0")
+    if not args.raw_guest and args.mu_profile in MU_NEEDS_RAMDISK and not args.ramdisk:
+        parser.error(f"--mu-profile {args.mu_profile} boots the appended WinPE RAM disk: add --ramdisk <image>.ntasi "
+                     "(without it Mu powers off at J716sRamdiskDxe)")
     if args.label is None:
         args.label = "m0" if args.m0 else ("smoke" if args.raw_guest else args.mu_profile)
 
@@ -613,17 +671,25 @@ def main():
                f"marker {marker.decode('ascii', 'replace')!r}")
         payload_size = max(payload_size, image_size)
 
-    payload = image
     rd = None
     if args.ramdisk:
         rd = args.ramdisk.read_bytes()
         rd_off = args.ramdisk_offset if args.ramdisk_offset is not None else payload_size
         if rd_off < len(image):
             parser.error("ramdisk-offset overlaps the FD")
-        payload = image + b"\0" * (rd_off - len(image)) + rd
-        payload_size = len(payload)
+        if not args.raw_guest and rd_off != payload_size:
+            parser.error(f"Mu probes the RAM disk at FD base + PcdFdSize = +{payload_size:#x}, not +{rd_off:#x}")
+        try:
+            rd_isize, rd_crc = check_ntasi(rd)
+        except PlanError as e:
+            record(f"REFUSED: --ramdisk {args.ramdisk}: {e}")
+            raise SystemExit(2)
+        rd_sha = hashlib.sha256(rd).hexdigest()
+        record(f"RAM disk {args.ramdisk.resolve()} size {len(rd):#x} sha256 {rd_sha}: NTASI v2, image {rd_isize:#x} "
+               f"bytes crc32 {rd_crc:#010x}, GPT partition 1 basic data with the NTASI GUID; appended at FD + {rd_off:#x}")
+        payload_size = rd_off + len(rd)
         with open(run_dir / "SHA256SUMS", "a") as f:
-            f.write(f"{hashlib.sha256(rd).hexdigest()}  {args.ramdisk.resolve()}\n")
+            f.write(f"{rd_sha}  {args.ramdisk.resolve()}\n")
 
     from m1n1.proxy import M1N1Proxy, UartInterface, IODEV
     from m1n1.proxyutils import ProxyUtils, bootstrap_port
@@ -850,7 +916,25 @@ def main():
     hv.guest_base = plan["fd_base"]
     hv.bootargs_off = plan["bootargs"] - plan["fd_base"]
     hv.entry = plan["fd_base"] + args.entry_offset
-    hv._load_executable_raw(payload, hv.guest_base, "smoke" if args.raw_guest else "Mu FD")
+    hv._load_executable_raw(image, hv.guest_base, "smoke" if args.raw_guest else "Mu FD")
+    if rd is not None:
+        rd_base = hv.guest_base + rd_off
+        if rd_off > len(image):
+            u.compressed_writemem(hv.guest_base + len(image), b"\0" * (rd_off - len(image)))
+        t_rd = time.time()
+        for off in range(0, len(rd), RAMDISK_CHUNK):
+            u.compressed_writemem(rd_base + off, rd[off:off + RAMDISK_CHUNK])
+            if (off // RAMDISK_CHUNK) % 8 == 7:
+                print(f"  RAM disk {off + RAMDISK_CHUNK >> 20}/{len(rd) >> 20} MiB, {time.time() - t_rd:.0f} s")
+        p.dc_cvau(rd_base, len(rd))
+        took = max(time.time() - t_rd, 1e-3)
+        if iface.readmem(rd_base, 0x1000) != rd[:0x1000] or iface.readmem(rd_base + len(rd) - 0x1000, 0x1000) != rd[-0x1000:]:
+            raise SystemExit("RAM disk read-back of the header page or the last page differs: upload failed")
+        rd_end = rd_base + len(rd)
+        record(f"RAM disk at {rd_base:#x}..{rd_end:#x} (header; image at {rd_base + NTASI_HEADER_SIZE:#x}), uploaded in "
+               f"{took:.1f} s ({len(rd) / took / 1e6:.1f} MB/s), first/last page read back; ends "
+               f"{(re_ - MU_TOP_WORKSPACE - rd_end) >> 20} MiB below Mu's top-128 MiB workspace "
+               f"({re_ - MU_TOP_WORKSPACE:#x})")
     mm = hv.adt["chosen"]["memory-map"]
     mm.DeviceTree = (hv.adt_base, align_up(u.ba.devtree_size))
     mm.BootArgs = (plan["bootargs"], PAGE)
