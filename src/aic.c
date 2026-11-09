@@ -201,6 +201,23 @@ void aic_set_sw(int irq, bool active)
                 MASK_BIT(irq));
 }
 
+/* irq: flat line number, die * max_irq + num (as in aic_set_sw and the event decoding) */
+void aic_mask(u32 irq)
+{
+    u32 die = irq / aic->max_irq;
+    irq %= aic->max_irq;
+    write32(aic->base + aic->regs.mask_set + die * aic->intmaskset_stride + MASK_REG(irq),
+            MASK_BIT(irq));
+}
+
+void aic_unmask(u32 irq)
+{
+    u32 die = irq / aic->max_irq;
+    irq %= aic->max_irq;
+    write32(aic->base + aic->regs.mask_clr + die * aic->intmaskclear_stride + MASK_REG(irq),
+            MASK_BIT(irq));
+}
+
 void aic_write(u32 reg, u32 val)
 {
     write32(aic->base + reg, val);
