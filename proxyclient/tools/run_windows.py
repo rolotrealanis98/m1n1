@@ -18,6 +18,7 @@
 #   5. publish /chosen/m5w,* (m5w,epoch last, right before the ADT upload: <u64 seconds><u64 CNTPCT_EL0
 #      at that instant>, the 16-byte form Mu's GetTime uses as its base)
 #   6. HV.start(); report the exit reason (P_HV_WIN_STATUS) and, with --capture-vuart, the last vuart lines
+#      (the capture also answers win_smoke's vuart RX self-test: 'K' 200 ms after the smoke's vuart banner)
 #
 # Interrupt routes (CONTRACT s3/s9, MU-M1.md section 8):
 #   aic  M0 and m1-aic: the guest drives the real AIC itself (HCR_EL2.IMO = 0), one vCPU, no m5w,gic.
@@ -366,8 +367,18 @@ class Tee:
         return getattr(self.stream, name)
 
 
-def capture_serial(dev, path, stop):
+# win_smoke's vuart RX self-test: the guest drains stale input, prints this banner on uart0 and then polls
+# UTRSTAT.RXD for up to 2 s; the capture answers with one byte, once per run
+VUART_PROBE_MARK = b"M5W-SMOKE vuart hello"
+VUART_PROBE_BYTE = b"K"
+VUART_PROBE_DELAY = 0.2
+
+
+def capture_serial(dev, path, stop, note=print):
     import serial
+    tail = b""
+    probe_at = None
+    probed = False
     with open(path, "ab") as f:
         while not stop.is_set():
             try:
@@ -378,12 +389,28 @@ def capture_serial(dev, path, stop):
                 continue
             while not stop.is_set():
                 try:
-                    d = s.read(4096)
+                    timeout = 0.02 if probe_at is not None else 0.5
+                    if s.timeout != timeout:  # pyserial reprograms the port on every assignment
+                        s.timeout = timeout
+                    d = s.read(max(1, s.in_waiting))
                 except Exception:
                     break
                 if d:
                     f.write(d)
                     f.flush()
+                    if not probed and probe_at is None:
+                        tail += d
+                        if VUART_PROBE_MARK in tail:
+                            probe_at = time.monotonic() + VUART_PROBE_DELAY
+                        tail = tail[-(len(VUART_PROBE_MARK) - 1):]
+                if probe_at is not None and time.monotonic() >= probe_at:
+                    try:
+                        s.write(VUART_PROBE_BYTE)  # no flush(): tcdrain() can block on a stalled CDC OUT pipe
+                    except Exception:
+                        break
+                    probe_at, probed = None, True
+                    note(f"vuart probe: sent {VUART_PROBE_BYTE!r} to {dev} {VUART_PROBE_DELAY * 1000:.0f} ms after "
+                         "the smoke's vuart banner")
 
 
 def secondary_device(dev):
@@ -440,7 +467,8 @@ def parse_args():
                         help="run directory for logs and hashes (default runs/<stamp>-<label> in the cwd)")
     parser.add_argument("--label", default=None, help="run label (default m0 / smoke / mu)")
     parser.add_argument("--capture-vuart", action="store_true",
-                        help="record the second CDC port (vuart + PL011) to <run>/vuart.log; do not combine with a terminal on that port")
+                        help="record the second CDC port (vuart + PL011) to <run>/vuart.log and answer win_smoke's vuart "
+                             "RX self-test with one 'K'; do not combine with a terminal on that port")
     parser.add_argument("--vuart-dev", default=None, help="second CDC port (default derived from M1N1DEVICE)")
     parser.add_argument("-l", "--logfile", type=pathlib.Path, help="hv trace/TTY log (relative paths go into the run dir)")
     parser.add_argument("-S", "--shell", action="store_true", help="drop to the hypervisor shell before start")
@@ -577,7 +605,8 @@ def main():
         vdev = args.vuart_dev or secondary_device(os.environ.get("M1N1DEVICE"))
         if not vdev:
             parser.error("--capture-vuart needs --vuart-dev or M1N1DEVICE=/dev/cu.usbmodem<serial>1")
-        threading.Thread(target=capture_serial, args=(vdev, run_dir / "vuart.log", stop_capture), daemon=True).start()
+        threading.Thread(target=capture_serial, args=(vdev, run_dir / "vuart.log", stop_capture, record),
+                         daemon=True).start()
         record(f"capturing the second CDC port {vdev} to vuart.log")
 
     iface = UartInterface()
