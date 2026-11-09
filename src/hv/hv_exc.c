@@ -692,6 +692,11 @@ bool hv_exc_sync(struct exc_info *ctx)
             hv_wdt_breadcrumb('D');
             handled = hv_handle_dabort(ctx);
             break;
+        case ESR_EC_IABORT_LOWER:
+            /* Windows PMU rewrite: first instruction fetch from a guest RAM page (stage-2 XN) */
+            hv_wdt_breadcrumb('I');
+            handled = protect_elr = hv_win_handle_iabort(ctx);
+            break;
         case ESR_EC_MSR:
             hv_wdt_breadcrumb('M');
             handled = hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));

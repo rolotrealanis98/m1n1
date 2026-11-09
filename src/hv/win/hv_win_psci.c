@@ -147,6 +147,7 @@ static void psci_system_exit(u32 reason)
     hv_win.exit_reason = reason;
     printf("HV/win: guest requested %s on CPU %d\n",
            reason == HV_WIN_EXIT_SYSTEM_OFF ? "SYSTEM_OFF" : "SYSTEM_RESET", smp_id());
+    hv_win_pmu_report();
 
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
         if (!hv_started_cpus[cpu])

@@ -606,6 +606,12 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WIN_PL011_STATS:
             reply->retval = hv_win_pl011_stats();
             break;
+        case P_HV_WIN_PMU_REWRITE:
+            reply->retval = hv_win_pmu_arm(request->args[0], request->args[1]);
+            break;
+        case P_HV_WIN_PMU_STATS:
+            reply->retval = hv_win_pmu_stat(request->args[0]);
+            break;
 
         case P_FB_INIT:
             fb_init(request->args[0]);

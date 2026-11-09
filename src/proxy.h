@@ -158,6 +158,8 @@ typedef enum {
     P_HV_WIN_PL011 = 0xc18,
     P_HV_WIN_CPU_MPIDR,
     P_HV_WIN_PL011_STATS,
+    P_HV_WIN_PMU_REWRITE, /* 0xc1b */
+    P_HV_WIN_PMU_STATS,   /* 0xc1c */
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

@@ -8,6 +8,7 @@
 #include "aic.h"
 #include "aic_regs.h"
 #include "cpu_regs.h"
+#include "hv_win_pmu_rewrite.h"
 #include "hv_win_regs.h"
 #include "smp.h"
 #include "utils.h"
@@ -50,7 +51,7 @@ static u64 hv_win_pmcr[MAX_CPUS];
 
 u64 hv_win_caps(void)
 {
-    u64 caps = HV_WIN_CAP_PSCI | HV_WIN_CAP_AIC_PT | HV_WIN_CAP_SYSTEM_OFF;
+    u64 caps = HV_WIN_CAP_PSCI | HV_WIN_CAP_AIC_PT | HV_WIN_CAP_SYSTEM_OFF | HV_WIN_CAP_PMU_RW;
 #ifdef HV_WIN_VGIC3_READY
     caps |= HV_WIN_CAP_VGIC3;
 #endif
@@ -355,16 +356,10 @@ static u64 hv_win_guest_id_reg(u32 crm, u32 op2)
     return val;
 }
 
-/* PMUv3 registers: PMCR..PMCEID1, PMCCNTR, PMXEV*, PMUSERENR, PMOVSSET (CRn 9, op1 3, CRm 12..14),
- * PMINTENSET/CLR, PMMIR (CRn 9, op1 0, CRm 14), PMEVCNTRn, PMEVTYPERn, PMCCFILTR (CRn 14, op1 3,
- * CRm 8..15) */
+/* PMUv3 registers: the same set as the stage-2 rewrite (pmu_rw_is_pmu_reg) */
 static bool hv_win_is_pmu_reg(u32 op0, u32 op1, u32 crn, u32 crm)
 {
-    if (op0 != 3)
-        return false;
-    if (crn == 9)
-        return (op1 == 3 && crm >= 12 && crm <= 14) || (op1 == 0 && crm == 14);
-    return crn == 14 && op1 == 3 && crm >= 8;
+    return op0 == 3 && pmu_rw_is_pmu_reg(op1, crn, crm);
 }
 
 /* Lock-free (per-CPU state only): runs in the unlocked MSR fast path */

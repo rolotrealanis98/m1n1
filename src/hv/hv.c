@@ -586,6 +586,8 @@ void hv_tick(struct exc_info *ctx)
     hv_vuart_poll();
     /* Windows personality only: a no-op unless P_HV_WIN_PL011 configured the emulated PL011 */
     hv_win_pl011_poll();
+    /* Windows PMU rewrite: periodic re-arm of pinned pages; a no-op unless it is armed */
+    hv_win_pmu_tick();
 }
 
 bool hv_is_nested(void)

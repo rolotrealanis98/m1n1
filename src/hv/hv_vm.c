@@ -15,6 +15,8 @@
 #include "uartproxy.h"
 #include "utils.h"
 
+#include "win/hv_win.h"
+
 extern uint64_t ram_base;
 
 #define PAGE_SIZE       0x4000
@@ -1435,6 +1437,16 @@ bool hv_handle_dabort(struct exc_info *ctx)
     hv_wdt_breadcrumb('0');
     u64 esr = hv_get_esr();
     bool is_write = esr & ESR_ISS_DABORT_WnR;
+
+    /*
+     * Windows PMU rewrite: a write to a page EL2 holds read-only + executable, or a stage-1 walker
+     * update of one. The page is made writable again; re-execute the access (the caller steps over
+     * it otherwise). No-op unless P_HV_WIN_PMU_REWRITE armed it.
+     */
+    if (hv_win_handle_dabort(ctx, esr)) {
+        ctx->elr -= 4;
+        return true;
+    }
 
     u64 far = hv_get_far();
     u64 par;

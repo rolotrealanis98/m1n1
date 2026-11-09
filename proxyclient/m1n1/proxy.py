@@ -681,6 +681,8 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_PL011 = 0xc18
     P_HV_WIN_CPU_MPIDR = 0xc19
     P_HV_WIN_PL011_STATS = 0xc1a
+    P_HV_WIN_PMU_REWRITE = 0xc1b
+    P_HV_WIN_PMU_STATS = 0xc1c
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1200,6 +1202,10 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_CPU_MPIDR, cpu)
     def hv_win_pl011_stats(self):
         return self.request(self.P_HV_WIN_PL011_STATS)
+    def hv_win_pmu_rewrite(self, base, size):
+        return self.request(self.P_HV_WIN_PMU_REWRITE, base, size, signed=True)
+    def hv_win_pmu_stats(self, idx):
+        return self.request(self.P_HV_WIN_PMU_STATS, idx)
 
     def fb_init(self):
         return self.request(self.P_FB_INIT)

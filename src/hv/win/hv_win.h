@@ -58,6 +58,7 @@
 #define HV_WIN_CAP_AIC_PT     BIT(1) /* AIC passthrough model (M0) */
 #define HV_WIN_CAP_VGIC3      BIT(2) /* GICv3 emulation usable (route R1) */
 #define HV_WIN_CAP_SYSTEM_OFF BIT(3) /* SYSTEM_OFF/RESET end the guest and report to the host */
+#define HV_WIN_CAP_PMU_RW     BIT(4) /* P_HV_WIN_PMU_REWRITE/STATS: stage-2 first-execute rewrite */
 
 enum hv_win_irq_model {
     HV_WIN_IRQ_NONE = 0,
@@ -167,5 +168,51 @@ void hv_win_pl011_poll(void);
 bool hv_win_pl011_irq_level(void);
 void hv_win_pl011_raise(u32 gsiv);
 u64 hv_win_pl011_stats(void); /* tx[31:0] | rx[47:32] | tx_dropped[63:48] */
+
+/*
+ * ---- Stage-2 first-execute PMUv3 rewrite (hv_win_pmu.c, docs/PMU-EL2-REWRITE.md) ----------------
+ * Off unless the host calls P_HV_WIN_PMU_REWRITE(base, size) for each guest RAM range after
+ * P_HV_WIN_CONFIGURE and after the RAM is mapped in stage 2, before the guest starts (launcher flag
+ * --pmu-rewrite el2). Guest RAM is then non-executable in stage 2 until EL2 has rewritten the PMUv3
+ * accesses in a page (hv_win_pmu_rewrite.h), read-only while executable, and back to writable and
+ * non-executable on a write. P_HV_WIN_PMU_STATS(idx) reads one counter, or one entry of the ring of
+ * the last HV_WIN_PMU_LOG_SIZE rewrites.
+ */
+enum hv_win_pmu_stat {
+    HV_WIN_PMU_ID = 0,          /* HV_WIN_PMU_MAGIC << 32 | version << 16 | armed */
+    HV_WIN_PMU_PAGES,           /* 16 KiB pages execute-tracked */
+    HV_WIN_PMU_RANGES,          /* ranges armed */
+    HV_WIN_PMU_TABLES,          /* L3 tables (16 KiB each) allocated to split 32 MiB blocks */
+    HV_WIN_PMU_SCANS,           /* first-execute scans: DIRTY -> CODE */
+    HV_WIN_PMU_PAGES_REWRITTEN, /* scans that rewrote at least one word */
+    HV_WIN_PMU_INSNS,           /* words rewritten (= rewrites logged) */
+    HV_WIN_PMU_INSNS_PMCCNTR,   /* mrs PMCCNTR_EL0 -> mrs CNTVCT_EL0 */
+    HV_WIN_PMU_INSNS_MRS,       /* other PMU mrs -> movz #0 */
+    HV_WIN_PMU_INSNS_MSR,       /* PMU msr -> nop */
+    HV_WIN_PMU_WRITE_FLIPS,     /* CODE -> DIRTY on a guest write */
+    HV_WIN_PMU_WALK_FLIPS,      /* CODE -> DIRTY on a stage-1 table walker update */
+    HV_WIN_PMU_PINS,            /* CODE -> PINNED (RWX) at the flip cap */
+    HV_WIN_PMU_PIN_FULL,        /* flip cap reached while the pin list was full: kept flipping */
+    HV_WIN_PMU_SWEEPS,          /* periodic re-arms of the pin list */
+    HV_WIN_PMU_UNPINS,          /* PINNED -> DIRTY by a sweep */
+    HV_WIN_PMU_SPURIOUS,        /* fault on a page already in the needed state (stale TLB) */
+    HV_WIN_PMU_IPA_FAIL,        /* AT could not translate the fault address: access retried */
+    HV_WIN_PMU_NOT_OURS,        /* permission faults on untracked IPAs, left to the stock path */
+    HV_WIN_PMU_STUCK,           /* faults handed to the stock path after too many retries */
+    HV_WIN_PMU_NR_STATS,
+};
+#define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */
+#define HV_WIN_PMU_VERSION      1
+#define HV_WIN_PMU_LOG_SIZE     256
+#define HV_WIN_PMU_STAT_LOG_IPA 0x100 /* + slot: IPA of the word (rewrite n is in slot n % 256) */
+#define HV_WIN_PMU_STAT_LOG_OP  0x200 /* + slot: old word << 32 | new word */
+#define HV_WIN_PMU_STAT_LOG_ELR 0x300 /* + slot: guest PC whose fetch triggered the scan */
+
+int hv_win_pmu_arm(u64 base, u64 size); /* pages tracked, or -1 */
+u64 hv_win_pmu_stat(u64 idx);
+bool hv_win_handle_iabort(struct exc_info *ctx);          /* true: re-execute the instruction */
+bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr); /* true: re-execute the access */
+void hv_win_pmu_tick(void);                               /* hv_tick(), under the big HV lock */
+void hv_win_pmu_report(void);                             /* printf summary (guest exit) */
 
 #endif
