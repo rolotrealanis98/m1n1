@@ -20,6 +20,7 @@
 #define HV_WIN_H
 
 #include "exception.h"
+#include "smp_asm.h"
 #include "types.h"
 
 #define HV_WIN_MAGIC       0x57454c32UL /* "WEL2" */
@@ -61,6 +62,9 @@ enum hv_win_exit {
     HV_WIN_EXIT_SYSTEM_RESET = 2,
 };
 
+/* MPIDR affinity fields: Aff3 (bits 39:32) and Aff2..Aff0 (bits 23:0) */
+#define HV_WIN_MPIDR_AFF_MASK 0xff00ffffffUL
+
 struct hv_win_state {
     u32 irq_model;
     u32 flags;
@@ -70,12 +74,20 @@ struct hv_win_state {
     int reserved_cpu;
     u32 exit_reason;
     u64 psci_calls;
+    /*
+     * Guest vCPU table, from the MPIDR list the launcher passes to hv_win_configure(): vCPU index
+     * (= /chosen/m5w,cpus order = GICR frame order = ACPI processor UID) <-> m1n1 CPU index.
+     * vCPU 0 is the boot CPU.
+     */
+    int vcpu_cpu[MAX_CPUS]; /* m1n1 CPU for each vCPU, -1 past nr_vcpus */
+    int cpu_vcpu[MAX_CPUS]; /* vCPU for each m1n1 CPU, -1 if the CPU is not offered to the guest */
 };
 
 extern struct hv_win_state hv_win;
 
 u64 hv_win_caps(void);
-int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, u64 flags);
+int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, u64 flags,
+                     u64 cpus);
 u64 hv_win_status(void);
 
 static inline bool hv_win_enabled(void)

@@ -588,7 +588,7 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_CONFIGURE:
             reply->retval = hv_win_configure(request->args[0], request->args[1], request->args[2],
-                                             request->args[3], request->args[4]);
+                                             request->args[3], request->args[4], request->args[5]);
             break;
         case P_HV_WIN_STATUS:
             reply->retval = hv_win_status();

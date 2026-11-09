@@ -80,9 +80,10 @@ static int psci_mpidr_to_cpu(u64 mpidr)
     return -1;
 }
 
+/* Only the CPUs published in /chosen/m5w,cpus (the vCPU table) may be brought up */
 static bool psci_cpu_allowed(int cpu)
 {
-    return cpu >= 0 && cpu != hv_win.reserved_cpu;
+    return cpu >= 0 && cpu < MAX_CPUS && cpu != hv_win.reserved_cpu && hv_win.cpu_vcpu[cpu] >= 0;
 }
 
 static s64 psci_cpu_on(u64 target, u64 entry, u64 context)

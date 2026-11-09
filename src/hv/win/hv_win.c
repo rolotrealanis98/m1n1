@@ -44,7 +44,72 @@ static int hv_win_highest_cpu(void)
     return top;
 }
 
-int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, u64 flags)
+static int hv_win_mpidr_to_cpu(u64 mpidr)
+{
+    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        if (cpu != boot_cpu_idx && !smp_is_alive(cpu))
+            continue;
+        if ((smp_get_mpidr(cpu) & HV_WIN_MPIDR_AFF_MASK) == mpidr)
+            return cpu;
+    }
+    return -1;
+}
+
+/*
+ * vCPU table = /chosen/m5w,cpus (CONTRACT.md s9): vCPU index = GICR frame = ACPI processor UID.
+ * The launcher may pass its list to P_HV_WIN_CONFIGURE as the address of nr_vcpus u64 MPIDRs, boot
+ * CPU first. Without one, EL2 uses the rule run_windows.py publishes: the boot CPU, then the other
+ * CPUs in m1n1 (ADT cpu-id) order, without the CPU reserved for the host.
+ */
+static int hv_win_add_vcpu(u32 index, int cpu, int reserved)
+{
+    if (cpu < 0 || cpu == reserved || hv_win.cpu_vcpu[cpu] >= 0 ||
+        (index == 0) != (cpu == boot_cpu_idx))
+        return -1;
+    hv_win.vcpu_cpu[index] = cpu;
+    hv_win.cpu_vcpu[cpu] = index;
+    return 0;
+}
+
+static int hv_win_build_vcpus(u32 nr_vcpus, int reserved, u64 cpus)
+{
+    u32 n = 0;
+
+    for (int i = 0; i < MAX_CPUS; i++)
+        hv_win.vcpu_cpu[i] = hv_win.cpu_vcpu[i] = -1;
+
+    if (!cpus) {
+        if (hv_win_add_vcpu(n++, boot_cpu_idx, reserved) < 0)
+            return -1;
+        for (int cpu = 0; cpu < MAX_CPUS && n < nr_vcpus; cpu++)
+            if (cpu != boot_cpu_idx && smp_is_alive(cpu) && !hv_win_add_vcpu(n, cpu, reserved))
+                n++;
+        if (n < nr_vcpus) {
+            printf("HV/win: fewer than %u CPUs available to the guest\n", nr_vcpus);
+            return -1;
+        }
+        return 0;
+    }
+
+    if ((cpus & 7) || !is_heap((void *)cpus) || !is_heap((void *)(cpus + 8 * nr_vcpus - 1))) {
+        printf("HV/win: bad MPIDR list address 0x%lx\n", cpus);
+        return -1;
+    }
+
+    for (u32 i = 0; i < nr_vcpus; i++) {
+        u64 mpidr = read64(cpus + 8 * i) & HV_WIN_MPIDR_AFF_MASK;
+        if (hv_win_add_vcpu(i, hv_win_mpidr_to_cpu(mpidr), reserved) < 0) {
+            printf("HV/win: m5w,cpus[%u] = 0x%lx is not usable (unknown, reserved, repeated, or "
+                   "not the boot CPU first)\n",
+                   i, mpidr);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, u64 flags, u64 cpus)
 {
     if (hv_win.irq_model != HV_WIN_IRQ_NONE) {
         printf("HV/win: already configured\n");
@@ -86,13 +151,21 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
             return -1;
     }
 
+    int reserved = (flags & HV_WIN_F_RESERVE_CPU) ? hv_win_highest_cpu() : -1;
+    if (reserved >= 0 && reserved == boot_cpu_idx) {
+        printf("HV/win: cannot reserve the boot CPU\n");
+        return -1;
+    }
+    if (hv_win_build_vcpus(nr_vcpus, reserved, cpus) < 0)
+        return -1;
+
     hv_win.flags = flags;
     hv_win.gicd_base = gicd_base;
     hv_win.gicr_base = gicr_base;
     hv_win.nr_vcpus = nr_vcpus;
     hv_win.exit_reason = HV_WIN_EXIT_NONE;
     hv_win.psci_calls = 0;
-    hv_win.reserved_cpu = (flags & HV_WIN_F_RESERVE_CPU) ? hv_win_highest_cpu() : -1;
+    hv_win.reserved_cpu = reserved;
 
     if (irq_model == HV_WIN_IRQ_VGIC3 && hv_vgic3_init(gicd_base, gicr_base, nr_vcpus) < 0)
         return -1;

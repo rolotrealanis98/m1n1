@@ -1185,8 +1185,10 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_SET_GENTER_TRAP, enabled)
     def hv_win_caps(self):
         return self.request(self.P_HV_WIN_CAPS)
-    def hv_win_configure(self, irq_model, gicd_base, gicr_base, nr_vcpus, flags):
-        return self.request(self.P_HV_WIN_CONFIGURE, irq_model, gicd_base, gicr_base, nr_vcpus, flags)
+    def hv_win_configure(self, irq_model, gicd_base, gicr_base, nr_vcpus, flags, cpus=0):
+        # cpus: optional m5w,cpus MPIDR list (boot CPU first) as packed little-endian u64s; 0 = EL2's
+        # default order (boot CPU, then ADT cpu-id order, without the reserved CPU)
+        return self.request(self.P_HV_WIN_CONFIGURE, irq_model, gicd_base, gicr_base, nr_vcpus, flags, cpus)
     def hv_win_status(self):
         return self.request(self.P_HV_WIN_STATUS)
     def hv_win_pl011(self, base, gsiv=0):
