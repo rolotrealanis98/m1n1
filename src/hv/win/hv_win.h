@@ -11,9 +11,9 @@
  *     IRQs stay routed to EL1 (HCR_EL2.IMO=0) and the Apple timer FIQs keep reaching the guest as
  *     virtual FIQs through the existing hv_update_fiq() path. One guest CPU.
  *   VGIC3 (M1+): HCR_EL2.IMO=FMO=1, AIC events taken at EL2 and injected as virtual SPIs, timer
- * FIQs injected as PPIs, SGIs routed from trapped ICC_SGI1R_EL1, emulated GICD/GICR frames, Apple's
- *     hardware virtual CPU interface (ICH list registers) for delivery. Scaffold only: refused by
- *     hv_win_configure() until HV_WIN_VGIC3_READY is defined.
+ *     FIQs injected as PPIs, SGIs routed from trapped ICC_SGI1R_EL1, emulated GICD/GICR frames,
+ *     Apple's hardware virtual CPU interface (ICH list registers) for delivery (hv_vgic3.c).
+ *     Refused by hv_win_configure() until HV_WIN_VGIC3_READY is defined.
  */
 
 #ifndef HV_WIN_H
@@ -89,6 +89,7 @@ u64 hv_win_caps(void);
 int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, u64 flags,
                      u64 cpus);
 u64 hv_win_status(void);
+int hv_win_map_irq(u64 aic_line, u64 gsiv); /* VGIC3 model: route an AIC line to SPI <gsiv> */
 
 static inline bool hv_win_enabled(void)
 {
@@ -113,13 +114,28 @@ void hv_win_update_virq(bool ptimer_firing, bool vtimer_firing); /* vGIC model, 
 /* PSCI (hv_win_psci.c) */
 bool hv_win_psci_call(struct exc_info *ctx);
 
-/* GICv3 emulation (hv_vgic3.c) */
+/* GICv3 emulation (hv_vgic3.c); <cpu> arguments are m1n1 CPU indices */
 int hv_vgic3_init(u64 gicd_base, u64 gicr_base, u32 nr_vcpus);
 void hv_vgic3_cpu_init(void);
+int hv_vgic3_map_irq(u32 aic_line, u32 intid);
 bool hv_vgic3_handle_sgi1r(u64 val);
+void hv_vgic3_handle_aic_irq(u32 aic_line);
 void hv_vgic3_set_ppi_level(int cpu, u32 intid, bool level);
-void hv_vgic3_inject_spi(u32 intid);
+void hv_vgic3_set_spi_level(u32 intid, bool level); /* emulated level-triggered devices */
+void hv_vgic3_inject_spi(u32 intid);                /* emulated edge: latch pending */
 void hv_vgic3_flush(void);
+void hv_vgic3_maintenance(void);
+
+/*
+ * First thing in hv_exc_fiq(): on Apple cores the vGIC maintenance interrupt is a FIQ with no AIC
+ * status bit, recognised by a non-zero ICH_MISR_EL2 while ICH_HCR_EL2.En is set (Linux
+ * irq-apple-aic.c does the same).
+ */
+static inline void hv_win_fiq_entry(void)
+{
+    if (hv_win_vgic_enabled())
+        hv_vgic3_maintenance();
+}
 
 /*
  * ---- Emulated PL011 for Windows KD (hv_win_pl011.c) ------------------------------------------

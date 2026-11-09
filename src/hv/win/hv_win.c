@@ -277,6 +277,29 @@ bool hv_win_handle_msr(struct exc_info *ctx, u64 iss)
     }
 }
 
+int hv_win_map_irq(u64 aic_line, u64 gsiv)
+{
+    if (!hv_win_vgic_enabled() || !aic)
+        return -1;
+
+    u64 die = aic_line / aic->max_irq;
+    if (die >= aic->nr_die || aic_line % aic->max_irq >= aic->nr_irq) {
+        printf("HV/win: AIC line %ld does not exist\n", aic_line);
+        return -1;
+    }
+
+    if (hv_vgic3_map_irq(aic_line, gsiv) < 0) {
+        printf("HV/win: cannot route AIC line %ld to INTID %ld (range 32..%d, each once)\n",
+               aic_line, gsiv, GIC_MAX_SPI);
+        return -1;
+    }
+
+    return 0;
+}
+
+/* AIC lines are numbered die * max_irq + num, as in m1n1's IRQ tracing and /chosen/m5w,irq-map */
+#define HV_WIN_IRQ_BUDGET 32
+
 bool hv_win_handle_irq(struct exc_info *ctx)
 {
     UNUSED(ctx);
@@ -284,18 +307,15 @@ bool hv_win_handle_irq(struct exc_info *ctx)
     if (!hv_win_vgic_enabled() || !aic)
         return false;
 
-    u32 event = aic_ack();
-    u32 type = FIELD_GET(AIC_EVENT_TYPE, event);
+    /* Each read acknowledges and masks one event; hv_vgic3 unmasks after the guest's EOI */
+    for (int i = 0; i < HV_WIN_IRQ_BUDGET; i++) {
+        u32 event = aic_ack();
 
-    if (type == AIC_EVENT_TYPE_HW) {
-        u32 hwirq =
-            FIELD_GET(AIC_EVENT_DIE, event) * aic->max_irq + FIELD_GET(AIC_EVENT_NUM, event);
-        /*
-         * TODO(vGIC): translate through the AIC line -> SPI alias table built by the host from the
-         * ADT and the DSDT (EL2-RUNTIME.md "Interrupt numbering"), then hv_vgic3_inject_spi(). The
-         * line stays masked (AIC masks on acknowledge) until the guest deactivates the vINTID.
-         */
-        printf("HV/win: unrouted AIC line %u left masked\n", hwirq);
+        if (!event)
+            break;
+        if (FIELD_GET(AIC_EVENT_TYPE, event) == AIC_EVENT_TYPE_HW)
+            hv_vgic3_handle_aic_irq(FIELD_GET(AIC_EVENT_DIE, event) * aic->max_irq +
+                                    FIELD_GET(AIC_EVENT_NUM, event));
     }
 
     return true;
