@@ -3,6 +3,7 @@
 #include "usb.h"
 #include "adt.h"
 #include "dart.h"
+#include "heapblock.h"
 #include "i2c.h"
 #include "iodev.h"
 #include "malloc.h"
@@ -10,10 +11,12 @@
 #include "string.h"
 #include "tps6598x.h"
 #include "types.h"
+#include "uartproxy.h"
 #include "usb_dwc3.h"
 #include "usb_dwc3_regs.h"
 #include "utils.h"
 #include "vsprintf.h"
+#include "xnuboot.h"
 
 struct usb_drd_regs {
     uintptr_t drd_regs;
@@ -436,6 +439,25 @@ void usb_iodev_init(void)
     }
 }
 
+int usb_iodev_release(u32 idx)
+{
+    if (idx >= USB_IODEV_COUNT || IODEV_USB0 + idx == uartproxy_iodev)
+        return -1;
+
+    void *opaque = iodev_get_opaque(IODEV_USB0 + idx);
+    if (opaque && iodev_usb_vuart.opaque == opaque)
+        return -1;
+
+    struct iodev *usb_iodev = iodev_unregister_device(IODEV_USB0 + idx);
+    if (!usb_iodev)
+        return 0;
+
+    printf("USB%d: released for a guest host controller\n", idx);
+    usb_dwc3_shutdown(usb_iodev->opaque);
+    free(usb_iodev);
+    return 0;
+}
+
 void usb_iodev_shutdown(void)
 {
     for (int i = first_usb_iodev; i < USB_IODEV_COUNT; i++) {
@@ -473,4 +495,449 @@ int usb_enable_debugusb(void)
     iodev_reset_rp(IODEV_DOCKCHANNEL_UART);
 
     return 0;
+}
+
+/*
+ * ---- Host preparation for a guest's xHCI driver ----------------------------------------------
+ *
+ * m5pro-windows docs/USB-HOST.md. Two USB2 PHY recipes, both running on this hardware under Linux:
+ *   native (default): Aurora's T6050 combo PHY (drivers/phy/apple/usb-t6050/apple_t6050_usb_phy.h,
+ *     apple_t6050_usb2_stop() then apple_t6050_usb2_host[]), with the ADT's USB2PHY default and
+ *     host tunables, plus the dwc3-apple CIO values and the controller's ADT tunables, SUSPHY on;
+ *     what the J716s daily kernel does in host mode on the left-front port.
+ *   legacy (USB_HOST_F_LEGACY_PHY): usb_phy_bringup()'s values with the host bits
+ * USB2PHY_SIG[14:12] (m5pro-linux contrib/validated/legacy-7.2/usb, phy-apple-usb2), no controller
+ * tunables, SUSPHY off; the 7.2-kernel USB 2.0 host of 2026-11-06 (R2-B). Both leave USB3 off: the
+ * PIPE stays on the dummy producer, the port runs at high speed.
+ */
+
+#define USB2_DIGITAL_CFG      0x00 /* atc-phyN reg[1] ("usb2-digital"), bits 0 and 3 set in host */
+#define USB2_DIGITAL_CFG_HOST (BIT(0) | BIT(3))
+
+#define USB_HOST_DRD_TUNABLE_SPAN 0x11800 /* dwc3 core window, ADT usb-drdN reg[0] */
+
+struct usb_host_tunable {
+    const char *prop;
+    bool on_drd; /* usb-drdN, else atc-phyN */
+    u32 reg_idx; /* "reg" entry of that node holding the bank */
+    u32 offset;  /* bank start inside that entry */
+    u32 span;    /* bytes from the bank start that records may touch */
+};
+
+/* atc-phyN reg[0]: the USB2 PHY bank (bank 0 of the T6050 combo PHY) */
+static const struct usb_host_tunable usb_host_usb2_tunables[] = {
+    {"tunable_USB2PHY_DFLT", false, 0, 0, 0x4000},
+    {"tunable_USB2PHY_HOST", false, 0, 0, 0x4000},
+};
+
+/*
+ * dwc3-apple.c dwc3_apple_tunable_list in application order, as the J716s daily DT carries them
+ * (gbl-default, gbl-host, cio, dbg, cfg-host, link; bulk and ausbc are not described there).
+ */
+static const struct usb_host_tunable usb_host_drd_tunables[] = {
+    {"tunable_DRD_USB31_GBL_DEFAULT", true, 0, 0xc100, USB_HOST_DRD_TUNABLE_SPAN - 0xc100},
+    {"tunable_DRD_USB31_GBL_HOST", true, 0, 0xc100, USB_HOST_DRD_TUNABLE_SPAN - 0xc100},
+    {"tunable_DRD_CIO_REGS_DEFAULT", true, 0, 0xcd20, USB_HOST_DRD_TUNABLE_SPAN - 0xcd20},
+    {"tunable_DRD_USB31_DBG_DEFAULT", true, 0, 0xd800, 0x800},
+    {"tunable_DRD_USB31_CFG_HOST", true, 1, 0, 0x4000},
+    {"tunable_LINK_REGS_DEFAULT", true, 0, 0xd000, 0x800},
+};
+
+/* ADT ATC/DRD tunable record: offset in bits 23:0, access size in bits (32) in 31:24 */
+struct usb_host_tunable_rec {
+    u32 tag;
+    u32 mask;
+    u32 value;
+} PACKED;
+
+struct usb_host_port {
+    u32 idx;
+    char drd_path[sizeof(FMT_DRD_PATH)];
+    char atc_path[sizeof(FMT_ATC_PATH)];
+    char dart_path[sizeof(FMT_DART_PATH)];
+    int drd_trace[8], atc_trace[8], dart_trace[8];
+    int drd_node, atc_node, dart_node;
+    u64 core, core_size; /* usb-drdN reg[0]: DWC3 + xHCI */
+    u64 pipehandler;     /* usb-drdN reg[3] */
+    u64 usb2phy;         /* atc-phyN reg[0] */
+    u64 usb2dig;         /* atc-phyN reg[1] */
+    u64 dart[2];         /* dart-usbN reg[0] (LLT) and reg[1] (BLK) */
+};
+
+static struct dart_identity usb_host_ident[USB_IODEV_COUNT];
+
+static int usb_host_tunable_bank(const struct usb_host_port *p, const struct usb_host_tunable *t,
+                                 u64 *bank)
+{
+    u64 base, size;
+    int *trace = (int *)(t->on_drd ? p->drd_trace : p->atc_trace);
+
+    if (adt_get_reg(adt, trace, "reg", t->reg_idx, &base, &size) < 0 || size < t->offset + t->span)
+        return -1;
+    *bank = base + t->offset;
+    return 0;
+}
+
+/* Check every record (apply = false) or write them (apply = true). */
+static int usb_host_tunables(const struct usb_host_port *p, const struct usb_host_tunable *list,
+                             size_t n, bool apply)
+{
+    for (size_t i = 0; i < n; i++) {
+        const struct usb_host_tunable *t = &list[i];
+        int node = t->on_drd ? p->drd_node : p->atc_node;
+        u32 len;
+        const struct usb_host_tunable_rec *rec = adt_getprop(adt, node, t->prop, &len);
+        u64 bank;
+
+        if (!rec || !len || len % sizeof(*rec) || usb_host_tunable_bank(p, t, &bank)) {
+            printf("usb: %s: %s missing or malformed\n", t->on_drd ? p->drd_path : p->atc_path,
+                   t->prop);
+            return -1;
+        }
+        for (u32 j = 0; j < len / sizeof(*rec); j++) {
+            u32 off = rec[j].tag & 0xffffff;
+            if ((rec[j].tag >> 24) != 32 || off & 3 || off + 4 > t->span ||
+                rec[j].value & ~rec[j].mask) {
+                printf("usb: %s: %s record %u is malformed\n",
+                       t->on_drd ? p->drd_path : p->atc_path, t->prop, j);
+                return -1;
+            }
+            if (apply)
+                mask32(bank + off, rec[j].mask, rec[j].value);
+        }
+    }
+    return 0;
+}
+
+static int usb_host_get_port(u32 idx, struct usb_host_port *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->idx = idx;
+    snprintf(p->drd_path, sizeof(p->drd_path), FMT_DRD_PATH, idx);
+    snprintf(p->atc_path, sizeof(p->atc_path), FMT_ATC_PATH, idx);
+    snprintf(p->dart_path, sizeof(p->dart_path), FMT_DART_PATH, idx);
+
+    p->drd_node = adt_path_offset_trace(adt, p->drd_path, p->drd_trace);
+    p->atc_node = adt_path_offset_trace(adt, p->atc_path, p->atc_trace);
+    p->dart_node = adt_path_offset_trace(adt, p->dart_path, p->dart_trace);
+    if (p->drd_node < 0 || p->atc_node < 0 || p->dart_node < 0)
+        return -1;
+    if (!adt_is_compatible(adt, p->dart_node, "dart,t8110"))
+        return -1;
+
+    u64 size;
+    if (adt_get_reg(adt, p->drd_trace, "reg", 0, &p->core, &p->core_size) < 0 ||
+        adt_get_reg(adt, p->drd_trace, "reg", 3, &p->pipehandler, NULL) < 0 ||
+        adt_get_reg(adt, p->atc_trace, "reg", 0, &p->usb2phy, NULL) < 0 ||
+        adt_get_reg(adt, p->atc_trace, "reg", 1, &p->usb2dig, NULL) < 0 ||
+        adt_get_reg(adt, p->dart_trace, "reg", 0, &p->dart[0], &size) < 0 ||
+        adt_get_reg(adt, p->dart_trace, "reg", 1, &p->dart[1], &size) < 0)
+        return -1;
+    if (p->core_size < 0xd800 + 0x800)
+        return -1;
+    return 0;
+}
+
+/* Identity ranges: valid for dart_identity_build, inside DRAM, clear of m1n1 and its heap. */
+static int usb_host_check_ranges(const struct dart_range *r, u32 count)
+{
+    int node = adt_path_offset(adt, "/chosen");
+    u64 dram_base = 0, dram_size = 0;
+    u64 m1n1_lo = cur_boot_args.phys_base, m1n1_hi = (u64)heapblock_alloc(0);
+
+    if (node < 0 || ADT_GETPROP(adt, node, "dram-base", &dram_base) < 0 ||
+        ADT_GETPROP(adt, node, "dram-size", &dram_size) < 0 || !dram_size)
+        return -1;
+
+    for (u32 i = 0; i < count; i++) {
+        u64 b = r[i].base, e = r[i].base + r[i].size;
+        if (e < b || b < dram_base || e > dram_base + dram_size) {
+            printf("usb: identity range 0x%lx..0x%lx is outside DRAM 0x%lx+0x%lx\n", b, e,
+                   dram_base, dram_size);
+            return -1;
+        }
+        if (b < m1n1_hi && m1n1_lo < e) {
+            printf("usb: identity range 0x%lx..0x%lx overlaps m1n1 and its heap 0x%lx..0x%lx\n", b,
+                   e, m1n1_lo, m1n1_hi);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+struct usb_host_pd {
+    u32 idx;
+    bool found;
+    bool s0;
+};
+
+/* hpmN serves usb-drdN, as usb_init() assumes (J716s ADT: hpm1 port-number 2 = usb-drd1) */
+static bool usb_host_pd_match(char *hpm_path, void *data)
+{
+    const struct usb_host_pd *pd = data;
+    const char *name = strrchr(hpm_path, '/');
+
+    return name && !strncmp(name + 1, "hpm", 3) && name[4] == (char)('0' + pd->idx) && !name[5];
+}
+
+static int usb_host_pd_s0(char *hpm_path, tps6598x_dev_t *tps, void *data)
+{
+    struct usb_host_pd *pd = data;
+
+    pd->found = true;
+    pd->s0 = tps6598x_powerup(tps) == 0;
+    printf("usb: %s: USB-PD controller %s\n", hpm_path, pd->s0 ? "in S0" : "NOT in S0");
+    return HPM_ACTION_STOP;
+}
+
+static void usb_host_hold_reset(const struct usb_host_port *p)
+{
+    clear32(p->pipehandler + PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
+    set32(p->pipehandler + PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
+}
+
+/* Asahi atcphy_dwc3_reset_deassert(): unclamp first, then release the reset */
+static void usb_host_release_reset(const struct usb_host_port *p)
+{
+    clear32(p->pipehandler + PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
+    set32(p->pipehandler + PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
+}
+
+/* apple_t6050_usb2_stop() */
+static void usb_host_usb2_stop(const struct usb_host_port *p)
+{
+    if (!(read32(p->usb2phy + USB2PHY_CTL) & USB2PHY_CTL_PORT_RESET)) {
+        set32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_PORT_RESET);
+        mdelay(5);
+    }
+    mask32(p->usb2phy + USB2PHY_USBCTL, USB2PHY_USBCTL_USB_MODE, USB2PHY_USBCTL_ISOLATION);
+    set32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_SIDDQ);
+    set32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_RESET);
+    set32(p->usb2phy + USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_APBCLK_GATE_OFF);
+    set32(p->usb2phy + USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_REFCLK_GATE_OFF);
+    udelay(1);
+}
+
+/* apple_t6050_usb2_host[]: default and host tunables, out of reset, run */
+static void usb_host_usb2_native(const struct usb_host_port *p)
+{
+    usb_host_tunables(p, usb_host_usb2_tunables, ARRAY_SIZE(usb_host_usb2_tunables), true);
+    mdelay(10);
+    clear32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_SIDDQ);
+    udelay(10);
+    clear32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_RESET);
+    clear32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_PORT_RESET);
+    set32(p->usb2dig + USB2_DIGITAL_CFG, USB2_DIGITAL_CFG_HOST);
+    set32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_APB_RESET_N);
+    clear32(p->usb2phy + USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_APBCLK_GATE_OFF);
+    clear32(p->usb2phy + USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_REFCLK_GATE_OFF);
+    udelay(30);
+    mdelay(5);
+    mask32(p->usb2phy + USB2PHY_USBCTL, USB2PHY_USBCTL_USB_MODE, USB2PHY_USBCTL_RUN);
+}
+
+/* usb_phy_bringup()'s USB2 values with the host signalling bits (R2-B, 7.2 kernel) */
+static void usb_host_usb2_legacy(const struct usb_host_port *p)
+{
+    write32(p->usb2phy + USB2PHY_SIG, 0x01c1000f | USB2PHY_SIG_HOST);
+    write32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_RESET | USB2PHY_CTL_PORT_RESET);
+    udelay(10);
+    clear32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_RESET);
+    udelay(10);
+    clear32(p->usb2phy + USB2PHY_CTL, USB2PHY_CTL_PORT_RESET);
+    udelay(10);
+    write32(p->usb2phy + USB2PHY_MISCTUNE, 0x008c0813);
+    write32(p->usb2phy + USB2PHY_USBCTL, USB2PHY_USBCTL_RUN);
+    udelay(10);
+}
+
+static int usb_host_usb2_check(const struct usb_host_port *p)
+{
+    u32 usbctl = read32(p->usb2phy + USB2PHY_USBCTL), ctl = read32(p->usb2phy + USB2PHY_CTL);
+    u32 sig = read32(p->usb2phy + USB2PHY_SIG);
+    u32 resets = USB2PHY_CTL_RESET | USB2PHY_CTL_PORT_RESET | USB2PHY_CTL_SIDDQ;
+
+    printf("usb: %s: USB2 PHY USBCTL %08x CTL %08x SIG %08x MISCTUNE %08x\n", p->atc_path, usbctl,
+           ctl, sig, read32(p->usb2phy + USB2PHY_MISCTUNE));
+    if ((usbctl & USB2PHY_USBCTL_USB_MODE) != USB2PHY_USBCTL_RUN || (ctl & resets) ||
+        (sig & USB2PHY_SIG_HOST) != USB2PHY_SIG_HOST)
+        return -1;
+    return 0;
+}
+
+static int usb_host_attach_darts(const struct usb_host_port *p, u32 flags,
+                                 const struct dart_range *ranges, u32 count, u64 *info)
+{
+    struct dart_identity *id = &usb_host_ident[p->idx];
+    u64 top = ranges[count - 1].base + ranges[count - 1].size;
+
+    for (int i = 0; i < 2; i++) {
+        if (dart_t8110_locked(p->dart[i])) {
+            printf("usb: %s reg[%d] is locked\n", p->dart_path, i);
+            return -1;
+        }
+        dart_t8110_block(p->dart[i]);
+    }
+
+    if (flags & USB_HOST_F_DART_BYPASS) {
+        if (!dart_t8110_attach_bypass(p->dart[0]) && !dart_t8110_attach_bypass(p->dart[1])) {
+            printf("usb: %s: both instances bypass (the controller reaches all of RAM)\n",
+                   p->dart_path);
+            *info |= USB_HOST_INFO_BYPASS;
+            return 0;
+        }
+        dart_t8110_block(p->dart[0]);
+        dart_t8110_block(p->dart[1]);
+        printf("usb: %s: bypass refused, falling back to the identity map\n", p->dart_path);
+    }
+
+    for (int i = 0; i < 2; i++) {
+        u32 va = dart_t8110_va_width(p->dart[i]);
+        if (va <= 36 || (va < 64 && top > (1ULL << va))) {
+            printf("usb: %s reg[%d]: VA width %u cannot hold DVA == PA up to 0x%lx\n", p->dart_path,
+                   i, va, top);
+            return -1;
+        }
+    }
+
+    dart_identity_free(id);
+    if (dart_identity_build(id, ranges, count))
+        return -1;
+    for (int i = 0; i < 2; i++) {
+        if (dart_t8110_attach_identity(p->dart[i], id)) {
+            dart_t8110_block(p->dart[0]);
+            dart_t8110_block(p->dart[1]);
+            dart_identity_free(id);
+            return -1;
+        }
+        if (flags & USB_HOST_F_LOCK_DART)
+            dart_t8110_lock(p->dart[i]);
+    }
+    printf("usb: %s: identity map on every stream of both instances, %u tables at 0x%lx, %u "
+           "range(s) up to 0x%lx, ERROR %08x/%08x\n",
+           p->dart_path, id->ntables, id->root, count, top, dart_t8110_error(p->dart[0]),
+           dart_t8110_error(p->dart[1]));
+    *info |= USB_HOST_INFO_IDENTITY | FIELD_PREP(USB_HOST_INFO_TABLES, min(id->ntables, 0xffffU));
+    return 0;
+}
+
+static void usb_host_usb2(const struct usb_host_port *p, bool legacy)
+{
+    usb_host_usb2_stop(p);
+    if (legacy)
+        usb_host_usb2_legacy(p);
+    else
+        usb_host_usb2_native(p);
+}
+
+s64 usb_host_prepare(u32 port, u32 flags, const struct dart_range *ranges, u32 count)
+{
+    struct usb_host_port p;
+    struct usb_xhci_info xhci;
+    bool legacy = flags & USB_HOST_F_LEGACY_PHY;
+    u64 info = legacy ? USB_HOST_INFO_LEGACY_PHY : 0;
+    s64 err;
+
+    if (port >= USB_IODEV_COUNT || (flags & ~USB_HOST_F_MASK))
+        return USB_HOST_E_ARGS;
+    if (chip_id != T6050 && chip_id != T6051)
+        return USB_HOST_E_CHIP;
+    if (usb_host_get_port(port, &p) < 0) {
+        printf("usb: port %u: no usb-drd/atc-phy/dart-usb (t8110) set in the ADT\n", port);
+        return USB_HOST_E_PORT;
+    }
+    void *opaque = iodev_get_opaque(IODEV_USB0 + port);
+    if (IODEV_USB0 + port == uartproxy_iodev || (opaque && iodev_usb_vuart.opaque == opaque)) {
+        printf("usb: port %u carries the proxy or the vuart; refusing\n", port);
+        return USB_HOST_E_BUSY;
+    }
+    if (!ranges || !count || count > 64 || usb_host_check_ranges(ranges, count))
+        return USB_HOST_E_RANGES;
+    if (!legacy &&
+        (usb_host_tunables(&p, usb_host_usb2_tunables, ARRAY_SIZE(usb_host_usb2_tunables), false) ||
+         usb_host_tunables(&p, usb_host_drd_tunables, ARRAY_SIZE(usb_host_drd_tunables), false)))
+        return USB_HOST_E_TUNABLES;
+
+    printf("usb: preparing %s (core 0x%lx) for a guest xHCI driver, %s USB2 PHY, flags 0x%x\n",
+           p.drd_path, p.core, legacy ? "legacy" : "native", flags);
+
+    if (pmgr_adt_power_enable(p.atc_path) < 0 || pmgr_adt_power_enable(p.dart_path) < 0 ||
+        pmgr_adt_power_enable(p.drd_path) < 0)
+        return USB_HOST_E_PORT;
+
+    /* usb_init() put every non-debug HPM in S0 at boot; make sure this one still is */
+    if (!(flags & USB_HOST_F_KEEP_PD)) {
+        struct usb_host_pd pd = {.idx = port};
+        tps6598x_foreach_hpm(usb_host_pd_match, usb_host_pd_s0, &pd, true);
+        if (!pd.found || !pd.s0) {
+            printf("usb: hpm%u %s\n", port, pd.found ? "did not reach S0" : "not found");
+            return USB_HOST_E_PD;
+        }
+    }
+
+    /* From here the controller is ours: stop m1n1's gadget (and its DMA) on this port */
+    if (usb_iodev_release(port) < 0)
+        return USB_HOST_E_BUSY;
+
+    usb_host_hold_reset(&p);
+    usb_pipehandler_park_t6050(port, p.pipehandler);
+    if ((read32(p.pipehandler + PIPEHANDLER_MUX_CTRL) &
+         (PIPEHANDLER_MUX_CTRL_T6050_CLK | PIPEHANDLER_MUX_CTRL_T6050_DATA)) !=
+        PIPEHANDLER_MUX_CTRL_T6050_DUMMY) {
+        err = USB_HOST_E_PIPE;
+        goto fail;
+    }
+
+    if (usb_host_attach_darts(&p, flags, ranges, count, &info)) {
+        err = USB_HOST_E_DART;
+        goto fail;
+    }
+
+    if (flags & USB_HOST_F_PHY_BEFORE_RESET)
+        usb_host_usb2(&p, legacy);
+    usb_host_release_reset(&p);
+    if (!(flags & USB_HOST_F_PHY_BEFORE_RESET))
+        usb_host_usb2(&p, legacy);
+    if (usb_host_usb2_check(&p)) {
+        err = USB_HOST_E_PHY;
+        goto fail;
+    }
+
+    if (usb_dwc3_host_core_init(p.core)) {
+        err = USB_HOST_E_DWC3;
+        goto fail;
+    }
+    if (!legacy) {
+        usb_dwc3_apple_setup_cio(p.core);
+        usb_host_tunables(&p, usb_host_drd_tunables, ARRAY_SIZE(usb_host_drd_tunables), true);
+    }
+    usb_dwc3_host_select(p.core, !legacy);
+    printf("usb: %s: DWC3 host role, GCTL %08x GUSB2PHYCFG %08x GUSB3PIPECTL %08x, PIPE %08x, "
+           "AON %08x\n",
+           p.drd_path, read32(p.core + DWC3_GCTL), read32(p.core + DWC3_GUSB2PHYCFG(0)),
+           read32(p.core + DWC3_GUSB3PIPECTL(0)), read32(p.pipehandler + PIPEHANDLER_MUX_CTRL),
+           read32(p.pipehandler + PIPEHANDLER_AON_GEN));
+
+    if (!(flags & USB_HOST_F_NO_HCRST)) {
+        if (usb_xhci_reset(p.core, &xhci)) {
+            err = USB_HOST_E_XHCI;
+            goto fail;
+        }
+        info |= FIELD_PREP(USB_HOST_INFO_PORTS, xhci.max_ports) |
+                FIELD_PREP(USB_HOST_INFO_HCIVERSION, xhci.hciversion) |
+                FIELD_PREP(USB_HOST_INFO_CCS, xhci.ccs_ports & 0xff) |
+                (xhci.ac64 ? USB_HOST_INFO_AC64 : 0);
+        printf("usb: %s: xHCI %x.%02x, %u ports, %u slots, %s, halted and reset\n", p.drd_path,
+               xhci.hciversion >> 8, xhci.hciversion & 0xff, xhci.max_ports, xhci.max_slots,
+               xhci.ac64 ? "64-bit DMA" : "32-bit DMA only");
+    }
+
+    printf("usb: %s ready for the guest: xHCI window 0x%lx+0x%lx, info 0x%lx\n", p.drd_path, p.core,
+           p.core_size, info);
+    return info;
+
+fail:
+    usb_host_hold_reset(&p);
+    printf("usb: %s: host preparation failed (%ld); controller held in reset\n", p.drd_path, err);
+    return err;
 }

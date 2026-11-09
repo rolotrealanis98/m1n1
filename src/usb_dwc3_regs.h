@@ -129,6 +129,8 @@
 #define DWC3_GEVNTSIZ(n)   (0xc408 + (n * 0x10))
 #define DWC3_GEVNTCOUNT(n) (0xc40c + (n * 0x10))
 
+#define DWC3_GEVNTSIZ_INTMASK (1 << 31)
+
 #define DWC3_GHWPARAMS8 0xc600
 
 /* Device Registers */
@@ -175,9 +177,13 @@
 #define DWC3_GCTL_GBLHIBERNATIONEN (1 << 1)
 #define DWC3_GCTL_DSBLCLKGTNG      (1 << 0)
 
+/* Global User Control Register */
+#define DWC3_GUCTL_HSTINAUTORETRY (1 << 14)
+
 /* Global USB2 PHY Configuration Register */
 #define DWC3_GUSB2PHYCFG_PHYSOFTRST (1 << 31)
 #define DWC3_GUSB2PHYCFG_SUSPHY     (1 << 6)
+#define DWC3_GUSB2PHYCFG_ENBLSLPM   (1 << 8)
 
 /* Global USB3 PIPE Control Register */
 #define DWC3_GUSB3PIPECTL_PHYSOFTRST (1 << 31)

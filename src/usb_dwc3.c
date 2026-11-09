@@ -1447,3 +1447,149 @@ void usb_dwc3_flush(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
         usb_dwc3_handle_events(dev);
     }
 }
+
+/*
+ * ---- Host role for a guest-owned controller ------------------------------------------------
+ *
+ * The order and values follow what runs on this hardware today: Linux dwc3 core init plus the
+ * Apple glue (aurora-silicon/linux drivers/usb/dwc3/dwc3-apple.c, which the J716s daily runs in
+ * host mode on the left-front port) and Aurora's Mu DWC3 bring-up for T6050/T8142
+ * (third_party/mu J714Usb3Dxe InitializeCore, AppleUsbTypeCBringupDxe Dwc3XhciCoreInit).
+ */
+
+#define XHCI_CAPLENGTH  0x00
+#define XHCI_HCSPARAMS1 0x04
+#define XHCI_HCCPARAMS1 0x10
+#define XHCI_USBCMD     0x00 /* operational registers */
+#define XHCI_USBSTS     0x04
+#define XHCI_PORTSC(n)  (0x400 + 0x10 * (n))
+
+#define XHCI_USBCMD_RS    BIT(0)
+#define XHCI_USBCMD_HCRST BIT(1)
+#define XHCI_USBSTS_HCH   BIT(0)
+#define XHCI_USBSTS_CNR   BIT(11)
+#define XHCI_PORTSC_CCS   BIT(0)
+
+#define DWC3_APPLE_CIO_LFPS_OFFSET       0xcd38
+#define DWC3_APPLE_CIO_LFPS_OFFSET_VALUE 0x0f800f80
+#define DWC3_APPLE_CIO_BW_NGT_OFFSET     0xcd3c
+#define DWC3_APPLE_CIO_BW_NGT_VALUE      0x0fc00fc0
+#define DWC3_APPLE_CIO_LINK_TIMER        0xcd40
+#define DWC3_APPLE_CIO_PENDING_HP_TIMER  GENMASK(23, 16)
+#define DWC3_APPLE_CIO_PM_LC_TIMER       GENMASK(15, 8)
+#define DWC3_APPLE_CIO_PM_ENTRY_TIMER    GENMASK(7, 0)
+
+int usb_dwc3_host_core_init(uintptr_t regs)
+{
+    u32 id = read32(regs + DWC3_GSNPSID);
+
+    if ((id & DWC3_GSNPSID_MASK) != 0x33310000) {
+        printf("usb-dwc3@%lx: no DWC_usb31 core (GSNPSID %08x)\n", regs, id);
+        return -1;
+    }
+
+    /* Linux dwc3_phy_setup(): no PHY suspend while the core resets */
+    clear32(regs + DWC3_GUSB2PHYCFG(0), DWC3_GUSB2PHYCFG_SUSPHY);
+    clear32(regs + DWC3_GUSB3PIPECTL(0), DWC3_GUSB3PIPECTL_SUSPHY);
+
+    /*
+     * dwc3_core_soft_reset(): the Apple glue runs core init before it selects the host role, so
+     * the device-side reset runs; stop any link-state request with it. DWC31 1.90a+ can take
+     * slightly over 50 ms.
+     */
+    mask32(regs + DWC3_DCTL, DWC3_DCTL_RUN_STOP | DWC3_DCTL_ULSTCHNGREQ_MASK, DWC3_DCTL_CSFTRST);
+    if (poll32(regs + DWC3_DCTL, DWC3_DCTL_CSFTRST, 0, 250000)) {
+        printf("usb-dwc3@%lx: DCTL.CSFTRST did not clear\n", regs);
+        return -1;
+    }
+
+    /* dwc3_core_setup_global_control() */
+    u32 ctl = read32(regs + DWC3_GCTL);
+    ctl &= ~(DWC3_GCTL_SCALEDOWN_MASK | DWC3_GCTL_DISSCRAMBLE);
+    if (DWC3_GHWPARAMS1_EN_PWROPT(read32(regs + DWC3_GHWPARAMS1)) == DWC3_GHWPARAMS1_EN_PWROPT_CLK)
+        ctl &= ~DWC3_GCTL_DSBLCLKGTNG;
+    write32(regs + DWC3_GCTL, ctl);
+
+    /* dwc3_core_init() for host and OTG: retry ACKs on IN transaction errors */
+    set32(regs + DWC3_GUCTL, DWC3_GUCTL_HSTINAUTORETRY);
+
+    /*
+     * No device events in the host role: m1n1's gadget left its event buffer at an IOVA the
+     * guest's DART no longer maps. Mask it and forget the address (a host-mode xHCI driver never
+     * looks at it; Linux sets one up, U-Boot and Mu do not).
+     */
+    write32(regs + DWC3_DEVTEN, 0);
+    write32(regs + DWC3_GEVNTSIZ(0), DWC3_GEVNTSIZ_INTMASK);
+    write32(regs + DWC3_GEVNTADRLO(0), 0);
+    write32(regs + DWC3_GEVNTADRHI(0), 0);
+    return 0;
+}
+
+/* dwc3-apple.c dwc3_apple_setup_cio(), after the core reset and before the ADT tunables */
+void usb_dwc3_apple_setup_cio(uintptr_t regs)
+{
+    write32(regs + DWC3_APPLE_CIO_LFPS_OFFSET, DWC3_APPLE_CIO_LFPS_OFFSET_VALUE);
+    write32(regs + DWC3_APPLE_CIO_BW_NGT_OFFSET, DWC3_APPLE_CIO_BW_NGT_VALUE);
+    mask32(regs + DWC3_APPLE_CIO_LINK_TIMER,
+           DWC3_APPLE_CIO_PENDING_HP_TIMER | DWC3_APPLE_CIO_PM_LC_TIMER |
+               DWC3_APPLE_CIO_PM_ENTRY_TIMER,
+           FIELD_PREP(DWC3_APPLE_CIO_PENDING_HP_TIMER, 0x14) |
+               FIELD_PREP(DWC3_APPLE_CIO_PM_LC_TIMER, 0xa) |
+               FIELD_PREP(DWC3_APPLE_CIO_PM_ENTRY_TIMER, 0x10));
+}
+
+/* dwc3-apple.c dwc3_apple_set_role(): host PRTCAP, then the PHY suspend policy */
+void usb_dwc3_host_select(uintptr_t regs, bool susphy)
+{
+    mask32(regs + DWC3_GCTL, DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_OTG),
+           DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_HOST));
+    if (susphy) {
+        set32(regs + DWC3_GUSB3PIPECTL(0), DWC3_GUSB3PIPECTL_SUSPHY);
+        set32(regs + DWC3_GUSB2PHYCFG(0), DWC3_GUSB2PHYCFG_SUSPHY);
+    } else {
+        /* snps,dis_u2_susphy_quirk, dis_u3_susphy_quirk, dis_enblslpm_quirk */
+        clear32(regs + DWC3_GUSB2PHYCFG(0), DWC3_GUSB2PHYCFG_ENBLSLPM);
+    }
+}
+
+int usb_xhci_reset(uintptr_t regs, struct usb_xhci_info *info)
+{
+    u32 cap = read32(regs + XHCI_CAPLENGTH);
+    u32 hcs1 = read32(regs + XHCI_HCSPARAMS1);
+    u32 hcc1 = read32(regs + XHCI_HCCPARAMS1);
+
+    memset(info, 0, sizeof(*info));
+    info->caplength = cap & 0xff;
+    info->hciversion = cap >> 16;
+    info->max_slots = hcs1 & 0xff;
+    info->max_ports = hcs1 >> 24;
+    info->ac64 = hcc1 & BIT(0);
+
+    if (info->caplength < 0x20 || info->hciversion < 0x0100 || !info->max_ports) {
+        printf("usb-xhci@%lx: no xHC (CAPLENGTH/HCIVERSION %08x, HCSPARAMS1 %08x)\n", regs, cap,
+               hcs1);
+        return -1;
+    }
+
+    uintptr_t op = regs + info->caplength;
+    clear32(op + XHCI_USBCMD, XHCI_USBCMD_RS);
+    if (poll32(op + XHCI_USBSTS, XHCI_USBSTS_HCH, XHCI_USBSTS_HCH, 20000)) {
+        printf("usb-xhci@%lx: did not halt (USBSTS %08x)\n", regs, read32(op + XHCI_USBSTS));
+        return -1;
+    }
+    set32(op + XHCI_USBCMD, XHCI_USBCMD_HCRST);
+    if (poll32(op + XHCI_USBCMD, XHCI_USBCMD_HCRST, 0, 1000000) ||
+        poll32(op + XHCI_USBSTS, XHCI_USBSTS_CNR, 0, 1000000)) {
+        printf("usb-xhci@%lx: HCRST did not complete (USBCMD %08x USBSTS %08x)\n", regs,
+               read32(op + XHCI_USBCMD), read32(op + XHCI_USBSTS));
+        return -1;
+    }
+
+    for (u32 port = 0; port < min(info->max_ports, 32U); port++) {
+        u32 sc = read32(op + XHCI_PORTSC(port));
+        if (sc & XHCI_PORTSC_CCS)
+            info->ccs_ports |= BIT(port);
+        printf("usb-xhci@%lx: port %u PORTSC %08x\n", regs, port + 1, sc);
+    }
+    return 0;
+}
