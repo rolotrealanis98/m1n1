@@ -126,14 +126,14 @@ GICR_STRIDE = 0x20000               # RD_base + SGI_base per vCPU, GICR frame i 
 # build/mu-out/MacBookPro16M5/<mu-commit>/j716s-<profile>/artifacts/J716MACBOOKPRO16M5_EFI.fd) and the
 # interrupt route each one runs on.
 MU_IMAGES = {
-    "m0": ("aic", "5087fe0230096604bea3fa4a088def98eb5a7474daddeb8f6427a34d4e61eaf2"),
-    "m1-gic": ("gic", "0581fee566471dd7df3186eccf4bef0705d8c200eaee3c9e4fd6e62dda250d5d"),
-    "m1-aic": ("aic", "14958582f3b255a70bfd3357c9229dd29cad9f0340c8a7a7e35fd01e1b2236cb"),
-    "m1a": ("gic", "6f242a7b591a509a44a17016d7ef9dbf78dce142d2d335bed1ff77ad59e79d46"),
+    "m0": ("aic", "0385facf4b9d57c6ab07ac598f38165b8a7adc1fe3613fc222403af39dfacbf5"),
+    "m1-gic": ("gic", "2322e8152ecb3bf918a963bdb34a144c747bc62c2045a832cb4444cd4459b4f0"),
+    "m1-aic": ("aic", "a46428a340507ff672f7f4f79c73ab78c792bce06411935bf966afc7d06cd6c2"),
+    "m1a": ("gic", "e1d162b11ce07bf6b88908ea8c1a6cb0526e4cac2dd8d82d551c607f12a5d897"),
     # USB host profiles (docs/USB-HOST.md; --usb-host), m5pro-windows 12a245f + the USB host driver,
     # J716S_PMU_FALLBACK=FALSE
-    "m1-gic-usb": ("gic", "9091e7659b588c33ed743891a49ecee72721c6787fa9f4288411ed80494ccc69"),
-    "m1-aic-usb": ("aic", "727b9e07ff0fc6e80d16b733bb1027223f8c3920ce73110d9189c3c7d8c69f79"),
+    "m1-gic-usb": ("gic", "fefa29702b69f186710865ba1a0be39d23bb4e4f192e541fd2c23c76c79fe0ea"),
+    "m1-aic-usb": ("aic", "cf16807d703d4e6075d900e6ab65b2b499fdcf341e64455e7f5891f6f22fd26c"),
 }
 MU_NEEDS_RAMDISK = {"m1a"}
 USB_PROFILES = ("m1-gic-usb", "m1-aic-usb")
