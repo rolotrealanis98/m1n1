@@ -14,6 +14,12 @@
  *     FIQs injected as PPIs, SGIs routed from trapped ICC_SGI1R_EL1, emulated GICD/GICR frames,
  *     Apple's hardware virtual CPU interface (ICH list registers) for delivery (hv_vgic3.c).
  *     Offered when HV_WIN_VGIC3_READY is defined (below).
+ *
+ * Both models: HCR_EL2.TID3 (ID registers emulated: ID_AA64DFR0_EL1.PMUVer reads 0, and in VGIC3
+ * ID_AA64PFR0_EL1.GIC reads 1) and MDCR_EL2.TPM|TPMCR plus, with FEAT_FGT, the HDFGRTR/HDFGWTR_EL2
+ * PMU bits: Windows' boot manager reads PMCCNTR_EL0 without checking PMUVer, so EL2 emulates an
+ * absent PMUv3 (PMCCNTR_EL0 = CNTVCT_EL0, PMCR_EL0.N = 0, everything else RAZ/WI) when the access
+ * traps.
  */
 
 #ifndef HV_WIN_H
@@ -40,6 +46,12 @@
 #define M5W_HVC_BASE         0x4d35 /* 'M5' */
 #define M5W_HVC_DEBUG_PUTC   (M5W_HVC_BASE + 0)
 #define M5W_HVC_FAULT_REPORT (M5W_HVC_BASE + 1)
+/*
+ * M5W_HVC_PMU_TRAPS (no arguments): x0 = how many PMUv3 register accesses EL2 has emulated on the
+ * calling CPU, x1 = the ESR_EL2 of the latest one. A probe for the smoke guest (trapped vs UNDEF at
+ * EL1).
+ */
+#define M5W_HVC_PMU_TRAPS (M5W_HVC_BASE + 2)
 
 /* P_HV_WIN_CAPS: (MAGIC << 32) | (ABI << 16) | caps */
 #define HV_WIN_CAP_PSCI       BIT(0) /* PSCI 1.1 / SMCCC 1.1 over HVC (and SMC with TSC) */

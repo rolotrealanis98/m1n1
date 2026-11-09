@@ -19,6 +19,35 @@ struct hv_win_state hv_win = {
     .reserved_cpu = -1,
 };
 
+/*
+ * PMUv3 traps (EL2-RUNTIME item 6). The T6050 has no PMUv3, but Windows' boot manager, winload and
+ * the kernel access PMCCNTR_EL0 and friends without looking at ID_AA64DFR0_EL1.PMUVer. MDCR_EL2.TPM
+ * traps every PMU register, TPMCR PMCR_EL0; with FEAT_FGT the HDFGRTR_EL2/HDFGWTR_EL2 PMU bits trap
+ * them as well (bit numbers from the Arm ARM register descriptions, positive polarity only).
+ * Whether an EL1 access on an implementation without PMUv3 traps at all or UNDEFs at EL1 first is
+ * what the smoke guest's pmu probe answers on hardware.
+ */
+#define MDCR_TPMCR BIT(5)
+#define MDCR_TPM   BIT(6)
+
+#define SYS_HDFGRTR_EL2 sys_reg(3, 4, 3, 1, 4)
+#define SYS_HDFGWTR_EL2 sys_reg(3, 4, 3, 1, 5)
+/* bits 12..19: PMEVCNTRn, PMEVTYPERn, PMCCFILTR, PMCCNTR, PMCNTEN, PMINTEN, PMOVS, PMSELR */
+#define HDFGxTR_PMU_COMMON GENMASK(19, 12)
+#define HDFGRTR_PMU                                                                                \
+    (HDFGxTR_PMU_COMMON | BIT(22) /* PMMIR */ | BIT(57) /* PMUSERENR */ | BIT(58) /* PMCEIDn */)
+#define HDFGWTR_PMU                                                                                \
+    (HDFGxTR_PMU_COMMON | BIT(20) /* PMSWINC */ | BIT(21) /* PMCR */ | BIT(57) /* PMUSERENR */)
+
+#define SYS_PMCR_EL0    sys_reg(3, 3, 9, 12, 0)
+#define SYS_PMCCNTR_EL0 sys_reg(3, 3, 9, 13, 0)
+/* PMCR_EL0 bits that read back: E, D, X, DP, LC, LP (P and C are write-only; N, IMP, IDCODE = 0) */
+#define PMCR_RW_MASK (BIT(0) | GENMASK(7, 3))
+
+static u64 hv_win_pmu_count[MAX_CPUS];
+static u64 hv_win_pmu_esr[MAX_CPUS];
+static u64 hv_win_pmcr[MAX_CPUS];
+
 u64 hv_win_caps(void)
 {
     u64 caps = HV_WIN_CAP_PSCI | HV_WIN_CAP_AIC_PT | HV_WIN_CAP_SYSTEM_OFF;
@@ -175,11 +204,11 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
      * E2H, RW, API/APK, FMO=1, IMO=0, TACR, TTLBOS). hv_start() snapshots HCR_EL2 for the
      * secondaries, so everything set here propagates to every guest CPU.
      */
-    u64 hcr = mrs(HCR_EL2);
+    u64 hcr = mrs(HCR_EL2) | HCR_TID3; /* both models: hide PMUv3 in ID_AA64DFR0_EL1 */
     if (flags & HV_WIN_F_PSCI_SMC)
         hcr |= HCR_TSC;
     if (irq_model == HV_WIN_IRQ_VGIC3)
-        hcr |= HCR_IMO | HCR_FMO | HCR_TID3;
+        hcr |= HCR_IMO | HCR_FMO;
     hv_write_hcr(hcr);
     sysop("isb");
 
@@ -196,11 +225,32 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
     printf("HV/win: model %ld, %ld vCPU(s), GICD 0x%lx GICR 0x%lx, flags 0x%lx, reserved CPU %d, "
            "HCR 0x%lx\n",
            irq_model, nr_vcpus, gicd_base, gicr_base, flags, hv_win.reserved_cpu, mrs(HCR_EL2));
+    bool fgt = FIELD_GET(ID_AA64MMFR0_FGT, mrs(ID_AA64MMFR0_EL1));
+    printf("HV/win: PMU traps: ID_AA64DFR0_EL1 0x%lx, MDCR_EL2 0x%lx, FGT %s (HDFGRTR_EL2 0x%lx "
+           "HDFGWTR_EL2 "
+           "0x%lx)\n",
+           mrs(ID_AA64DFR0_EL1), mrs(MDCR_EL2), fgt ? "yes" : "no", fgt ? mrs(SYS_HDFGRTR_EL2) : 0,
+           fgt ? mrs(SYS_HDFGWTR_EL2) : 0);
     return 0;
+}
+
+/* Per CPU; MDCR_EL2 is also part of the state hv_start() hands to the secondaries */
+static void hv_win_pmu_traps_init(void)
+{
+    msr(MDCR_EL2, mrs(MDCR_EL2) | MDCR_TPM | MDCR_TPMCR);
+    if (FIELD_GET(ID_AA64MMFR0_FGT, mrs(ID_AA64MMFR0_EL1))) {
+        msr(SYS_HDFGRTR_EL2, mrs(SYS_HDFGRTR_EL2) | HDFGRTR_PMU);
+        msr(SYS_HDFGWTR_EL2, mrs(SYS_HDFGWTR_EL2) | HDFGWTR_PMU);
+    }
+    sysop("isb");
 }
 
 void hv_win_cpu_init(void)
 {
+    if (!hv_win_enabled())
+        return;
+
+    hv_win_pmu_traps_init();
     if (hv_win_vgic_enabled())
         hv_vgic3_cpu_init();
 }
@@ -231,6 +281,11 @@ bool hv_win_handle_hvc(struct exc_info *ctx)
                    ctx->regs[0], ctx->regs[1], ctx->regs[2], smp_id());
             return true;
 
+        case M5W_HVC_PMU_TRAPS:
+            ctx->regs[0] = hv_win_pmu_count[smp_id()];
+            ctx->regs[1] = hv_win_pmu_esr[smp_id()];
+            return true;
+
         default:
             /* Other immediates stay with the stock/Python HVC handlers (SPTM emulation etc.) */
             return false;
@@ -251,12 +306,15 @@ bool hv_win_handle_smc(struct exc_info *ctx)
 }
 
 /*
- * HCR_EL2.TID3 (VGIC3 model) traps reads of the ID register space (op0 3, op1 0, CRn 0, CRm 1..7).
- * Everything reads as the hardware does, except ID_AA64PFR0_EL1.GIC: the T6050 reports 0 (no
- * physical GIC CPU interface), while the guest does get the GICv3 system-register interface through
- * ICH_HCR_EL2.En, so it reads 1, as KVM reports to its vgic-v3 guests.
+ * HCR_EL2.TID3 (both models) traps reads of the ID register space (op0 3, op1 0, CRn 0, CRm 1..7).
+ * Everything reads as the hardware does, except:
+ *   ID_AA64DFR0_EL1.PMUVer = 0: no PMUv3 (the PMU registers are emulated as absent when they trap);
+ *   ID_AA64PFR0_EL1.GIC (VGIC3 model): the T6050 reports 0 (no physical GIC CPU interface), while
+ * the guest does get the GICv3 system-register interface through ICH_HCR_EL2.En, so it reads 1, as
+ * KVM reports to its vgic-v3 guests.
  */
-#define ID_AA64PFR0_GIC GENMASK(27, 24)
+#define ID_AA64PFR0_GIC    GENMASK(27, 24)
+#define ID_AA64DFR0_PMUVER GENMASK(11, 8)
 
 #define ID_CASE(crm, op2)                                                                          \
     case (crm) << 3 | (op2):                                                                       \
@@ -290,14 +348,52 @@ static u64 hv_win_guest_id_reg(u32 crm, u32 op2)
 {
     u64 val = hv_win_read_id_reg(crm, op2);
 
-    if (crm == 4 && op2 == 0) /* ID_AA64PFR0_EL1 */
+    if (crm == 4 && op2 == 0 && hv_win_vgic_enabled()) /* ID_AA64PFR0_EL1 */
         val = (val & ~ID_AA64PFR0_GIC) | FIELD_PREP(ID_AA64PFR0_GIC, 1);
+    if (crm == 5 && op2 == 0) /* ID_AA64DFR0_EL1 */
+        val &= ~ID_AA64DFR0_PMUVER;
     return val;
+}
+
+/* PMUv3 registers: PMCR..PMCEID1, PMCCNTR, PMXEV*, PMUSERENR, PMOVSSET (CRn 9, op1 3, CRm 12..14),
+ * PMINTENSET/CLR, PMMIR (CRn 9, op1 0, CRm 14), PMEVCNTRn, PMEVTYPERn, PMCCFILTR (CRn 14, op1 3,
+ * CRm 8..15) */
+static bool hv_win_is_pmu_reg(u32 op0, u32 op1, u32 crn, u32 crm)
+{
+    if (op0 != 3)
+        return false;
+    if (crn == 9)
+        return (op1 == 3 && crm >= 12 && crm <= 14) || (op1 == 0 && crm == 14);
+    return crn == 14 && op1 == 3 && crm >= 8;
+}
+
+/* Lock-free (per-CPU state only): runs in the unlocked MSR fast path */
+static void hv_win_pmu_access(struct exc_info *ctx, u64 reg, u64 rt, bool is_read, u64 val)
+{
+    int cpu = smp_id();
+
+    hv_win_pmu_count[cpu]++;
+    hv_win_pmu_esr[cpu] = ctx->esr;
+
+    if (!is_read) {
+        if (reg == SYSREG_ISS(SYS_PMCR_EL0))
+            hv_win_pmcr[cpu] = val & PMCR_RW_MASK;
+        return; /* everything else: writes ignored */
+    }
+
+    if (rt == 31)
+        return;
+    if (reg == SYSREG_ISS(SYS_PMCCNTR_EL0))
+        ctx->regs[rt] = mrs(CNTVCT_EL0); /* monotonic: Windows times with it */
+    else if (reg == SYSREG_ISS(SYS_PMCR_EL0))
+        ctx->regs[rt] = hv_win_pmcr[cpu]; /* N = 0, IMP = IDCODE = 0 */
+    else
+        ctx->regs[rt] = 0;
 }
 
 bool hv_win_handle_msr(struct exc_info *ctx, u64 iss)
 {
-    if (!hv_win_vgic_enabled())
+    if (!hv_win_enabled())
         return false;
 
     u64 reg = iss & (ESR_ISS_MSR_OP0 | ESR_ISS_MSR_OP2 | ESR_ISS_MSR_OP1 | ESR_ISS_MSR_CRn |
@@ -315,6 +411,15 @@ bool hv_win_handle_msr(struct exc_info *ctx, u64 iss)
             ctx->regs[rt] = hv_win_guest_id_reg(crm, FIELD_GET(ESR_ISS_MSR_OP2, iss));
         return true;
     }
+
+    if (hv_win_is_pmu_reg(FIELD_GET(ESR_ISS_MSR_OP0, iss), FIELD_GET(ESR_ISS_MSR_OP1, iss),
+                          FIELD_GET(ESR_ISS_MSR_CRn, iss), crm)) {
+        hv_win_pmu_access(ctx, reg, rt, is_read, val);
+        return true;
+    }
+
+    if (!hv_win_vgic_enabled())
+        return false;
 
     switch (reg) {
         case SYSREG_ISS(SYS_ICC_SGI1R_EL1):
