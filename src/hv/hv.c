@@ -584,6 +584,8 @@ void hv_tick(struct exc_info *ctx)
             hv_exc_proxy(ctx, START_HV, HV_USER_INTERRUPT, NULL);
     }
     hv_vuart_poll();
+    /* Windows personality only: a no-op unless P_HV_WIN_PL011 configured the emulated PL011 */
+    hv_win_pl011_poll();
 }
 
 bool hv_is_nested(void)
