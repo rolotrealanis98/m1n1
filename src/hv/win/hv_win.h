@@ -209,10 +209,19 @@ enum hv_win_pmu_stat {
     HV_WIN_PMU_IPA_FAIL,        /* AT could not translate the fault address: access retried */
     HV_WIN_PMU_NOT_OURS,        /* permission faults on untracked IPAs, left to the stock path */
     HV_WIN_PMU_STUCK,           /* faults handed to the stock path after too many retries */
+    /* Shadow split view (user-mode Code Integrity fix, m5pro-windows ci/EL2-USERMODE-CI-FIX.md):
+     * a rewritten code page keeps its signed original, served to data reads, while fetches see the
+     * rewritten copy, so a page-hash-validated image (winsta.dll, ntdll, ...) still passes CI. */
+    HV_WIN_PMU_SHADOWS,       /* code pages given a shadow (signed original kept for data reads) */
+    HV_WIN_PMU_SHADOW_READS,  /* data-read faults served the original copy (CI page-hash reads) */
+    HV_WIN_PMU_SHADOW_EXECS,  /* fetch faults flipped a shadowed page to the rewritten copy */
+    HV_WIN_PMU_SHADOW_WRITES, /* shadowed pages reverted to DIRTY by a guest write (shadow freed) */
+    HV_WIN_PMU_SHADOW_PINS,   /* shadowed pages pinned RO+X at the flip cap (hash may fail) */
+    HV_WIN_PMU_SHADOW_FULL,   /* shadow pool exhausted: rewrote in place (its data reads see it) */
     HV_WIN_PMU_NR_STATS,
 };
 #define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */
-#define HV_WIN_PMU_VERSION      1
+#define HV_WIN_PMU_VERSION      2            /* +shadow split view and its six counters */
 #define HV_WIN_PMU_LOG_SIZE     256
 #define HV_WIN_PMU_STAT_LOG_IPA 0x100 /* + slot: IPA of the word (rewrite n is in slot n % 256) */
 #define HV_WIN_PMU_STAT_LOG_OP  0x200 /* + slot: old word << 32 | new word */

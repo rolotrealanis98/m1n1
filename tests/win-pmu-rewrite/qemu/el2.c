@@ -170,6 +170,14 @@ size_t heapblock_remaining(void)
     return sizeof(heap) - heap_used + (16UL << 20); /* + hv_win_pmu.c's 16 MiB margin */
 }
 
+/* shadow snapshots come from the same heap (src/heapblock.h) */
+void *heapblock_alloc_aligned(size_t size, size_t align)
+{
+    if (heap_used + align + size > sizeof(heap))
+        return NULL; /* exercises hv_win_pmu.c's pool-exhausted fallback */
+    return memalign(align, size);
+}
+
 void dc_civac_range(void *addr, size_t length)
 {
     for (u64 p = (u64)addr; p < (u64)addr + length; p += 64)
@@ -236,6 +244,15 @@ static void finish(void)
     check_stat("write flips", HV_WIN_PMU_WRITE_FLIPS, 4, 8);
     check_stat("stuck", HV_WIN_PMU_STUCK, 0, 0);
     check_stat("not ours", HV_WIN_PMU_NOT_OURS, 0, 0);
+    /* Shadow split view: every rewritten page keeps its original. The guest reads code pages as
+     * data (T5/T6/T7, the stage-1 walks), which fault on the execute-only copy and are served the
+     * original; a page executed and read in a tight interleave pins to the rewritten copy. This
+     * confirms stage-2 execute-only faults and the flip paths run under real stage 2; the host test
+     * (test_split_view) proves the word-level original-vs-rewrite view. */
+    check_stat("shadows taken", HV_WIN_PMU_SHADOWS, 1, 16);
+    check_stat("shadow reads served the original", HV_WIN_PMU_SHADOW_READS, 1, 4096);
+    check_stat("shadow fetch flips", HV_WIN_PMU_SHADOW_EXECS, 1, 4096);
+    check_stat("shadow pins", HV_WIN_PMU_SHADOW_PINS, 0, 16);
     bm_printf("XT-RESULT %d checks, %d failed: %s\n", checks, failures, failures ? "FAIL" : "PASS");
     bm_exit(failures ? 1 : 0);
 }

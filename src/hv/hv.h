@@ -87,10 +87,17 @@ enum hv_xt_state {
     HV_XT_SCANNING, /* RO, XN: transient, under the big HV lock */
     HV_XT_CODE,     /* RO, X: a write faults */
     HV_XT_PINNED,   /* RW, X: not tracked until re-armed */
+    HV_XT_CODE_XO,  /* -, X (S2AP none): execute-only, a data read faults (shadow split view) */
 };
 int hv_xt_track(u64 ipa, u64 size, bool dry_run, u64 *new_tables);
 enum hv_xt_state hv_xt_get(u64 ipa, u64 *pa, u32 *flips);
 int hv_xt_set(u64 ipa, enum hv_xt_state state, u32 flips);
+/*
+ * Repoint a tracked leaf at a different output address with a break-before-make (the PMU shadow
+ * split view: the original and the rewritten copy of a code page are two physical backings; this
+ * flips the stage-2 output between them). Broadcasts the TLBI itself, so no hv_xt_tlbi() after.
+ */
+int hv_xt_remap(u64 ipa, u64 pa, enum hv_xt_state state, u32 flips);
 void hv_xt_tlbi(bool broadcast);
 bool hv_xt_fault_ipa(struct exc_info *ctx, bool s1ptw, bool write, u64 *ipa);
 

@@ -501,6 +501,33 @@ int hv_xt_track(u64 ipa, u64 size, bool dry_run, u64 *new_tables)
     return pages;
 }
 
+/* S2AP + XN bits of a tracked state (the output address and SW bits are set by the caller) */
+static u64 hv_xt_perm_bits(enum hv_xt_state state)
+{
+    u64 d = 0;
+
+    switch (state) {
+        case HV_XT_DIRTY:
+            d = PTE_S2AP_RW | PTE_S2_XN;
+            break;
+        case HV_XT_SCANNING:
+            d = PTE_S2AP_RO | PTE_S2_XN;
+            break;
+        case HV_XT_CODE:
+            d = PTE_S2AP_RO;
+            break;
+        case HV_XT_PINNED:
+            d = PTE_S2AP_RW;
+            break;
+        case HV_XT_CODE_XO:
+            d = 0; /* S2AP none (no data access), XN clear: execute-only */
+            break;
+        default:
+            break;
+    }
+    return d;
+}
+
 enum hv_xt_state hv_xt_get(u64 ipa, u64 *pa, u32 *flips)
 {
     u64 *leaf = hv_xt_leaf(ipa);
@@ -508,15 +535,17 @@ enum hv_xt_state hv_xt_get(u64 ipa, u64 *pa, u32 *flips)
         return HV_XT_UNTRACKED;
 
     u64 d = *(volatile u64 *)leaf;
-    bool rw = (d & PTE_S2AP_MASK) == PTE_S2AP_RW;
+    u64 s2ap = d & PTE_S2AP_MASK;
 
     if (pa)
         *pa = d & PTE_TARGET_MASK;
     if (flips)
         *flips = FIELD_GET(PTE_SW_XT_FLIPS, d);
+    if (s2ap == 0) /* no data access: execute-only (XN is clear in this state) */
+        return HV_XT_CODE_XO;
     if (d & PTE_S2_XN)
-        return rw ? HV_XT_DIRTY : HV_XT_SCANNING;
-    return rw ? HV_XT_PINNED : HV_XT_CODE;
+        return s2ap == PTE_S2AP_RW ? HV_XT_DIRTY : HV_XT_SCANNING;
+    return s2ap == PTE_S2AP_RW ? HV_XT_PINNED : HV_XT_CODE;
 }
 
 /*
@@ -531,13 +560,40 @@ int hv_xt_set(u64 ipa, enum hv_xt_state state, u32 flips)
         return -1;
 
     u64 d = *leaf & ~(PTE_S2AP_MASK | PTE_S2_XN | PTE_SW_XT_FLIPS);
-    d |= (state == HV_XT_DIRTY || state == HV_XT_PINNED) ? PTE_S2AP_RW : PTE_S2AP_RO;
-    if (state == HV_XT_DIRTY || state == HV_XT_SCANNING)
-        d |= PTE_S2_XN;
+    d |= hv_xt_perm_bits(state);
     d |= FIELD_PREP(PTE_SW_XT_FLIPS, min(flips, HV_XT_FLIPS_MAX));
 
     *(volatile u64 *)leaf = d;
     sysop("dsb ishst");
+    return 0;
+}
+
+/*
+ * Repoint a tracked leaf at output address <pa> with state <state>, keeping its other attributes
+ * (memattr, shareability). Unlike hv_xt_set() this changes the translation, so it does a full
+ * break-before-make: the leaf is invalidated and broadcast-TLBI'd before the new one is written, so
+ * no CPU keeps a stale translation (which, for the PMU shadow, would let it fetch the signed
+ * original and UNDEF). Used only by the PMU rewrite's shadow flips; <pa> must be 16 KiB aligned.
+ */
+int hv_xt_remap(u64 ipa, u64 pa, enum hv_xt_state state, u32 flips)
+{
+    u64 *leaf = hv_xt_leaf(ipa);
+    if (!leaf || state == HV_XT_UNTRACKED || (pa & MASK(VADDR_L3_OFFSET_BITS)))
+        return -1;
+
+    u64 keep = *leaf & ~(PTE_TARGET_MASK | PTE_S2AP_MASK | PTE_S2_XN | PTE_SW_XT_FLIPS);
+    u64 d = keep | (pa & PTE_TARGET_MASK) | hv_xt_perm_bits(state) |
+            FIELD_PREP(PTE_SW_XT_FLIPS, min(flips, HV_XT_FLIPS_MAX));
+
+    /* break */
+    *(volatile u64 *)leaf = 0;
+    sysop("dsb ishst");
+    sysop("tlbi vmalls12e1is");
+    sysop("dsb ish");
+    /* make */
+    *(volatile u64 *)leaf = d;
+    sysop("dsb ishst");
+    sysop("isb");
     return 0;
 }
 

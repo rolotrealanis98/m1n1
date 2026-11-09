@@ -28,6 +28,7 @@
 #include "heapblock.h"
 #include "memory.h"
 #include "smp.h"
+#include "string.h"
 #include "utils.h"
 #include "xnuboot.h"
 
@@ -55,6 +56,26 @@
     256 /* unproductive faults in a row at one PC before the stock path gets it */
 #define PMU_HEAP_MARGIN (16UL << 20)
 
+/*
+ * Shadow split view (m5pro-windows ci/EL2-USERMODE-CI-FIX.md). A rewritten code page keeps its
+ * signed original as well as the rewritten copy, so Windows' user-mode Code Integrity, which
+ * re-hashes a page-hash-signed image when a process maps it (winsta.dll in lsass), reads the
+ * original bytes while the CPU fetches the PMU-safe rewrite. The rewrite is in place (the real
+ * guest page holds the rewritten words); the shadow is a 16 KiB snapshot of the original:
+ *
+ *   rewritten page (real PA)  -- execute-only (CODE_XO): fetches run, data reads fault
+ *   original snapshot (shadow) -- RO + XN: data reads served, fetches fault
+ *
+ * A data-read fault flips the leaf to the shadow (original, RO+XN); a fetch fault flips it back to
+ * the rewritten page (CODE_XO). CI hashes a page in a read burst with no interleaved execution, so
+ * it stays on the original for the whole hash. A guest write drops the shadow and the page re-joins
+ * the normal DIRTY/pin path. The snapshot is bounded by pages rewritten (~4 MiB on the measured
+ * run); when the pool is exhausted the page is rewritten in place with no shadow, as before.
+ */
+#define PMU_MAX_SHADOWS 512 /* 512 * 16 KiB = 8 MiB cap (observed run: 251 pages) */
+#define PMU_SHADOW_FLIP_CAP                                                                        \
+    8 /* read<->exec flips before a shadowed page is pinned RO+X (hash may then fail) */
+
 extern u64 hv_cpus_in_guest;
 
 struct pmu_log_entry {
@@ -80,6 +101,76 @@ static struct {
 
 static u64 stuck_elr[MAX_CPUS];
 static u32 stuck_count[MAX_CPUS];
+
+/*
+ * Pages that carry a shadow (signed original). The real guest page holds the rewritten words;
+ * shadow_pa is the 16 KiB snapshot of the original. on_exec says which copy the leaf maps now:
+ *   true  -> the rewritten real page, execute-only (serving fetches)
+ *   false -> the shadow (original), RO + XN (serving data reads)
+ * pinned -> read<->exec thrash hit the cap: the leaf maps the rewritten page RO + X (its hash may
+ * fail, but none was observed; see PMU_SHADOW_FLIP_CAP).
+ */
+struct pmu_shadow {
+    u64 page;         /* IPA page base (16 KiB aligned) */
+    u64 rewritten_pa; /* the real guest RAM page, rewritten in place */
+    u64 shadow_pa;    /* heap snapshot of the signed original */
+    bool on_exec;
+    bool pinned;
+    u32 flips; /* read<->exec flips */
+};
+
+static struct pmu_shadow pmu_shadows[PMU_MAX_SHADOWS];
+static u32 pmu_nr_shadows;
+static u8 *pmu_shadow_pool[PMU_MAX_SHADOWS]; /* freed snapshots, recycled (heapblock has no free) */
+static u32 pmu_shadow_pool_n;
+static u32 pmu_shadow_bufs; /* distinct 16 KiB snapshots ever allocated (the pool cap) */
+
+static struct pmu_shadow *pmu_shadow_find(u64 page)
+{
+    for (u32 i = 0; i < pmu_nr_shadows; i++)
+        if (pmu_shadows[i].page == page)
+            return &pmu_shadows[i];
+    return NULL;
+}
+
+/* A 16 KiB snapshot buffer: a recycled one, else a fresh one from the heap, else NULL (full) */
+static u8 *pmu_shadow_buf(void)
+{
+    if (pmu_shadow_pool_n)
+        return pmu_shadow_pool[--pmu_shadow_pool_n];
+    if (pmu_shadow_bufs >= PMU_MAX_SHADOWS || heapblock_remaining() < PMU_PAGE + PMU_HEAP_MARGIN)
+        return NULL;
+    u8 *buf = heapblock_alloc_aligned(PMU_PAGE, PMU_PAGE);
+    if (buf)
+        pmu_shadow_bufs++;
+    return buf;
+}
+
+static void pmu_shadow_recycle(u8 *buf)
+{
+    if (buf && pmu_shadow_pool_n < PMU_MAX_SHADOWS)
+        pmu_shadow_pool[pmu_shadow_pool_n++] = buf;
+}
+
+static struct pmu_shadow *pmu_shadow_add(u64 page, u64 rewritten_pa, u64 shadow_pa)
+{
+    struct pmu_shadow *s = &pmu_shadows[pmu_nr_shadows++];
+    s->page = page;
+    s->rewritten_pa = rewritten_pa;
+    s->shadow_pa = shadow_pa;
+    s->on_exec = true;
+    s->pinned = false;
+    s->flips = 0;
+    pmu.stats[HV_WIN_PMU_SHADOWS]++;
+    return s;
+}
+
+static void pmu_shadow_remove(struct pmu_shadow *s)
+{
+    if (pmu_shadow_pool_n < PMU_MAX_SHADOWS)
+        pmu_shadow_pool[pmu_shadow_pool_n++] = (u8 *)s->shadow_pa;
+    *s = pmu_shadows[--pmu_nr_shadows];
+}
 
 static bool overlaps(u64 a, u64 a_size, u64 b, u64 b_size)
 {
@@ -253,6 +344,15 @@ static bool pmu_exec_fault(struct exc_info *ctx, u64 ipa)
     dc_civac_range((void *)pa, PMU_PAGE);
     sysop("dsb sy");
 
+    /*
+     * Snapshot the signed original before the rewrite, so Code Integrity's later page-hash read of
+     * a user-mode image sees it (the shadow split view). Bounded by pages rewritten; a NULL buffer
+     * (pool or heap exhausted) just means this page gets no shadow, as before.
+     */
+    u8 *shadow = pmu_shadow_buf();
+    if (shadow)
+        memcpy(shadow, (void *)pa, PMU_PAGE);
+
     struct pmu_scan sc = {.ipa = page, .elr = ctx->elr};
     u64 kinds[PMU_RW_NR_KINDS] = {0};
     u32 n = pmu_rw_rewrite_words((u32 *)pa, PMU_PAGE_WORDS, pmu_record, &sc, kinds);
@@ -277,9 +377,25 @@ static bool pmu_exec_fault(struct exc_info *ctx, u64 ipa)
                    pmu.printed == PMU_PRINT_MAX ? " (further pages: counters and log only)" : "");
     }
 
-    /* 3. Executable and read-only. Adding a permission needs only this CPU's TLB flushed */
-    hv_xt_set(page, HV_XT_CODE, flips);
-    hv_xt_tlbi(false);
+    if (n && shadow) {
+        /*
+         * 3a. The page was rewritten and keeps a shadow: execute-only, so the triggering fetch runs
+         * the PMU-safe words while a data read faults and is served the original (pmu_shadow_read).
+         */
+        pmu_shadow_add(page, pa, (u64)shadow);
+        hv_xt_set(page, HV_XT_CODE_XO, flips);
+        hv_xt_tlbi(false);
+    } else {
+        /* 3b. No rewrite, or no shadow available: ordinary read-only executable (as before). A
+         * rewritten page with no shadow has its data reads see the rewrite -- only when the pool is
+         * exhausted. */
+        if (shadow)
+            pmu_shadow_recycle(shadow);
+        else if (n)
+            pmu.stats[HV_WIN_PMU_SHADOW_FULL]++;
+        hv_xt_set(page, HV_XT_CODE, flips);
+        hv_xt_tlbi(false);
+    }
 
     pmu.stats[HV_WIN_PMU_SCANS]++;
     pmu_productive();
@@ -296,6 +412,7 @@ static bool pmu_write_fault(struct exc_info *ctx, u64 ipa, bool walker)
             pmu.stats[HV_WIN_PMU_NOT_OURS]++;
             return false;
         case HV_XT_CODE:
+        case HV_XT_CODE_XO: /* a shadowed page the guest is writing, its shadow already dropped */
             break;
         default:
             /* DIRTY or PINNED: writable already, this CPU's TLB entry was stale */
@@ -332,14 +449,77 @@ static bool pmu_is_perm_fault(u64 esr)
     return (FIELD_GET(ESR_ISS_ABORT_FSC, esr) & FSC_PERM_LEVEL_MASK) == FSC_PERM;
 }
 
+/* Fetch fault on a shadowed page: flip the leaf to the rewritten copy (execute-only) and re-run */
+static bool pmu_shadow_exec(struct exc_info *ctx, struct pmu_shadow *s)
+{
+    if (s->on_exec || s->pinned) {
+        /* already executable: this CPU's TLB entry was stale */
+        pmu.stats[HV_WIN_PMU_SPURIOUS]++;
+        return pmu_unproductive(ctx);
+    }
+    u32 flips;
+    hv_xt_get(s->page, NULL, &flips);
+    s->on_exec = true;
+    hv_xt_remap(s->page, s->rewritten_pa, HV_XT_CODE_XO, flips);
+    pmu.stats[HV_WIN_PMU_SHADOW_EXECS]++;
+    pmu_productive();
+    return true;
+}
+
+/* Data-read fault on a shadowed page: flip the leaf to the original copy (RO + XN) and re-run */
+static bool pmu_shadow_read(struct exc_info *ctx, struct pmu_shadow *s)
+{
+    if (!s->on_exec || s->pinned) {
+        /* already readable: stale TLB entry */
+        pmu.stats[HV_WIN_PMU_SPURIOUS]++;
+        return pmu_unproductive(ctx);
+    }
+    u32 flips;
+    hv_xt_get(s->page, NULL, &flips);
+    if (++s->flips >= PMU_SHADOW_FLIP_CAP) {
+        /* Executed and read in a tight interleave: pin the rewritten copy RO + X and stop flipping
+         * (its hash may fail; none observed). A guest write still faults and drops the shadow. */
+        s->pinned = true;
+        s->on_exec = false;
+        hv_xt_remap(s->page, s->rewritten_pa, HV_XT_CODE, flips);
+        pmu.stats[HV_WIN_PMU_SHADOW_PINS]++;
+        pmu_productive();
+        return true;
+    }
+    s->on_exec = false;
+    hv_xt_remap(s->page, s->shadow_pa, HV_XT_SCANNING,
+                flips); /* RO + XN: the original, for reads */
+    pmu.stats[HV_WIN_PMU_SHADOW_READS]++;
+    pmu_productive();
+    return true;
+}
+
+/*
+ * A write (or stage-1 walker update) to a shadowed page: the guest is modifying its own code, so
+ * drop the shadow and let the page re-join the normal DIRTY/pin path. If the leaf was on the
+ * original copy, repoint it to the real (rewritten) page first, so the store lands in guest RAM.
+ */
+static bool pmu_shadow_write(struct exc_info *ctx, struct pmu_shadow *s, u64 ipa, bool walker)
+{
+    if (!s->on_exec && !s->pinned) {
+        u32 flips;
+        hv_xt_get(s->page, NULL, &flips);
+        hv_xt_remap(s->page, s->rewritten_pa, HV_XT_CODE_XO, flips);
+    }
+    pmu_shadow_remove(s);
+    pmu.stats[HV_WIN_PMU_SHADOW_WRITES]++;
+    return pmu_write_fault(ctx, ipa, walker);
+}
+
 bool hv_win_handle_iabort(struct exc_info *ctx)
 {
     if (!pmu.armed || !pmu_is_perm_fault(ctx->esr))
         return false;
 
     /*
-     * Stage-2 permission fault on an instruction fetch. Every tracked state is readable, so with
-     * S1PTW set this is the stage-1 walker updating a descriptor (hardware AF/DBM) in a CODE page.
+     * Stage-2 permission fault on an instruction fetch: a DIRTY page (XN) to scan, a shadowed page
+     * resting on the original (XN) to flip to its rewritten copy, or -- with S1PTW -- the stage-1
+     * walker updating a descriptor (hardware AF/DBM) in such a page.
      */
     bool walker = ctx->esr & ESR_ISS_ABORT_S1PTW;
     u64 ipa;
@@ -356,6 +536,10 @@ bool hv_win_handle_iabort(struct exc_info *ctx)
             return pmu_unproductive(ctx);
     }
 
+    struct pmu_shadow *s = pmu_shadow_find(ipa & ~(PMU_PAGE - 1));
+    if (s)
+        return walker ? pmu_shadow_write(ctx, s, ipa, true) : pmu_shadow_exec(ctx, s);
+
     return walker ? pmu_write_fault(ctx, ipa, true) : pmu_exec_fault(ctx, ipa);
 }
 
@@ -364,16 +548,25 @@ bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr)
     if (!pmu.armed || !pmu_is_perm_fault(esr))
         return false;
 
-    /* Every tracked state is readable: a data read permission fault is never ours */
     bool walker = esr & ESR_ISS_ABORT_S1PTW;
-    if (!walker && !(esr & ESR_ISS_ABORT_WNR))
-        return false;
+    bool write = walker || (esr & ESR_ISS_ABORT_WNR);
 
     u64 ipa;
-    if (!hv_xt_fault_ipa(ctx, walker, true, &ipa)) {
+    if (!hv_xt_fault_ipa(ctx, walker, write, &ipa)) {
+        /* A read we cannot place is not ours; a write may be (as today) -- retry it */
+        if (!write)
+            return false;
         pmu.stats[HV_WIN_PMU_IPA_FAIL]++;
         return pmu_unproductive(ctx);
     }
+
+    struct pmu_shadow *s = pmu_shadow_find(ipa & ~(PMU_PAGE - 1));
+    if (s)
+        return write ? pmu_shadow_write(ctx, s, ipa, walker) : pmu_shadow_read(ctx, s);
+
+    /* A plain data-read permission fault on a non-shadowed page is never ours */
+    if (!write)
+        return false;
 
     return pmu_write_fault(ctx, ipa, walker);
 }
@@ -412,6 +605,12 @@ void hv_win_pmu_report(void)
         s[HV_WIN_PMU_PINS], s[HV_WIN_PMU_PIN_FULL], s[HV_WIN_PMU_SWEEPS], s[HV_WIN_PMU_UNPINS],
         s[HV_WIN_PMU_SPURIOUS], s[HV_WIN_PMU_IPA_FAIL], s[HV_WIN_PMU_NOT_OURS],
         s[HV_WIN_PMU_STUCK]);
+    printf("HV/win: PMU rewrite: shadows: %lu allocated (%lu live, %lu KiB), %lu reads served the "
+           "original, %lu fetch flips, %lu dropped by a write, %lu pinned, %lu in place (pool "
+           "full)\n",
+           s[HV_WIN_PMU_SHADOWS], (u64)pmu_nr_shadows, (u64)pmu_shadow_bufs * (PMU_PAGE >> 10),
+           s[HV_WIN_PMU_SHADOW_READS], s[HV_WIN_PMU_SHADOW_EXECS], s[HV_WIN_PMU_SHADOW_WRITES],
+           s[HV_WIN_PMU_SHADOW_PINS], s[HV_WIN_PMU_SHADOW_FULL]);
 }
 
 #ifdef PMU_REWRITE_HOST_TEST
@@ -420,5 +619,10 @@ void hv_win_pmu_host_reset(void)
     memset(&pmu, 0, sizeof(pmu));
     memset(stuck_elr, 0, sizeof(stuck_elr));
     memset(stuck_count, 0, sizeof(stuck_count));
+    memset(pmu_shadows, 0, sizeof(pmu_shadows));
+    memset(pmu_shadow_pool, 0, sizeof(pmu_shadow_pool));
+    pmu_nr_shadows = 0;
+    pmu_shadow_pool_n = 0;
+    pmu_shadow_bufs = 0;
 }
 #endif

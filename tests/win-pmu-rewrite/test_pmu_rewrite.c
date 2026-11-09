@@ -358,15 +358,18 @@ u64 hv_cpus_in_guest;
 struct boot_args cur_boot_args;
 int host_cpu;
 
-#define M_BASE  0x10000000000UL
-#define M_PAGES 320
-#define M_WORDS 4096
+#define M_BASE              0x10000000000UL
+#define M_PAGES             320
+#define M_WORDS             4096
+#define PMU_MAX_SHADOW_BUFS 128 /* host-test shadow buffer pool (test_log_ring rewrites 71 pages)  \
+                                 */
 
 static u32 *m_mem;
 static struct {
     bool mapped, writable, tracked;
     enum hv_xt_state st;
     u32 flips;
+    u64 cur_pa; /* the leaf's current output address (the real page, or a shadow after a remap) */
 } m_pg[M_PAGES];
 static size_t m_heap = 128UL << 20;
 static bool m_fault_ok = true; /* AT succeeds */
@@ -426,6 +429,7 @@ int hv_xt_track(u64 ipa, u64 size, bool dry_run, u64 *new_tables)
             m_pg[p].tracked = true;
             m_pg[p].st = HV_XT_DIRTY;
             m_pg[p].flips = 0;
+            m_pg[p].cur_pa = (u64)&m_mem[(size_t)p * M_WORDS];
         }
         pages++;
     }
@@ -438,7 +442,7 @@ enum hv_xt_state hv_xt_get(u64 ipa, u64 *pa, u32 *flips)
     if (p < 0 || !m_pg[p].tracked)
         return HV_XT_UNTRACKED;
     if (pa)
-        *pa = (u64)&m_mem[(size_t)p * M_WORDS];
+        *pa = m_pg[p].cur_pa;
     if (flips)
         *flips = m_pg[p].flips;
     return m_pg[p].st;
@@ -452,6 +456,23 @@ int hv_xt_set(u64 ipa, enum hv_xt_state state, u32 flips)
     m_pg[p].st = state;
     m_pg[p].flips = min(flips, HV_XT_FLIPS_MAX);
     ev_add(EV_SET, p, state);
+    return 0;
+}
+
+/* Repoint the leaf at <pa> (a shadow, or back to the real page) with a break-before-make: the real
+ * hv_xt_remap() invalidates, broadcast-TLBIs, then writes the new leaf, so model a SET + a
+ * broadcast flush. <pa> is the new output address the next hv_xt_get() reports and reads/fetches
+ * resolve to. */
+int hv_xt_remap(u64 ipa, u64 pa, enum hv_xt_state state, u32 flips)
+{
+    int p = m_page_of(ipa);
+    if (p < 0 || !m_pg[p].tracked || (ipa & (HV_XT_PAGE_SIZE - 1)) || (pa & (HV_XT_PAGE_SIZE - 1)))
+        return -1;
+    m_pg[p].st = state;
+    m_pg[p].flips = min(flips, HV_XT_FLIPS_MAX);
+    m_pg[p].cur_pa = pa;
+    ev_add(EV_SET, p, state);
+    ev_add(EV_TLBI_BCAST, -1, 0);
     return 0;
 }
 
@@ -503,6 +524,19 @@ size_t heapblock_remaining(void)
     return m_heap;
 }
 
+/* 16 KiB shadow snapshots: a fixed pool of aligned buffers (no free in heapblock) */
+static u8 m_shadow_pool[PMU_MAX_SHADOW_BUFS][HV_XT_PAGE_SIZE] __attribute__((aligned(0x4000)));
+static unsigned m_shadow_next;
+
+void *heapblock_alloc_aligned(size_t size, size_t align)
+{
+    (void)align;
+    if (size != HV_XT_PAGE_SIZE || m_shadow_next >= PMU_MAX_SHADOW_BUFS || m_heap < size)
+        return NULL;
+    m_heap -= size;
+    return m_shadow_pool[m_shadow_next++];
+}
+
 int host_printf(const char *fmt, ...)
 {
     va_list ap;
@@ -543,6 +577,24 @@ static bool dabort(int page, u64 iss, u64 elr)
     return hv_win_handle_dabort(&ctx, ctx.esr);
 }
 
+/* a data read (write = false) or write (write = true) permission fault at a chosen word */
+static bool dabort_rw(int page, u32 word, bool write, u64 elr)
+{
+    struct exc_info ctx = {
+        .esr = ESR(EC_DABORT_LOWER, (write ? ISS_WNR : 0) | FSC_PERM_L3), .elr = elr, .far = elr};
+    m_fault_ipa = ipa_of(page, word);
+    nev = 0;
+    return hv_win_handle_dabort(&ctx, ctx.esr);
+}
+
+/* the word a guest access to <word> resolves to now: at the leaf's current output address */
+static u32 cur_word(int page, u32 word)
+{
+    u64 pa = 0;
+    hv_xt_get(ipa_of(page, 0), &pa, NULL);
+    return ((u32 *)pa)[word];
+}
+
 static bool ev_is(int i, enum ev_kind k, int page, enum hv_xt_state st)
 {
     return i < nev && ev[i].kind == k && (k != EV_SET || (ev[i].page == page && ev[i].st == st)) &&
@@ -568,6 +620,7 @@ static void reset_world(void)
     m_fault_ok = true;
     m_hpfar_ipa = 0;
     host_cpu = 0;
+    m_shadow_next = 0;
 }
 
 static void test_arm(void)
@@ -578,7 +631,8 @@ static void test_arm(void)
     CHECK(!hv_win_handle_dabort(&ctx, ESR(EC_DABORT_LOWER, ISS_WNR | FSC_PERM_L3)),
           "dabort handled before arming");
     hv_win_pmu_tick();
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16),
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) ==
+              (HV_WIN_PMU_MAGIC << 32 | (u64)HV_WIN_PMU_VERSION << 16),
           "id 0x%lx before arming", hv_win_pmu_stat(HV_WIN_PMU_ID));
 
     u64 size = (u64)M_PAGES * HV_XT_PAGE_SIZE;
@@ -596,7 +650,8 @@ static void test_arm(void)
     m_heap = 16UL << 20;
     CHECK(hv_win_pmu_arm(M_BASE, size) == -1, "heap check");
     m_heap = 128UL << 20;
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16),
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) ==
+              (HV_WIN_PMU_MAGIC << 32 | (u64)HV_WIN_PMU_VERSION << 16),
           "armed by a refusal");
 
     /* two ranges, holes and read-only pages skipped */
@@ -606,7 +661,9 @@ static void test_arm(void)
     int b = hv_win_pmu_arm(M_BASE + 16 * HV_XT_PAGE_SIZE, size - 16 * HV_XT_PAGE_SIZE);
     CHECK(b == M_PAGES - 16, "second range: %d pages", b);
     CHECK(nev > 0 && ev[nev - 1].kind == EV_TLBI_BCAST, "no TLB flush after arming");
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16 | 1), "not armed");
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) ==
+              (HV_WIN_PMU_MAGIC << 32 | (u64)HV_WIN_PMU_VERSION << 16 | 1),
+          "not armed");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_PAGES) == (u64)(a + b), "pages stat");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_RANGES) == 2, "ranges stat");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_TABLES) == 2, "tables stat %lu",
@@ -635,14 +692,14 @@ static void test_exec_and_write(void)
     w[4095] = 0xd53b9c1e; /* mrs x30, PMCR_EL0 */
 
     CHECK(iabort(3, 12, FSC_PERM_L3, 0xfffff80001234000UL), "exec fault not handled");
-    CHECK(m_pg[3].st == HV_XT_CODE, "state %d after the scan", m_pg[3].st);
+    CHECK(m_pg[3].st == HV_XT_CODE_XO, "state %d after the scan", m_pg[3].st);
     CHECK(w[10] == 0xd53be045 && w[11] == 0xd503201f && w[12] == 0xd53be041 &&
               w[4095] == 0xd280001e,
           "words %08x %08x %08x %08x", w[10], w[11], w[12], w[4095]);
     CHECK(scan_order_ok, "scan before write permission was revoked everywhere");
     CHECK(nev == 7 && ev_is(0, EV_SET, 3, HV_XT_SCANNING) && ev_is(1, EV_TLBI_BCAST, 0, 0) &&
               ev_is(2, EV_CIVAC, 3, 0) && ev_is(3, EV_CVAC, 3, 0) && ev_is(4, EV_IC, 0, 0) &&
-              ev_is(5, EV_SET, 3, HV_XT_CODE) && ev_is(6, EV_TLBI_LOCAL, 0, 0),
+              ev_is(5, EV_SET, 3, HV_XT_CODE_XO) && ev_is(6, EV_TLBI_LOCAL, 0, 0),
           "event order (%d events)", nev);
     CHECK(!m_fault_s1ptw_seen, "IPA taken from HPFAR for a plain fetch");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_SCANS) == 1 &&
@@ -652,6 +709,8 @@ static void test_exec_and_write(void)
               hv_win_pmu_stat(HV_WIN_PMU_INSNS_MRS) == 1 &&
               hv_win_pmu_stat(HV_WIN_PMU_INSNS_MSR) == 1,
           "rewrite stats");
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_SHADOWS) == 1 && m_pg[3].cur_pa == (u64)w,
+          "a shadow was taken, the leaf rests on the rewritten page");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + 0) == ipa_of(3, 10) &&
               hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_OP + 0) == (0xd53b9d05UL << 32 | 0xd53be045) &&
               hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_ELR + 0) == 0xfffff80001234000UL &&
@@ -672,7 +731,7 @@ static void test_exec_and_write(void)
 
     /* spurious fetch fault on a CODE page: local flush, retry, nothing else */
     CHECK(iabort(3, 0, FSC_PERM_L3, 0x2000), "spurious exec");
-    CHECK(nev == 1 && ev_is(0, EV_TLBI_LOCAL, 0, 0) && m_pg[3].st == HV_XT_CODE,
+    CHECK(nev == 1 && ev_is(0, EV_TLBI_LOCAL, 0, 0) && m_pg[3].st == HV_XT_CODE_XO,
           "spurious exec events");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_SPURIOUS) == 1, "spurious stat");
 
@@ -686,7 +745,7 @@ static void test_exec_and_write(void)
 
     /* the guest writes a new PMU instruction; the next fetch rescans */
     w[20] = 0xd53b9d00;
-    CHECK(iabort(3, 20, FSC_PERM_L3, 0x4000) && w[20] == 0xd53be040 && m_pg[3].st == HV_XT_CODE,
+    CHECK(iabort(3, 20, FSC_PERM_L3, 0x4000) && w[20] == 0xd53be040 && m_pg[3].st == HV_XT_CODE_XO,
           "rescan after a write");
     CHECK(m_pg[3].flips == 1, "flips kept across the scan");
 
@@ -696,7 +755,7 @@ static void test_exec_and_write(void)
           "spurious write");
 
     /* not ours: reads, translation faults, untracked IPAs, the read-only page */
-    CHECK(!dabort(3, FSC_PERM_L3, 0x6000), "read permission fault taken");
+    CHECK(!dabort(4, FSC_PERM_L3, 0x6000), "read permission fault on a non-shadowed page taken");
     CHECK(!dabort(3, ISS_WNR | FSC_TRANS_L3, 0x6000), "translation fault taken");
     CHECK(!iabort(3, 0, FSC_TRANS_L3, 0x6000), "instruction translation fault taken");
     u64 before = hv_win_pmu_stat(HV_WIN_PMU_NOT_OURS);
@@ -820,7 +879,7 @@ static void test_stuck(void)
     /* AT fails on a fetch, HPFAR names a DIRTY page: scanned from the hint */
     words_of(21)[3] = 0xd53b9d02;
     m_hpfar_ipa = ipa_of(21, 3);
-    CHECK(iabort(21, 3, FSC_PERM_L3, 0xa000) && m_pg[21].st == HV_XT_CODE &&
+    CHECK(iabort(21, 3, FSC_PERM_L3, 0xa000) && m_pg[21].st == HV_XT_CODE_XO &&
               words_of(21)[3] == 0xd53be042,
           "HPFAR hint not used");
     /* ... but never a CODE page (or garbage): that is only a retry */
@@ -835,6 +894,78 @@ static void test_stuck(void)
     /* walker faults never fall back */
     m_hpfar_ipa = ipa_of(23, 0);
     CHECK(iabort(23, 0, ISS_S1PTW | FSC_PERM_L3, 0xc000), "walker retry");
+}
+
+/*
+ * The point of the shadow split view (ci/EL2-USERMODE-CI-FIX.md): a data read of a rewritten code
+ * page returns the signed ORIGINAL word (what Code Integrity's page-hash read must see), while an
+ * instruction fetch of the same word returns the PMU-safe REWRITTEN word.
+ */
+static void test_split_view(void)
+{
+    arm_all();
+
+    const int P = 5;
+    const u32 k = 100;
+    const u32 orig = 0xd53b9d05; /* mrs x5, PMCCNTR_EL0 */
+    const u32 rewr = 0xd53be045; /* mrs x5, CNTVCT_EL0  */
+    words_of(P)[k] = orig;
+
+    /* first fetch: scan rewrites the page in place, snapshots the original, rests execute-only */
+    CHECK(iabort(P, k, FSC_PERM_L3, 0xdd00), "scan not handled");
+    CHECK(m_pg[P].st == HV_XT_CODE_XO, "execute-only after the scan (state %d)", m_pg[P].st);
+    CHECK(words_of(P)[k] == rewr, "the real page holds the rewrite (0x%08x)", words_of(P)[k]);
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_SHADOWS) == 1, "one shadow taken");
+    CHECK(cur_word(P, k) == rewr, "the re-run fetch sees the rewrite (0x%08x)", cur_word(P, k));
+
+    /* a data read faults on the execute-only page and is served the signed original */
+    CHECK(dabort_rw(P, k, false, 0xdd04), "the data read was not handled");
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_SHADOW_READS) == 1, "one read served the original");
+    CHECK(cur_word(P, k) == orig, "the data read sees the ORIGINAL (0x%08x)", cur_word(P, k));
+
+    /* a fetch flips straight back to the rewritten copy */
+    CHECK(iabort(P, k, FSC_PERM_L3, 0xdd00), "the fetch was not handled");
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_SHADOW_EXECS) == 1, "one fetch flip");
+    CHECK(cur_word(P, k) == rewr, "the fetch sees the REWRITE (0x%08x)", cur_word(P, k));
+
+    /* the two views alternate */
+    CHECK(dabort_rw(P, k, false, 0xdd04) && cur_word(P, k) == orig, "read again -> original");
+    CHECK(iabort(P, k, FSC_PERM_L3, 0xdd00) && cur_word(P, k) == rewr, "fetch again -> rewrite");
+
+    /* a guest write drops the shadow and the page re-joins the normal DIRTY path */
+    CHECK(dabort_rw(P, k, true, 0xdd08), "write not handled");
+    CHECK(m_pg[P].st == HV_XT_DIRTY && hv_win_pmu_stat(HV_WIN_PMU_SHADOW_WRITES) == 1,
+          "shadow dropped on a write (state %d)", m_pg[P].st);
+    CHECK(cur_word(P, k) == rewr && words_of(P)[k] == rewr, "the leaf is back on the real page");
+
+    /* the flip cap pins a page executed and read in a tight interleave (its hash may then fail) */
+    reset_world();
+    arm_all();
+    const int Q = 6;
+    words_of(Q)[k] = orig;
+    CHECK(iabort(Q, k, FSC_PERM_L3, 0xee00) && m_pg[Q].st == HV_XT_CODE_XO, "scan Q");
+    for (int i = 0; i < 8; i++ /* PMU_SHADOW_FLIP_CAP in hv_win_pmu.c */) {
+        CHECK(dabort_rw(Q, k, false, 0xee04), "interleaved read %d", i);
+        if (i < 8 - 1)
+            CHECK(iabort(Q, k, FSC_PERM_L3, 0xee00), "interleaved fetch %d", i);
+    }
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_SHADOW_PINS) == 1, "pinned at the flip cap");
+    CHECK(m_pg[Q].st == HV_XT_CODE && cur_word(Q, k) == rewr,
+          "pinned RO+X on the rewritten copy (state %d, word 0x%08x)", m_pg[Q].st, cur_word(Q, k));
+    /* reads no longer fault on the pinned page; a guest write still drops it */
+    CHECK(dabort_rw(Q, k, true, 0xee08) && m_pg[Q].st == HV_XT_DIRTY, "pinned page written");
+
+    /* pool exhausted: the page is rewritten in place with no shadow, as before (counted) */
+    reset_world();
+    arm_all();
+    m_heap = 0; /* no room for a snapshot */
+    const int R = 9;
+    words_of(R)[k] = orig;
+    CHECK(iabort(R, k, FSC_PERM_L3, 0xff00) && m_pg[R].st == HV_XT_CODE, "no-shadow scan");
+    CHECK(words_of(R)[k] == rewr && hv_win_pmu_stat(HV_WIN_PMU_SHADOW_FULL) == 1 &&
+              hv_win_pmu_stat(HV_WIN_PMU_SHADOWS) == 0,
+          "rewritten in place, no shadow, counted");
+    CHECK(!dabort_rw(R, k, false, 0xff04), "a read of a non-shadowed page is not ours");
 }
 
 static void test_log_ring(void)
@@ -863,7 +994,7 @@ static void test_log_ring(void)
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_PAGES_REWRITTEN) == 71, "pages rewritten");
     CHECK(strstr(last_line, "IPA") != NULL, "last console line: %s", last_line);
     hv_win_pmu_report();
-    CHECK(strstr(last_line, "71 pages rewritten") != NULL, "report: %s", last_line);
+    CHECK(strstr(last_line, "71 allocated") != NULL, "shadow report line: %s", last_line);
 }
 
 /* ---- llvm-objdump listings ----------------------------------------------------------------------
@@ -1111,6 +1242,7 @@ int main(int argc, char **argv)
     test_walker();
     test_pinning();
     test_stuck();
+    test_split_view();
     test_log_ring();
 
     free(m_mem);
