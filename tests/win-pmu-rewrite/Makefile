@@ -8,6 +8,8 @@
 #                                           <dir>/*.dis (llvm-objdump -d listings of Windows images,
 #                                           never committed) per instruction, and <dir>/<image> per PE
 #                                           section for PMU-looking words in data
+#   make -C tests/win-pmu-rewrite qemu      hv_vm.c's execute tracking + hv_win_pmu.c at QEMU's EL2
+#                                           with an EL1 guest (qemu/run.sh; qemu-system-aarch64)
 # Builds with Homebrew LLVM when present, else the system clang. SAN=0 drops the sanitizers.
 
 LLVM := /opt/homebrew/opt/llvm/bin
@@ -45,7 +47,11 @@ corpus: test_pmu_rewrite
 	./test_pmu_rewrite --dis $(wildcard $(CORPUS)/*.dis)
 	./test_pmu_rewrite --pe $(filter-out %.dis %.inf,$(wildcard $(CORPUS)/*))
 
-clean:
-	rm -rf test_pmu_rewrite test_pmu_rewrite.dSYM sysreg-space.bin sysreg-space.o sysreg-space.dis
+qemu:
+	./qemu/run.sh
+	XT_DEFS=-DNO_ARM ./qemu/run.sh > /dev/null 2>&1; test $$? -ne 0 && echo "negative control (not armed): failed as it must"
 
-.PHONY: check oracle corpus clean
+clean:
+	rm -rf qemu/build qemu/out test_pmu_rewrite test_pmu_rewrite.dSYM sysreg-space.bin sysreg-space.o sysreg-space.dis
+
+.PHONY: check oracle corpus qemu clean
