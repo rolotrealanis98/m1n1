@@ -25,6 +25,18 @@
 # non-executable in stage 2; EL2 then rewrites the PMUv3 accesses of each 16 KiB page at its first
 # instruction fetch. P_HV_WIN_PMU_STATS is read at guest exit (RUN.txt line, pmu-rewrite.txt).
 #
+# USB host (--usb-host N, m5pro-windows docs/USB-HOST.md): the Type-C port of /arm-io/usb-drdN goes to the
+# guest as a plain xHCI controller. Never the proxy's port. Stage 2 keeps exactly the controller's register
+# window (usb-drdN reg[0]: xHCI + DWC3 globals) passthrough; every DART, every usb-drd/atc-phy/dart-usb block
+# of every port and the SPMI buses of the USB-PD controllers are left unmapped (EL2 owns them). After the
+# memory plan, P_HV_WIN_USB_PREP (0xc1d) puts the PD controller in S0, stops m1n1's gadget on the port, gives
+# both DART instances a DVA == PA map over m5w,memory only, brings the USB2 PHY up in host mode (PIPE on the
+# dummy producer: high speed only) and the DWC3 into the host role with the xHC reset and halted. The
+# controller's interrupt (usb-drdN interrupts[0]) joins m5w,irq-map as --usb-gsiv (route gic), and
+# /chosen/m5w,xhci = <u64 base><u64 size><u32 gsiv><u32 flags> tells Mu where it is (flags: bit 0 DMA
+# coherent, bit 1 USB2 only, bit 2 no connect in UEFI (--usb-no-connect), bits 15:8 the port index; gsiv 0 = no
+# interrupt, route aic).
+#
 # Interrupt routes (CONTRACT s3/s9, MU-M1.md section 8):
 #   aic  M0 and m1-aic: the guest drives the real AIC itself (HCR_EL2.IMO = 0), one vCPU, no m5w,gic.
 #   gic  m1-gic and Windows: EL2 emulates GICv3 (HCR_EL2.IMO/FMO/TID3 set, ID_AA64PFR0_EL1.GIC = 1 in the
@@ -118,8 +130,13 @@ MU_IMAGES = {
     "m1-gic": ("gic", "0581fee566471dd7df3186eccf4bef0705d8c200eaee3c9e4fd6e62dda250d5d"),
     "m1-aic": ("aic", "14958582f3b255a70bfd3357c9229dd29cad9f0340c8a7a7e35fd01e1b2236cb"),
     "m1a": ("gic", "6f242a7b591a509a44a17016d7ef9dbf78dce142d2d335bed1ff77ad59e79d46"),
+    # USB host profiles (docs/USB-HOST.md; --usb-host), m5pro-windows 12a245f + the USB host driver,
+    # J716S_PMU_FALLBACK=FALSE
+    "m1-gic-usb": ("gic", "9091e7659b588c33ed743891a49ecee72721c6787fa9f4288411ed80494ccc69"),
+    "m1-aic-usb": ("aic", "727b9e07ff0fc6e80d16b733bb1027223f8c3920ce73110d9189c3c7d8c69f79"),
 }
 MU_NEEDS_RAMDISK = {"m1a"}
+USB_PROFILES = ("m1-gic-usb", "m1-aic-usb")
 MU_HANDOFF_BASE = 0x104_0000_0000   # T6050_BOOTARGS_PTR; the ADT goes to +0x4000 (T6050_ADT_PTR)
 MU_HANDOFF_SIZE = 0x404000
 MU_TOP_WORKSPACE = 128 << 20        # PcdSystemMemoryUefiRegionSize at the top of boot_args RAM
@@ -152,6 +169,24 @@ HCR_FMO = 1 << 3
 HCR_IMO = 1 << 4
 HCR_TID3 = 1 << 18
 HCR_TSC = 1 << 19
+
+# P_HV_WIN_USB_PREP (src/usb.h USB_HOST_F_* / USB_HOST_INFO_* / USB_HOST_E_*)
+USB_HOST_F_DART_BYPASS = 1 << 0
+USB_HOST_F_LEGACY_PHY = 1 << 1
+USB_HOST_F_NO_HCRST = 1 << 2
+USB_HOST_F_LOCK_DART = 1 << 3
+USB_HOST_F_KEEP_PD = 1 << 4
+USB_HOST_F_PHY_BEFORE_RESET = 1 << 5
+USB_HOST_ERRORS = {-1: "bad port or flags", -2: "not a T6050/T6051", -3: "no usb-drd/atc-phy/dart-usb set in the ADT",
+                   -4: "the proxy's or the vuart's port, or a guest is running",
+                   -5: "identity ranges invalid, outside DRAM or over m1n1", -6: "USB-PD controller not in S0",
+                   -7: "an ADT tunable is missing or malformed", -8: "PIPE not on the dummy producer",
+                   -9: "DART locked, too narrow, or refused the tables", -10: "USB2 PHY did not reach the run state",
+                   -11: "DWC3 core init failed", -12: "xHC missing or its reset failed"}
+M5W_XHCI_F_COHERENT = 1 << 0
+M5W_XHCI_F_USB2_ONLY = 1 << 1
+M5W_XHCI_F_NO_CONNECT = 1 << 2
+USB_GSIV_BASE = 64                  # default --usb-gsiv: 64 + port index
 
 
 def align_up(v, a=PAGE):
@@ -274,6 +309,64 @@ def window_frames(args):
     if args.pl011:
         frames.append(("PL011", args.pl011, PL011_FRAME))
     return frames
+
+
+def node_regs(node):
+    out = []
+    try:
+        for idx in range(len(node.reg)):
+            base, size = node.get_reg(idx)
+            if size:
+                out.append((idx, base, size))
+    except Exception:
+        pass
+    return out
+
+
+def usb_host_plan(adt, port, proxy_port):
+    """--usb-host: the controller window the guest keeps, its AIC line, and the MMIO EL2 keeps for itself
+    (every DART, every usb-drd/atc-phy/dart-usb block but this controller's reg[0], the SPMI buses that carry
+    the USB-PD controllers). Raises PlanError."""
+    if port == proxy_port:
+        raise PlanError(f"usb-drd{port} carries the proxy; it never goes to the guest")
+    try:
+        drd = adt[f"/arm-io/usb-drd{port}"]
+        adt[f"/arm-io/atc-phy{port}"]
+        dart = adt[f"/arm-io/dart-usb{port}"]
+    except KeyError:
+        raise PlanError(f"no usb-drd{port}/atc-phy{port}/dart-usb{port} in the ADT") from None
+    if "dart,t8110" not in list(getattr(dart, "compatible", [])):
+        raise PlanError(f"dart-usb{port} is not a dart,t8110")
+    _, xbase, xsize = node_regs(drd)[0]
+    line = list(drd.interrupts)[0]
+    if hasattr(adt["/arm-io/aic"], "aic-numdies") and getattr(adt["/arm-io/aic"], "aic-numdies", 1) != 1:
+        raise PlanError("multi-die AIC: the irq-map line numbering (die * max_irq + num) is not handled here")
+
+    keep = []
+    usb_names = {f"{k}{i}" for k in ("usb-drd", "atc-phy", "dart-usb") for i in range(16)}
+    spmi_with_hpm = set()
+
+    def walk(node, path):
+        for child in node:
+            cpath = f"{path}/{child.name}"
+            compat = getattr(child, "compatible", [])
+            compat = [compat] if isinstance(compat, str) else list(compat or [])
+            if any(str(c).startswith("usbc,sn2012") for c in compat):
+                spmi_with_hpm.add(path)
+            yield cpath, child, compat
+            yield from walk(child, cpath)
+
+    nodes = list(walk(adt["/arm-io"], "/arm-io"))
+    for cpath, child, compat in nodes:
+        name = child.name
+        dart_node = any(str(c).startswith("dart,") for c in compat)
+        if not (dart_node or name in usb_names or cpath in spmi_with_hpm):
+            continue
+        for idx, base, size in node_regs(child):
+            if name == f"usb-drd{port}" and xbase <= base and base + size <= xbase + xsize:
+                continue  # the controller window itself (reg[0] and the Apple blocks inside it)
+            keep.append((base, size, f"{cpath} reg[{idx}]"))
+    return dict(xhci=(xbase, xsize), line=line, el2=keep, spmi=sorted(spmi_with_hpm))
 
 
 def epoch_with_counter(t0, t1, counter, cntfrq):
@@ -524,6 +617,22 @@ def parse_args():
                              "loaded with P_HV_WIN_MAP_IRQ (repeatable; default empty: no device interrupts, M1a)")
     parser.add_argument("--irq-map-file", type=pathlib.Path, default=None,
                         help="the same pairs from a file (one or more per line, '#' comments)")
+    parser.add_argument("--usb-host", type=int, default=None, metavar="N",
+                        help="hand the Type-C port of /arm-io/usb-drdN to the guest as an xHCI controller (1 = "
+                             "left-front on the J716s, 2 = right; never the proxy's port); docs/USB-HOST.md")
+    parser.add_argument("--usb-gsiv", type=hexint, default=None,
+                        help="SPI for the controller's interrupt (route gic; default 64 + N), added to m5w,irq-map")
+    parser.add_argument("--usb-phy", choices=("native", "legacy"), default="native",
+                        help="USB2 PHY recipe: native = Aurora's T6050 sequence with the ADT tunables (default), "
+                             "legacy = m1n1's values plus the host bits, no controller tunables")
+    parser.add_argument("--usb-phy-before-reset", action="store_true",
+                        help="run the USB2 PHY sequence while the DWC3 is still held in reset (Linux's order)")
+    parser.add_argument("--usb-lock-dart", action="store_true", help="lock the port's DART TTBR/TCR until reset")
+    parser.add_argument("--usb-no-connect", action="store_true",
+                        help="Mu registers the xHCI but leaves connecting it to BDS / the Shell (m5w,xhci flag bit 2)")
+    parser.add_argument("--usb-dart-bypass-unsafe", action="store_true",
+                        help="try DART bypass before the identity map: the controller (and so the guest) can then "
+                             "DMA into m1n1 and every carveout. Debug only")
     parser.add_argument("--ramdisk", type=pathlib.Path,
                         help="appended WinPE RAM disk: the .ntasi file from tools/windows/make-ramdisk-image.sh "
                              "(required by --mu-profile m1a)")
@@ -550,9 +659,10 @@ def parse_args():
     if args.m0:
         if args.raw_guest or args.psci_smc or args.ramdisk or args.reserve_cpu or args.mu_profile != "m0" \
                 or args.route not in (None, "aic") or args.cpus not in (None, 1) or args.entry_offset not in (None, 0) \
-                or args.irq_map or args.irq_map_file or args.pmu_rewrite != "off":
+                or args.irq_map or args.irq_map_file or args.pmu_rewrite != "off" \
+                or args.usb_host is not None:
             parser.error("--m0 is the fixed M0-RUNTIME-PLAN invocation (profile m0, aic route, 1 CPU, entry 0, "
-                         "no SMC, no RAM disk, no IRQ map, no PMU rewrite)")
+                         "no SMC, no RAM disk, no IRQ map, no PMU rewrite, no USB host)")
         if args.logfile is None:
             args.logfile = pathlib.Path("m0.log")
     profile_route = MU_IMAGES[args.mu_profile][0]
@@ -582,6 +692,28 @@ def parse_args():
         parser.error(str(e))
     if args.irq_pairs and args.route != "gic":
         parser.error("--irq-map needs --route gic (in the aic route the guest owns the AIC)")
+    if args.usb_host is not None:
+        if args.usb_host < 0 or args.usb_host > 7:
+            parser.error("--usb-host takes the usb-drd index 0..7")
+        if args.raw_guest:
+            parser.error("--usb-host needs a Mu guest (it publishes /chosen/m5w,xhci)")
+        if args.usb_gsiv is None and args.route == "gic":
+            args.usb_gsiv = USB_GSIV_BASE + args.usb_host
+        if args.usb_gsiv is not None:
+            if args.route != "gic":
+                parser.error("--usb-gsiv needs --route gic (the aic route has no GIC; Mu polls the xHC anyway)")
+            if not GIC_SPI_MIN <= args.usb_gsiv <= GIC_SPI_MAX:
+                parser.error(f"--usb-gsiv must be an SPI {GIC_SPI_MIN}..{GIC_SPI_MAX}")
+            if any(g == args.usb_gsiv for _, g in args.irq_pairs) or args.usb_gsiv == args.pl011_gsiv:
+                parser.error(f"--usb-gsiv {args.usb_gsiv} is already used by --irq-map or --pl011-gsiv")
+    elif args.usb_gsiv is not None or args.usb_lock_dart or args.usb_dart_bypass_unsafe or args.usb_no_connect:
+        parser.error("--usb-* options need --usb-host")
+    if args.usb_host is not None and args.mu_profile not in USB_PROFILES and not args.raw_guest:
+        print(f"note: --usb-host with Mu profile {args.mu_profile}: EL2 prepares the port, but only "
+              f"{'/'.join(USB_PROFILES)} register its xHCI (UEFI) and describe it (SSDT)", file=sys.stderr)
+    if args.usb_host is None and args.mu_profile in USB_PROFILES:
+        print(f"note: profile {args.mu_profile} without --usb-host: no /chosen/m5w,xhci, Mu runs without USB",
+              file=sys.stderr)
     if args.pl011_gsiv is not None:
         if args.route != "gic":
             parser.error("--pl011-gsiv needs --route gic (there is no GIC to deliver it otherwise)")
@@ -772,6 +904,27 @@ def main():
     for base, size, path in pruned_mmio:
         hv.add_tracer(irange(base, size), "WIN-PRUNED", TraceMode.RESERVED)
         print(f"  unmapped {base:#x}..{base + size:#x} ({path})")
+    usb = None
+    if args.usb_host is not None:
+        try:
+            usb = usb_host_plan(orig_adt, args.usb_host, usb_idx)
+        except PlanError as e:
+            raise SystemExit(f"--usb-host refused: {e}")
+        xb, xs = usb["xhci"]
+        guarded = [(xb, xs, f"usb-drd{args.usb_host} xHCI window")]
+        guarded += [(b, s, "uart0") for _, b, s in node_regs(orig_adt["/arm-io/uart0"])]
+        for base, size, what in usb["el2"]:
+            for g0, gs, gw in guarded:
+                if overlaps(align_down(base), align_up(base + size), g0, g0 + gs):
+                    raise SystemExit(f"--usb-host refused: unmapping {what} would take a page of the {gw}")
+            hv.add_tracer(irange(base, size), "WIN-USB-EL2", TraceMode.RESERVED)
+        record(f"usb host: usb-drd{args.usb_host} xHCI {xb:#x}+{xs:#x} passthrough, AIC line {usb['line']}; "
+               f"{len(usb['el2'])} MMIO ranges kept by EL2 (all DARTs, the USB/ATC blocks of every port, "
+               f"{', '.join(usb['spmi']) or 'no SPMI bus'})")
+        if args.route == "gic":
+            if any(l == usb["line"] for l, _ in args.irq_pairs):
+                raise SystemExit(f"--usb-host: AIC line {usb['line']} is already in --irq-map")
+            args.irq_pairs.append((usb["line"], args.usb_gsiv))
     if args.route == "gic":
         # EL2 acknowledges and masks AIC events itself (hv_win_handle_irq); a guest access would steal them.
         # Mu's m1-gic never maps the AIC (MU-M1.md 8.13), so it stays out of stage 2 (a touch = EL2 fault).
@@ -898,6 +1051,29 @@ def main():
         check_frames((sw0, sw1), window_frames(args), plan["ranges"])
     except PlanError as e:
         raise SystemExit(f"memory plan refused: {e}")
+    memory_prop = b"".join(struct.pack("<QQ", s, e - s) for s, e in plan["ranges"])
+
+    if usb is not None:
+        # after the plan (the DART maps exactly m5w,memory), before the image lands in guest RAM
+        flags = ((USB_HOST_F_LEGACY_PHY if args.usb_phy == "legacy" else 0)
+                 | (USB_HOST_F_PHY_BEFORE_RESET if args.usb_phy_before_reset else 0)
+                 | (USB_HOST_F_LOCK_DART if args.usb_lock_dart else 0)
+                 | (USB_HOST_F_DART_BYPASS if args.usb_dart_bypass_unsafe else 0))
+        if args.usb_dart_bypass_unsafe:
+            record("WARNING: --usb-dart-bypass-unsafe: if bypass sticks, the guest's controller can DMA anywhere")
+        t0 = time.time()
+        info = p.hv_win_usb_prep(args.usb_host, flags, memory_prop)
+        if info < 0:
+            raise SystemExit(f"P_HV_WIN_USB_PREP(usb-drd{args.usb_host}, {flags:#x}) failed ({info}): "
+                             f"{USB_HOST_ERRORS.get(info, 'unknown')}; see the m1n1 console")
+        dart_mode = "identity over m5w,memory" if info & 1 else ("BYPASS" if info & 2 else "?")
+        hciver = (info >> 16) & 0xffff
+        record(f"usb host prepared in {(time.time() - t0) * 1e3:.0f} ms: DART {dart_mode} "
+               f"({(info >> 32) & 0xffff} tables), {'legacy' if info & 8 else 'native'} USB2 PHY, xHCI "
+               f"{hciver >> 8:x}.{hciver & 0xff:02x} {(info >> 8) & 0xff} ports "
+               f"{'64-bit DMA' if info & 4 else 'NO 64-BIT DMA (guest RAM is above 4 GiB: will fail)'}, "
+               f"ports with a device {[i + 1 for i in range(8) if (info >> 48) & (1 << i)] or 'none seen'} "
+               f"(info {info:#x})")
     text = format_plan(plan)
     for name, base, size in window_frames(args):
         text += f"\n{name} frame {base:#x}..{base + size:#x} (synthetic window, EL2 hook)"
@@ -948,7 +1124,7 @@ def main():
     def put(name, value):
         hv.adt["chosen"]._properties[name] = value
 
-    put("m5w,memory", b"".join(struct.pack("<QQ", s, e - s) for s, e in plan["ranges"]))
+    put("m5w,memory", memory_prop)
     put("m5w,fd-base", struct.pack("<Q", hv.guest_base))
     put("m5w,fd-size", struct.pack("<Q", len(image)))
     put("m5w,counter-hz", struct.pack("<Q", counter_hz))
@@ -964,6 +1140,13 @@ def main():
         if args.route == "gic":
             put("m5w,gic", struct.pack("<QQ", args.gicd, args.gicr))
             put("m5w,irq-map", b"".join(struct.pack("<II", l, g) for l, g in args.irq_pairs))
+
+    if usb is not None:
+        xb, xs = usb["xhci"]
+        xflags = M5W_XHCI_F_COHERENT | M5W_XHCI_F_USB2_ONLY | (args.usb_host << 8) | \
+            (M5W_XHCI_F_NO_CONNECT if args.usb_no_connect else 0)
+        put("m5w,xhci", struct.pack("<QQII", xb, xs, args.usb_gsiv or 0, xflags))
+        record(f"m5w,xhci: {xb:#x}+{xs:#x} gsiv {args.usb_gsiv or 0} flags {xflags:#x}")
 
     # the same bytes EL2 got as P_HV_WIN_CONFIGURE's sixth argument
     put("m5w,cpus", cpus_prop)
