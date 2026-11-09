@@ -155,7 +155,7 @@ OBJECTS := \
 	clk.o \
 	cpufreq.o \
 	dapf.o \
-	dart.o \
+	dart.o dart_identity.o \
 	dcp.o \
 	dcp_iboot.o \
 	devicetree.o \

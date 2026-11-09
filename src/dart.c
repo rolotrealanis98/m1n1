@@ -64,9 +64,18 @@
 #define DART_T8110_TTBR_ADDR  GENMASK(29, 2)
 #define DART_T8110_TTBR_SHIFT 14
 
+#define DART_T8110_PARAMS3          0x08
+#define DART_T8110_PARAMS3_PA_WIDTH GENMASK(29, 24)
+#define DART_T8110_PARAMS3_VA_WIDTH GENMASK(21, 16)
+#define DART_T8110_PARAMS4          0x0c
+#define DART_T8110_PARAMS4_NUM_SIDS GENMASK(8, 0)
+
+#define DART_T8110_ERROR 0x100
+
 #define DART_T8110_TCR_OFF              0x1000
 #define DART_T8110_TCR_REMAP            GENMASK(11, 8)
 #define DART_T8110_TCR_REMAP_EN         BIT(7)
+#define DART_T8110_TCR_FOUR_LEVEL       BIT(3)
 #define DART_T8110_TCR_BYPASS_DAPF      BIT(2)
 #define DART_T8110_TCR_BYPASS_DART      BIT(1)
 #define DART_T8110_TCR_TRANSLATE_ENABLE BIT(0)
@@ -762,4 +771,121 @@ void dart_shutdown(dart_dev_t *dart)
 u64 dart_vm_base(dart_dev_t *dart)
 {
     return dart->vm_base;
+}
+
+/*
+ * Whole-instance control of a T8110 DART for a guest-owned master (the identity tables themselves
+ * are built in dart_identity.c). TCR writable mask measured on T8142's usb DART by Aurora:
+ * 0xf89 (TRANSLATE_ENABLE, FOUR_LEVEL, REMAP_EN, REMAP), bypass bits hardwired to zero although
+ * PARAMS2 advertises bypass (third_party/mu 255a340); hence bypass is only ever attempted, read
+ * back, and abandoned when it does not stick.
+ */
+u32 dart_t8110_num_sids(uintptr_t base)
+{
+    u32 n = FIELD_GET(DART_T8110_PARAMS4_NUM_SIDS, read32(base + DART_T8110_PARAMS4));
+    return min(n, (u32)dart_t8110.sid_count);
+}
+
+u32 dart_t8110_va_width(uintptr_t base)
+{
+    return FIELD_GET(DART_T8110_PARAMS3_VA_WIDTH, read32(base + DART_T8110_PARAMS3));
+}
+
+bool dart_t8110_locked(uintptr_t base)
+{
+    return read32(base + DART_T8110_PROTECT) & DART_T8110_PROTECT_TTBR_TCR;
+}
+
+static void dart_t8110_flush_all(uintptr_t base)
+{
+    dma_wmb();
+    write32(base + DART_T8110_TLB_CMD,
+            FIELD_PREP(DART_T8110_TLB_CMD_OP, DART_T8110_TLB_CMD_OP_FLUSH_ALL));
+    if (poll32(base + DART_T8110_TLB_CMD, DART_T8110_TLB_CMD_BUSY, 0, 1000))
+        printf("dart: 0x%lx: TLB_CMD busy did not clear\n", base);
+}
+
+static void dart_t8110_enable_streams(uintptr_t base, u32 nsid)
+{
+    for (u32 i = 0; i < nsid; i += 32)
+        write32(base + DART_T8110_ENABLE_STREAMS + 4 * (i / 32),
+                nsid - i >= 32 ? 0xffffffff : (u32)(BIT(nsid - i) - 1));
+}
+
+void dart_t8110_block(uintptr_t base)
+{
+    u32 nsid = dart_t8110_num_sids(base);
+
+    for (u32 sid = 0; sid < nsid; sid++) {
+        write32(base + DART_T8110_TCR_OFF + 4 * sid, 0);
+        write32(base + DART_T8110_TTBR_OFF + 4 * sid, 0);
+    }
+    dart_t8110_flush_all(base);
+}
+
+int dart_t8110_attach_bypass(uintptr_t base)
+{
+    const u32 tcr = DART_T8110_TCR_BYPASS_DART | DART_T8110_TCR_BYPASS_DAPF;
+    u32 nsid = dart_t8110_num_sids(base);
+
+    if (!nsid)
+        return -1;
+
+    for (u32 sid = 0; sid < nsid; sid++) {
+        write32(base + DART_T8110_TCR_OFF + 4 * sid, tcr);
+        if (read32(base + DART_T8110_TCR_OFF + 4 * sid) != tcr) {
+            printf("dart: 0x%lx: stream %u refuses bypass (TCR reads 0x%x)\n", base, sid,
+                   read32(base + DART_T8110_TCR_OFF + 4 * sid));
+            dart_t8110_block(base);
+            return -1;
+        }
+    }
+    dart_t8110_enable_streams(base, nsid);
+    dart_t8110_flush_all(base);
+    return 0;
+}
+
+int dart_t8110_attach_identity(uintptr_t base, const struct dart_identity *id)
+{
+    const u32 tcr = DART_T8110_TCR_TRANSLATE_ENABLE | DART_T8110_TCR_FOUR_LEVEL;
+    u32 nsid = dart_t8110_num_sids(base);
+    u32 ttbr =
+        DART_T8110_TTBR_VALID | FIELD_PREP(DART_T8110_TTBR_ADDR, id->root >> DART_T8110_TTBR_SHIFT);
+
+    if (!id->root || FIELD_GET(DART_T8110_TTBR_ADDR, ttbr) << DART_T8110_TTBR_SHIFT != id->root)
+        return -1;
+    if (!nsid) {
+        printf("dart: 0x%lx: PARAMS4 reports no streams (unpowered?)\n", base);
+        return -1;
+    }
+
+    for (u32 sid = 0; sid < nsid; sid++) {
+        write32(base + DART_T8110_TCR_OFF + 4 * sid, 0);
+        write32(base + DART_T8110_TTBR_OFF + 4 * sid, ttbr);
+    }
+    dart_t8110_enable_streams(base, nsid);
+    dart_t8110_flush_all(base);
+    for (u32 sid = 0; sid < nsid; sid++) {
+        write32(base + DART_T8110_TCR_OFF + 4 * sid, tcr);
+        u32 rb_tcr = read32(base + DART_T8110_TCR_OFF + 4 * sid);
+        u32 rb_ttbr = read32(base + DART_T8110_TTBR_OFF + 4 * sid);
+        if (rb_tcr != tcr || rb_ttbr != ttbr) {
+            printf("dart: 0x%lx: stream %u refuses the identity map (TCR 0x%x TTBR 0x%x)\n", base,
+                   sid, rb_tcr, rb_ttbr);
+            dart_t8110_block(base);
+            return -1;
+        }
+    }
+    dart_t8110_flush_all(base);
+    return 0;
+}
+
+void dart_t8110_lock(uintptr_t base)
+{
+    set32(base + DART_T8110_PROTECT, DART_T8110_PROTECT_TTBR_TCR);
+}
+
+u32 dart_t8110_error(uintptr_t base)
+{
+    return read32(base + DART_T8110_ERROR);
 }
