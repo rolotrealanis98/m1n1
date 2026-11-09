@@ -8,9 +8,12 @@
 #include "aic.h"
 #include "aic_regs.h"
 #include "cpu_regs.h"
+#include "dart.h"
 #include "hv_win_pmu_rewrite.h"
 #include "hv_win_regs.h"
 #include "smp.h"
+#include "string.h"
+#include "usb.h"
 #include "utils.h"
 
 #include "../hv.h"
@@ -485,4 +488,26 @@ void hv_win_update_virq(bool ptimer_firing, bool vtimer_firing)
     hv_vgic3_set_ppi_level(cpu, GIC_PPI_CNTP, ptimer_firing);
     hv_vgic3_set_ppi_level(cpu, GIC_PPI_CNTV, vtimer_firing);
     hv_vgic3_flush();
+}
+
+extern bool hv_started_cpus[MAX_CPUS];
+
+s64 hv_win_usb_prep(u64 port, u64 flags, u64 ranges, u64 count)
+{
+    struct dart_range r[64];
+
+    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        if (hv_started_cpus[cpu]) {
+            printf("HV/win: USB host preparation refused while a guest is running\n");
+            return USB_HOST_E_BUSY;
+        }
+    }
+    if (!count || count > ARRAY_SIZE(r) || (ranges & 7) || !is_heap((void *)ranges) ||
+        !is_heap((void *)(ranges + count * sizeof(r[0]) - 1))) {
+        printf("HV/win: bad USB identity range list 0x%lx (%lu entries)\n", ranges, count);
+        return USB_HOST_E_RANGES;
+    }
+
+    memcpy(r, (void *)ranges, count * sizeof(r[0]));
+    return usb_host_prepare(port, flags, r, count);
 }

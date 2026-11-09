@@ -683,6 +683,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_PL011_STATS = 0xc1a
     P_HV_WIN_PMU_REWRITE = 0xc1b
     P_HV_WIN_PMU_STATS = 0xc1c
+    P_HV_WIN_USB_PREP = 0xc1d
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1206,6 +1207,11 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_PMU_REWRITE, base, size, signed=True)
     def hv_win_pmu_stats(self, idx):
         return self.request(self.P_HV_WIN_PMU_STATS, idx)
+    def hv_win_usb_prep(self, port, flags, ranges):
+        # ranges: the /chosen/m5w,memory bytes (packed little-endian {u64 base, u64 size} pairs) that
+        # the port's DART maps DVA == PA; returns usb.h USB_HOST_INFO_* (>= 0) or USB_HOST_E_* (< 0)
+        return self.request(self.P_HV_WIN_USB_PREP, port, flags, ranges, len(ranges) // 16,
+                            signed=True)
 
     def fb_init(self):
         return self.request(self.P_FB_INIT)

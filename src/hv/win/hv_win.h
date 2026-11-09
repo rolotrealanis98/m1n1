@@ -107,6 +107,16 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
 u64 hv_win_status(void);
 int hv_win_map_irq(u64 aic_line, u64 gsiv); /* VGIC3 model: route an AIC line to SPI <gsiv> */
 
+/*
+ * P_HV_WIN_USB_PREP (0xc1d): hand a Type-C port's xHCI to the guest (m5pro-windows
+ * docs/USB-HOST.md). <ranges> is the address of <count> {u64 base, u64 size} guest RAM ranges
+ * (the /chosen/m5w,memory bytes) that the port's DART maps DVA == PA, nothing else; <flags> are
+ * usb.h USB_HOST_F_*. Before P_HV_START only, never the proxy's port. Returns usb.h
+ * USB_HOST_INFO_* (>= 0) or USB_HOST_E_* (< 0). Independent of P_HV_WIN_CONFIGURE, so the EL2
+ * half can be tested on its own under the proxy.
+ */
+s64 hv_win_usb_prep(u64 port, u64 flags, u64 ranges, u64 count);
+
 static inline bool hv_win_enabled(void)
 {
     return hv_win.irq_model != HV_WIN_IRQ_NONE;

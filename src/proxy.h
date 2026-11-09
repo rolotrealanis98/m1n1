@@ -160,6 +160,7 @@ typedef enum {
     P_HV_WIN_PL011_STATS,
     P_HV_WIN_PMU_REWRITE, /* 0xc1b */
     P_HV_WIN_PMU_STATS,   /* 0xc1c */
+    P_HV_WIN_USB_PREP,    /* 0xc1d */
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,
