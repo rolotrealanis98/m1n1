@@ -8,8 +8,9 @@
 #   smoke_report.py RUN_DIR|hv.log
 #
 # Answers: OPEN-QUESTIONS Q4 (PSCI conduit), Q6 (counters), Q7 (WFI), Q8 (framebuffer), M0-RUNTIME-PLAN
-# open item 1 (Apple sysregs) and item 4 (entry registers), the M0 timer path, the PL011, the stage-2 plan
-# and EL2-RUNTIME item 6 (PMUv3 accesses: trapped to EL2 or UNDEF at EL1).
+# open item 1 (Apple sysregs) and item 4 (entry registers), the M0 timer path, the vuart (hv_vuart TX and
+# the host-to-guest RX self-test), the PL011, the stage-2 plan and EL2-RUNTIME item 6 (PMUv3 accesses:
+# trapped to EL2 or UNDEF at EL1).
 
 import datetime
 import pathlib
@@ -191,6 +192,28 @@ def main():
     _, fb = first(recs, "fb")
     if fb:
         say("fb", f"64x64 block drawn: {fb.get('drawn')} colour {fb.get('color')} (look for it at the top-left of the panel)")
+
+    _, vu = first(recs, "vuart")
+    if vu:
+        rx = vu.get("rx")
+        stale = num(vu.get("stale")) or 0
+        extra = f"; drained {stale} stale byte(s) first" if stale else ""
+        if rx is None:
+            say("vuart", f"TX banner sent at {vu.get('base')} (smoke build without the RX self-test)")
+        elif rx == "none":
+            say("vuart", f"TX banner sent; RX NOTHING within 2 s ({vu.get('polls')} UTRSTAT polls{extra}). Without "
+                         "--capture-vuart nobody sends the probe; with it (RUN.txt says 'vuart probe: sent'), host "
+                         "bytes do not reach UTRSTAT.RXD: check p.iodev_can_read(IODEV.USB_VUART) in the shell")
+        elif stale >= 64:
+            say("vuart", f"TX banner sent; the drain hit its 64-byte bound and RX read {rx} at once: UTRSTAT.RXD looks "
+                         "stuck at 1 (URXH returning whatever), so this proves nothing about host input")
+        else:
+            c = num(rx)
+            ch = repr(chr(c)) if c is not None and 0 <= c < 256 else "?"
+            what = "the launcher's probe" if c == ord("K") else "NOT the launcher's 'K' probe"
+            say("vuart", f"TX banner sent; RX {rx} ({ch}, {what}) after {vu.get('rx_us')} us and "
+                         f"{vu.get('polls')} UTRSTAT polls{extra}: hv_vuart's host-to-guest path (CDC OUT -> ring -> "
+                         "UTRSTAT.RXD -> URXH) works")
 
     _, pl = first(recs, "pl011")
     if pl:

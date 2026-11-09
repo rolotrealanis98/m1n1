@@ -9,6 +9,8 @@
  * Output: one line per fact on the m1n1 console through HVC #0x4d35 (M5W_DEBUG_PUTC), every line starting
  * with "M5W-SMOKE ", fields as key=value; tools/win_smoke/smoke_report.py turns a log into answers.
  * Banner lines also go to the Samsung vuart (x1) and the emulated PL011 (x2), i.e. the second CDC port.
+ * After its banner the vuart probe waits up to 2 s for one host byte on the same port (run_windows.py
+ * --capture-vuart sends 'K' 200 ms after it sees the banner): the host-to-guest half of hv_vuart.
  *
  * Runs with the MMU and caches off: every data access is Device-nGnRnE, so everything here is naturally
  * aligned (built with -mstrict-align) and nothing uses exclusives or FP/SIMD.
@@ -21,7 +23,7 @@ typedef unsigned char u8;
 
 #define BIT(n) (1UL << (n))
 
-#define M5W_SMOKE_VERSION 2
+#define M5W_SMOKE_VERSION 3
 #define SMOKE_X3_MAGIC    0x4d355753UL
 
 #define PSCI_VERSION       0x84000000UL
@@ -694,6 +696,45 @@ static void uart_banner_samsung(u64 base, const char *s)
     }
 }
 
+/* Samsung UART receive side, as Mu's AppleUartSerialPortLib uses it: UTRSTAT.RXD, then URXH */
+#define VUART_UTRSTAT     0x10
+#define VUART_URXH        0x24
+#define VUART_RXD         BIT(0)
+#define VUART_DRAIN_MAX   64      /* stale input the probe discards before its banner */
+#define VUART_RX_WAIT_S   2       /* run_windows.py sends its probe byte 200 ms after the banner */
+#define VUART_RX_SPIN_CAP 4000000 /* bound when the counter does not move (each poll is an EL2 trap) */
+
+static u64 vuart_drain(u64 base)
+{
+    u64 n = 0;
+
+    while (n < VUART_DRAIN_MAX && (rd32(base + VUART_UTRSTAT) & VUART_RXD)) {
+        (void)rd32(base + VUART_URXH);
+        n++;
+    }
+    return n;
+}
+
+/* One byte within VUART_RX_WAIT_S, or -1. *ticks = counter ticks from the first poll to RXD (or giving up) */
+static int vuart_rx_wait(u64 base, u64 *ticks, u64 *polls)
+{
+    u64 t0 = vct(), limit = VUART_RX_WAIT_S * g_freq, n = 0;
+    int c = -1;
+
+    for (;;) {
+        n++;
+        if (rd32(base + VUART_UTRSTAT) & VUART_RXD) {
+            c = rd32(base + VUART_URXH) & 0xff;
+            break;
+        }
+        if ((g_counter_ok && g_freq) ? vct() - t0 >= limit : n >= VUART_RX_SPIN_CAP)
+            break;
+    }
+    *ticks = vct() - t0;
+    *polls = n;
+    return c;
+}
+
 static int uart_banner_pl011(u64 base, const char *s)
 {
     int sent = 0;
@@ -712,10 +753,19 @@ static void probe_uarts(void)
     u64 vuart = entry_regs[1], pl011 = entry_regs[2];
 
     if (vuart) {
+        u64 stale = vuart_drain(vuart), ticks, polls;
         uart_banner_samsung(vuart, "M5W-SMOKE vuart hello (Samsung UART via hv_vuart)\r\n");
+        int rx = vuart_rx_wait(vuart, &ticks, &polls);
         begin("vuart");
         kx("base", vuart);
         ks("tx", "sent");
+        kd("stale", stale);
+        if (rx < 0)
+            ks("rx", "none");
+        else
+            kx("rx", (u64)rx);
+        kd("rx_us", ticks_to_us(ticks));
+        kd("polls", polls);
         end();
     }
 
