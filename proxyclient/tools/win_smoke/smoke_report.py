@@ -256,8 +256,16 @@ def main():
             "NATIVE": "a real PMUv3 answered (the traps did not take effect)",
             "MIXED": "some registers trap, some do not: see the lines above",
         }.get(verdict, "unknown")
+        rewrite = "PMU rewrite: el2" in run_txt
+        if rewrite and verdict == "NATIVE":
+            meaning = ("the accesses ran as EL2 rewrote them at their page's first fetch (--pmu-rewrite el2): "
+                       "PMCCNTR_EL0 reads CNTVCT_EL0, the other registers zero, writes are NOPs")
         say("PMU", f"VERDICT {verdict}: {meaning} (trap {psum.get('trap')}, undef {psum.get('undef')}, ok {psum.get('ok')}, "
                    f"PMCCNTR monotonic {psum.get('pmccntr_monotonic')})")
+        stats = re.search(r"PMU rewrite \(EL2\): (.*)", run_txt)
+        if rewrite:
+            say("PMU", f"EL2 rewrite: {stats.group(1) if stats else 'no counters in RUN.txt (guest did not exit cleanly?)'}; "
+                       "smoke.bin holds 7 PMU words (mrs PMCCNTR x2, other mrs x4, msr x1)")
     elif pbeg:
         say("PMU", "probe started but no summary: an access wedged the guest (see hv.log)")
 
