@@ -10,11 +10,20 @@
 #   2. prune ANS/NVMe, SEP and the proxy USB from the guest ADT (contract s1) and leave their MMIO
 #      unmapped in stage 2 (regs read from the unmodified ADT, so nodes HV.setup_adt already removed
 #      are still covered); EL2 keeps every DART
-#   3. P_HV_WIN_CAPS handshake, P_HV_WIN_CONFIGURE, P_HV_WIN_PL011
+#   3. P_HV_WIN_CAPS handshake; the vCPU list (= /chosen/m5w,cpus) and the synthetic-window frames
+#      (GICD, GICR, PL011) are fixed before EL2 is configured; P_HV_WIN_CONFIGURE with that list as its
+#      sixth argument, P_HV_WIN_PL011, then one P_HV_WIN_MAP_IRQ per /chosen/m5w,irq-map pair (route gic)
 #   4. memory plan (below), stage-2 RAM = exactly /chosen/m5w,memory plus the framebuffer, load the
-#      image, write boot_args
-#   5. publish /chosen/m5w,* (m5w,epoch last, right before the ADT upload)
-#   6. HV.start(); report the exit reason (P_HV_WIN_STATUS)
+#      image, write boot_args; the synthetic-window frames must stay clear of every m5w,memory range
+#   5. publish /chosen/m5w,* (m5w,epoch last, right before the ADT upload: <u64 seconds><u64 CNTPCT_EL0
+#      at that instant>, the 16-byte form Mu's GetTime uses as its base)
+#   6. HV.start(); report the exit reason (P_HV_WIN_STATUS) and, with --capture-vuart, the last vuart lines
+#
+# Interrupt routes (CONTRACT s3/s9, MU-M1.md section 8):
+#   aic  M0 and m1-aic: the guest drives the real AIC itself (HCR_EL2.IMO = 0), one vCPU, no m5w,gic.
+#   gic  m1-gic and Windows: EL2 emulates GICv3 (HCR_EL2.IMO/FMO/TID3 set, ID_AA64PFR0_EL1.GIC = 1 in the
+#        guest's view), publishes m5w,gic and routes the m5w,irq-map AIC lines to SPIs. EL2 owns the AIC:
+#        it is left out of stage 2, Mu's m1-gic profile never touches it.
 #
 # Memory plan (CONTRACT s1/s8, M0-RUNTIME-PLAN open items 2 and 3). Holes inside iBoot's boot_args range:
 #   - iBoot's kernel-area data, m1n1 itself, the m1n1 heap and the proxy heap, plus the stock 32 MiB pad:
@@ -38,7 +47,8 @@
 # hv_asm.S (after `msr elr_el2, x4`: `mov x4, x0`), which is harmless for macOS/Linux guests.
 #
 # Modes:
-#   default / --m0   Mu FD (sha256 pinned to the canonical M0 FD unless --sha256/--no-verify), m5w,* props
+#   default / --m0   Mu FD, sha256 pinned to the known image of --mu-profile (m0 by default; m1-gic, m1-aic)
+#                    unless --sha256/--no-verify; m5w,* props. --m0 = profile m0 on the M0 invocation.
 #   --raw-guest      a raw EL1 test image (win_smoke/smoke.bin): entry offset 0, x0 = boot_args,
 #                    x1 = uart0 (vuart) base, x2 = PL011 base or 0, x3 = 0x4d355753 ("M5WS");
 #                    only the basic m5w,* props (memory, fd-base/size, cpus, counter-hz, epoch)
@@ -65,6 +75,7 @@ HV_WIN_F_PSCI_SMC = 1 << 0
 HV_WIN_F_RESERVE_CPU = 1 << 1
 HV_WIN_F_KEEP_STEAL = 1 << 2
 HV_WIN_CAP_VGIC3 = 1 << 2
+GIC_SPI_MIN, GIC_SPI_MAX = 32, 1019  # GICD_TYPER.ITLinesNumber 31 (hv_vgic3.c)
 HV_WIN_EXIT = {0: "none", 1: "SYSTEM_OFF", 2: "SYSTEM_RESET"}
 
 # Contract defaults (docs/CONTRACT.md s1)
@@ -74,9 +85,17 @@ GICD_DEFAULT = 0xF_0000_0000
 GICR_DEFAULT = 0xF_1000_0000
 PL011_DEFAULT = 0xF_2000_0000
 PL011_FRAME = 0x10000
+GICD_FRAME = 0x10000
+GICR_STRIDE = 0x20000               # RD_base + SGI_base per vCPU, GICR frame i = m5w,cpus[i]
 
-# Mu facts (docs/BUILD.md, CONTRACT.md s8)
-M0_FD_SHA256 = "9523469d8809ccceab7020db8140b92fffc183ac73d7bdd2ee42f987bd91074a"
+# Mu facts (docs/BUILD.md, CONTRACT.md s8). Known images by profile (BUILD.md table; all 0x1e00000 bytes,
+# build/mu-out/MacBookPro16M5/<mu-commit>/j716s-<profile>/artifacts/J716MACBOOKPRO16M5_EFI.fd) and the
+# interrupt route each one runs on.
+MU_IMAGES = {
+    "m0": ("aic", "5087fe0230096604bea3fa4a088def98eb5a7474daddeb8f6427a34d4e61eaf2"),
+    "m1-gic": ("gic", "0581fee566471dd7df3186eccf4bef0705d8c200eaee3c9e4fd6e62dda250d5d"),
+    "m1-aic": ("aic", "14958582f3b255a70bfd3357c9229dd29cad9f0340c8a7a7e35fd01e1b2236cb"),
+}
 MU_HANDOFF_BASE = 0x104_0000_0000   # T6050_BOOTARGS_PTR; the ADT goes to +0x4000 (T6050_ADT_PTR)
 MU_HANDOFF_SIZE = 0x404000
 MU_TOP_WORKSPACE = 128 << 20        # PcdSystemMemoryUefiRegionSize at the top of boot_args RAM
@@ -90,6 +109,15 @@ SMOKE_X3_MAGIC = 0x4d355753         # "M5WS"
 TAGOFFSET_EL2 = (3, 0, 11, 9, 0)    # Apple IMP-DEF, MTE tag storage base on T6050
 TAGOFFSET_ADDR = ((1 << 42) - 1) & ~((1 << 20) - 1)
 MPIDR_MASK = 0xff_ffff_ffff
+ID_AA64DFR0 = (3, 0, 0, 5, 0)
+ID_AA64MMFR0 = (3, 0, 0, 7, 0)
+MDCR_EL2 = (3, 4, 1, 1, 1)
+MDCR_TPMCR, MDCR_TPM = 1 << 5, 1 << 6
+HDFGRTR_EL2 = (3, 4, 3, 1, 4)       # FEAT_FGT only
+HDFGWTR_EL2 = (3, 4, 3, 1, 5)
+HCR_FMO = 1 << 3
+HCR_IMO = 1 << 4
+HCR_TID3 = 1 << 18
 HCR_TSC = 1 << 19
 
 
@@ -128,6 +156,67 @@ def subtract(universe, holes):
                 nxt.append((h1, e))
         out = nxt
     return sorted(out)
+
+
+def parse_irq_map(specs):
+    """--irq-map / --irq-map-file text -> [(aic_line, gsiv)]; pairs 'line:gsiv' separated by commas,
+    whitespace or newlines, '#' starts a comment. Each gsiv an SPI 32..1019; lines and gsivs unique."""
+    pairs = []
+    for spec in specs:
+        for raw in spec.splitlines():
+            for tok in raw.split("#", 1)[0].replace(",", " ").split():
+                line, sep, gsiv = tok.partition(":")
+                try:
+                    line, gsiv = int(line, 0), int(gsiv, 0)
+                except ValueError:
+                    raise ValueError(f"irq map entry {tok!r} is not aic_line:gsiv") from None
+                if not sep or line < 0 or line > 0xffffffff:
+                    raise ValueError(f"irq map entry {tok!r}: bad AIC line")
+                if not GIC_SPI_MIN <= gsiv <= GIC_SPI_MAX:
+                    raise ValueError(f"irq map entry {tok!r}: gsiv must be an SPI {GIC_SPI_MIN}..{GIC_SPI_MAX}")
+                pairs.append((line, gsiv))
+    for i, what in ((0, "AIC line"), (1, "gsiv")):
+        seen = set()
+        for pr in pairs:
+            if pr[i] in seen:
+                raise ValueError(f"irq map: {what} {pr[i]} appears twice")
+            seen.add(pr[i])
+    return pairs
+
+
+def check_frames(window, frames, ram=()):
+    """EL2-only frames [(name, base, size)] must lie inside the synthetic window [w0, w1), be 64 KiB
+    aligned, overlap neither each other nor any guest RAM range [(start, end)]. Raises PlanError."""
+    w0, w1 = window
+    for name, base, size in frames:
+        if base % 0x10000 or size <= 0:
+            raise PlanError(f"{name} {base:#x}+{size:#x} is not a 64 KiB aligned frame")
+        if not (w0 <= base and base + size <= w1):
+            raise PlanError(f"{name} {base:#x}..{base + size:#x} is outside the synthetic window {w0:#x}..{w1:#x}")
+        for s, e in ram:
+            if overlaps(base, base + size, s, e):
+                raise PlanError(f"{name} {base:#x}..{base + size:#x} overlaps m5w,memory {s:#x}..{e:#x}")
+    for i, (n0, b0, s0) in enumerate(frames):
+        for n1, b1, s1 in frames[i + 1:]:
+            if overlaps(b0, b0 + s0, b1, b1 + s1):
+                raise PlanError(f"{n0} {b0:#x}..{b0 + s0:#x} overlaps {n1} {b1:#x}..{b1 + s1:#x}")
+
+
+def window_frames(args):
+    frames = []
+    if args.route == "gic":
+        frames += [("GICD", args.gicd, GICD_FRAME), ("GICR", args.gicr, args.cpus * GICR_STRIDE)]
+    if args.pl011:
+        frames.append(("PL011", args.pl011, PL011_FRAME))
+    return frames
+
+
+def epoch_with_counter(t0, t1, counter, cntfrq):
+    """m5w,epoch 16-byte form: whole seconds and the counter value at that second, from a counter read
+    taken between the wall-clock samples t0 and t1 (taken as their midpoint)."""
+    t = (t0 + t1) / 2
+    seconds = int(t)
+    return seconds, max(0, counter - round((t - seconds) * cntfrq))
 
 
 def parse_carveouts(adt):
@@ -318,13 +407,16 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Boot a Mu UEFI FD (or a raw EL1 image) under the Windows EL2 runtime")
     parser.add_argument("image", type=pathlib.Path, help="raw Mu FD, or the raw guest with --raw-guest")
     parser.add_argument("--m0", action="store_true",
-                        help="the M0-RUNTIME-PLAN invocation: --route aic -C 1 -E 0x0 -l m0.log, pinned FD hash")
+                        help="the M0-RUNTIME-PLAN invocation: --mu-profile m0 --route aic -C 1 -E 0x0 -l m0.log, pinned FD hash")
     parser.add_argument("--raw-guest", action="store_true", help="raw EL1 test image (win_smoke/smoke.bin)")
-    parser.add_argument("--sha256", help=f"expected sha256 of the image (Mu default: canonical M0 FD {M0_FD_SHA256[:16]}...)")
+    parser.add_argument("--mu-profile", choices=sorted(MU_IMAGES), default="m0",
+                        help="which known Mu image to expect (pins its sha256, picks the default route; default m0)")
+    parser.add_argument("--sha256", help="expected sha256 of the image instead of the --mu-profile image's")
     parser.add_argument("--no-verify", action="store_true", help="skip the hash check (development only)")
     parser.add_argument("-E", "--entry-offset", type=hexint, default=None, help="entry = image base + this (default 0)")
     parser.add_argument("--route", choices=("aic", "gic"), default=None,
-                        help="interrupt route: aic = native AIC passthrough (M0, single CPU, default); gic = emulated GICv3")
+                        help="interrupt route: aic = native AIC passthrough (single CPU; m0, m1-aic); gic = emulated "
+                             "GICv3 (m1-gic). Default: the --mu-profile's route")
     parser.add_argument("-C", "--cpus", type=int, default=None, help="guest vCPU count (default 1)")
     parser.add_argument("--counter-hz", type=int, default=None, help="counter frequency to advertise (default CNTFRQ_EL0)")
     parser.add_argument("--psci-smc", action="store_true", help="also accept PSCI over SMC (sets HCR_EL2.TSC)")
@@ -334,7 +426,13 @@ def parse_args():
     parser.add_argument("--gicd", type=hexint, default=GICD_DEFAULT)
     parser.add_argument("--gicr", type=hexint, default=GICR_DEFAULT)
     parser.add_argument("--pl011", type=hexint, default=PL011_DEFAULT, help="emulated PL011 base (0 = none)")
-    parser.add_argument("--pl011-gsiv", type=hexint, default=None, help="PL011 interrupt GSIV (published as m5w,pl011-gsiv)")
+    parser.add_argument("--pl011-gsiv", type=hexint, default=None,
+                        help="PL011 interrupt SPI (route gic; published as m5w,pl011-gsiv; default: polled, no interrupt)")
+    parser.add_argument("--irq-map", action="append", default=[], metavar="AIC_LINE:GSIV[,...]",
+                        help="route gic: AIC line (die * max_irq + num) -> SPI 32..1019, published as m5w,irq-map and "
+                             "loaded with P_HV_WIN_MAP_IRQ (repeatable; default empty: no device interrupts, M1a)")
+    parser.add_argument("--irq-map-file", type=pathlib.Path, default=None,
+                        help="the same pairs from a file (one or more per line, '#' comments)")
     parser.add_argument("--ramdisk", type=pathlib.Path, help="optional appended WinPE RAM disk")
     parser.add_argument("--ramdisk-offset", type=hexint, default=None,
                         help="RAM-disk offset from the FD base (default: the FD header's image_size, PcdFdSize)")
@@ -352,23 +450,51 @@ def parse_args():
     args = parser.parse_args()
 
     if args.m0:
-        if args.raw_guest or args.psci_smc or args.ramdisk or args.reserve_cpu \
-                or args.route not in (None, "aic") or args.cpus not in (None, 1) or args.entry_offset not in (None, 0):
-            parser.error("--m0 is the fixed M0-RUNTIME-PLAN invocation (aic route, 1 CPU, entry 0, no SMC, no RAM disk)")
+        if args.raw_guest or args.psci_smc or args.ramdisk or args.reserve_cpu or args.mu_profile != "m0" \
+                or args.route not in (None, "aic") or args.cpus not in (None, 1) or args.entry_offset not in (None, 0) \
+                or args.irq_map or args.irq_map_file:
+            parser.error("--m0 is the fixed M0-RUNTIME-PLAN invocation (profile m0, aic route, 1 CPU, entry 0, "
+                         "no SMC, no RAM disk, no IRQ map)")
         if args.logfile is None:
             args.logfile = pathlib.Path("m0.log")
-    args.route = args.route or "aic"
+    profile_route = MU_IMAGES[args.mu_profile][0]
+    args.route = args.route or ("aic" if args.raw_guest else profile_route)
+    if not args.raw_guest and args.route != profile_route:
+        parser.error(f"Mu profile {args.mu_profile} runs on the {profile_route} route, not {args.route}"
+                     + (" (m1-gic needs m5w,gic and ID_AA64PFR0_EL1.GIC = 1)" if profile_route == "gic" else
+                        " (it drives the AIC itself, which the gic route keeps out of stage 2)"))
     args.cpus = args.cpus if args.cpus is not None else 1
     args.entry_offset = args.entry_offset or 0
     if args.route == "aic" and args.cpus != 1:
-        parser.error("the aic route is single-CPU at M0")
+        parser.error("the aic route is single-CPU")
     if args.raw_guest and (args.ramdisk or args.entry_offset):
         parser.error("--raw-guest takes no RAM disk and enters at offset 0")
     if args.label is None:
-        args.label = "m0" if args.m0 else ("smoke" if args.raw_guest else "mu")
-    if args.pl011 and (args.pl011 % PL011_FRAME or not (args.synthetic_window <= args.pl011 and
-                       args.pl011 + PL011_FRAME <= args.synthetic_window + args.synthetic_size)):
-        parser.error("--pl011 must be a 64 KiB aligned frame inside the synthetic window")
+        args.label = "m0" if args.m0 else ("smoke" if args.raw_guest else args.mu_profile)
+
+    specs = list(args.irq_map)
+    if args.irq_map_file:
+        specs.append(args.irq_map_file.read_text())
+    try:
+        args.irq_pairs = parse_irq_map(specs)
+    except ValueError as e:
+        parser.error(str(e))
+    if args.irq_pairs and args.route != "gic":
+        parser.error("--irq-map needs --route gic (in the aic route the guest owns the AIC)")
+    if args.pl011_gsiv is not None:
+        if args.route != "gic":
+            parser.error("--pl011-gsiv needs --route gic (there is no GIC to deliver it otherwise)")
+        if not args.pl011:
+            parser.error("--pl011-gsiv without a PL011 (--pl011 0)")
+        if not GIC_SPI_MIN <= args.pl011_gsiv <= GIC_SPI_MAX:
+            parser.error(f"--pl011-gsiv must be an SPI {GIC_SPI_MIN}..{GIC_SPI_MAX}")
+        if any(g == args.pl011_gsiv for _, g in args.irq_pairs):
+            parser.error(f"--pl011-gsiv {args.pl011_gsiv} is also in the IRQ map (Mu refuses the clash)")
+
+    try:
+        check_frames((args.synthetic_window, args.synthetic_window + args.synthetic_size), window_frames(args))
+    except PlanError as e:
+        parser.error(f"synthetic window: {e}")
     return parser, args
 
 
@@ -399,9 +525,14 @@ def main():
     record(f"image {args.image.resolve()} size {len(image):#x} sha256 {digest}")
     with open(run_dir / "SHA256SUMS", "a") as f:
         f.write(f"{digest}  {args.image.resolve()}\n")
-    want = args.sha256.lower() if args.sha256 else (None if args.raw_guest else M0_FD_SHA256)
+    want = args.sha256.lower() if args.sha256 else (None if args.raw_guest else MU_IMAGES[args.mu_profile][1])
+    if not args.raw_guest:
+        known = [k for k, (_, h) in MU_IMAGES.items() if h == digest]
+        record(f"Mu profile {args.mu_profile} (route {args.route}); image is "
+               f"{'the known ' + known[0] + ' image' if known else 'not a known profile image'}")
     if not args.no_verify and want and digest != want:
-        record(f"REFUSED: image hash mismatch, expected {want}")
+        record(f"REFUSED: image hash mismatch, expected {want}"
+               + (f" (this is the {known[0]} image: --mu-profile {known[0]})" if not args.raw_guest and known else ""))
         raise SystemExit(2)
     if not args.no_verify and not want:
         record("image hash not pinned (raw guest): recorded only")
@@ -435,7 +566,7 @@ def main():
     from m1n1.proxyutils import ProxyUtils, bootstrap_port
     from m1n1.utils import irange
     from m1n1.shell import run_shell
-    from m1n1.sysreg import CNTFRQ_EL0, HCR_EL2
+    from m1n1.sysreg import CNTFRQ_EL0, CNTPCT_EL0, HCR_EL2
     from m1n1.hv import HV
     from m1n1.hv.types import TraceMode
     from m1n1.adt import load_adt
@@ -470,8 +601,11 @@ def main():
     if args.boot_args:
         hv.set_bootargs(" ".join(args.boot_args))
 
-    counter_hz = args.counter_hz if args.counter_hz is not None else u.mrs(CNTFRQ_EL0)
-    record(f"counter {counter_hz} Hz")
+    cntfrq = u.mrs(CNTFRQ_EL0)
+    counter_hz = args.counter_hz if args.counter_hz is not None else cntfrq
+    record(f"counter {counter_hz} Hz" + ("" if counter_hz == cntfrq else f" (CNTFRQ_EL0 reads {cntfrq})"))
+    if counter_hz != cntfrq and not args.raw_guest and args.mu_profile != "m0":
+        raise SystemExit(f"m5w,counter-hz {counter_hz} must equal CNTFRQ_EL0 {cntfrq} for {args.mu_profile} (MU-M1.md 8.7)")
 
     # --- 2. prune the internal SSD, SEP and the proxy USB (contract s1; M0-RAMBOOT s5) ---------------------
     usb_idx = hv.iodev - IODEV.USB0
@@ -508,6 +642,15 @@ def main():
     for base, size, path in pruned_mmio:
         hv.add_tracer(irange(base, size), "WIN-PRUNED", TraceMode.RESERVED)
         print(f"  unmapped {base:#x}..{base + size:#x} ({path})")
+    if args.route == "gic":
+        # EL2 acknowledges and masks AIC events itself (hv_win_handle_irq); a guest access would steal them.
+        # Mu's m1-gic never maps the AIC (MU-M1.md 8.13), so it stays out of stage 2 (a touch = EL2 fault).
+        aic = orig_adt["/arm-io/aic"]
+        for idx in range(len(aic.reg)):
+            base, size = aic.get_reg(idx)
+            if size:
+                hv.add_tracer(irange(base, size), "WIN-AIC-EL2", TraceMode.RESERVED)
+                record(f"route gic: AIC {base:#x}..{base + size:#x} owned by EL2, not mapped for the guest")
 
     # synthetic window: must not collide with MMIO or DRAM
     sw0, sw1 = args.synthetic_window, args.synthetic_window + args.synthetic_size
@@ -529,17 +672,63 @@ def main():
     if args.route == "gic" and not (feats & HV_WIN_CAP_VGIC3):
         raise SystemExit("GICv3 emulation (route gic) is not built/ready in this firmware; use --route aic")
 
+    # CPUs the guest may bring up (contract s2/s9), fixed before CONFIGURE because EL2 builds its vCPU table
+    # (vCPU i = GICR frame i = ACPI UID i) from the same list: real MPIDRs in ADT order, boot CPU first,
+    # without the CPU kept for the host (EL2's rule: the highest-numbered present CPU).
+    cpus = []
+    for node in hv.adt["cpus"]:
+        v = p.hv_win_cpu_mpidr(node.cpu_id)
+        if not v:
+            continue
+        cpus.append((node.cpu_id, node.name, v & MPIDR_MASK, bool(v >> 63)))
+    if not cpus or not any(c[3] for c in cpus):
+        raise SystemExit("P_HV_WIN_CPU_MPIDR reported no boot CPU")
+    host_cpu = max(c[0] for c in cpus) if args.reserve_cpu else None
+    if host_cpu is not None and any(c[3] and c[0] == host_cpu for c in cpus):
+        raise SystemExit("--reserve-cpu: the highest-numbered CPU is the boot CPU")
+    cpus.sort(key=lambda c: not c[3])
+    usable = [c for c in cpus if c[0] != host_cpu]
+    for cid, name, mpidr, boot in cpus:
+        print(f"  {name}: cpu-id {cid} MPIDR {mpidr:#x}{' boot' if boot else ''}"
+              f"{' reserved-for-host' if cid == host_cpu else ''}")
+    if len(usable) < args.cpus:
+        raise SystemExit(f"only {len(usable)} usable CPUs for {args.cpus} vCPUs")
+    vcpus = usable[:args.cpus]
+    cpus_prop = b"".join(struct.pack("<Q", c[2]) for c in vcpus)
+
     irq_model = HV_WIN_IRQ_VGIC3 if args.route == "gic" else HV_WIN_IRQ_AIC_PASSTHROUGH
     gicd = args.gicd if args.route == "gic" else 0
     gicr = args.gicr if args.route == "gic" else 0
     flags = (HV_WIN_F_PSCI_SMC if args.psci_smc else 0) | (HV_WIN_F_RESERVE_CPU if args.reserve_cpu else 0)
-    rc = p.hv_win_configure(irq_model, gicd, gicr, args.cpus, flags)
+    rc = p.hv_win_configure(irq_model, gicd, gicr, args.cpus, flags, cpus_prop)
     if rc != 0:
-        raise SystemExit(f"P_HV_WIN_CONFIGURE failed ({rc:#x})")
+        raise SystemExit(f"P_HV_WIN_CONFIGURE failed ({rc}): see the m1n1 console for the reason")
     hcr = u.mrs(HCR_EL2)
     tsc = bool(hcr & HCR_TSC)
     record(f"EL2 configured: route {args.route}, {args.cpus} vCPU(s), flags {flags:#x}, HCR_EL2 {hcr:#x} "
            f"(TSC {'set' if tsc else 'clear'}{' - WRITE IGNORED, SMC will not trap' if args.psci_smc and not tsc else ''})")
+    if args.route == "gic":
+        need = HCR_IMO | HCR_FMO | HCR_TID3
+        if (hcr & need) != need:
+            raise SystemExit(f"route gic: HCR_EL2 {hcr:#x} lacks IMO/FMO/TID3 (needed for the GIC model and the "
+                             "ID_AA64PFR0_EL1.GIC = 1 view Mu checks)")
+        for name, base, size in window_frames(args)[:2]:
+            hv.add_tracer(irange(base, size), f"WIN-{name}", TraceMode.RESERVED)
+        record(f"vGIC: GICD {args.gicd:#x}, GICR {args.gicr:#x}..{args.gicr + args.cpus * GICR_STRIDE:#x} "
+               f"({args.cpus} frame(s)); HCR_EL2.TID3 set: the guest reads ID_AA64PFR0_EL1.GIC = 1")
+    # EL2-RUNTIME item 6: Windows touches PMUv3 registers without checking ID_AA64DFR0_EL1.PMUVer; EL2 sets
+    # MDCR_EL2.TPM|TPMCR (+ the FGT PMU bits) in both routes. Whether the bits stick is recorded here, whether
+    # an EL1 access then traps or UNDEFs is the smoke guest's pmu probe.
+    dfr0, mmfr0, mdcr = u.mrs(ID_AA64DFR0), u.mrs(ID_AA64MMFR0), u.mrs(MDCR_EL2)
+    fgt = (mmfr0 >> 56) & 0xf
+    fgt_regs = f", HDFGRTR_EL2 {u.mrs(HDFGRTR_EL2):#x} HDFGWTR_EL2 {u.mrs(HDFGWTR_EL2):#x}" if fgt else ""
+    record(f"PMU at EL2: ID_AA64DFR0_EL1 {dfr0:#x} (PMUVer {(dfr0 >> 8) & 0xf:#x}), FGT {fgt}, MDCR_EL2 {mdcr:#x} "
+           f"(TPM {'set' if mdcr & MDCR_TPM else 'NOT SET'}, TPMCR {'set' if mdcr & MDCR_TPMCR else 'NOT SET'})"
+           f"{fgt_regs}; HCR_EL2.TID3 {'set: the guest reads PMUVer 0' if hcr & HCR_TID3 else 'CLEAR'}")
+    if host_cpu is not None:
+        el2_host = [c[0] for c in cpus if (p.hv_win_cpu_mpidr(c[0]) >> 62) & 1]
+        if el2_host != [host_cpu]:
+            raise SystemExit(f"EL2 reserved CPU(s) {el2_host} for the host, the launcher assumed {host_cpu}")
 
     if args.pl011:
         rc = p.hv_win_pl011(args.pl011, args.pl011_gsiv or 0)
@@ -547,6 +736,14 @@ def main():
             raise SystemExit(f"P_HV_WIN_PL011 failed ({rc})")
         hv.add_tracer(irange(args.pl011, PL011_FRAME), "WIN-PL011", TraceMode.RESERVED)
         record(f"PL011 emulated at {args.pl011:#x}, GSIV {args.pl011_gsiv or 0}")
+
+    # m5w,irq-map: one P_HV_WIN_MAP_IRQ per pair, after CONFIGURE and before start (CONTRACT s9)
+    for line, gsiv in args.irq_pairs:
+        rc = p.hv_win_map_irq(line, gsiv)
+        if rc != 0:
+            raise SystemExit(f"P_HV_WIN_MAP_IRQ({line}, {gsiv}) refused ({rc}): no such AIC line, or a duplicate")
+    if args.route == "gic":
+        record(f"m5w,irq-map: {', '.join(f'{l}->{g}' for l, g in args.irq_pairs) or 'empty (no device interrupts)'}")
 
     # --- 4. memory plan, stage 2, load -------------------------------------------------------------------
     # re-read boot_args: anything m1n1 took with top_of_memory_alloc() during hv_init shrank mem_size
@@ -565,7 +762,13 @@ def main():
                            payload_size=payload_size, devtree_size=ba.devtree_size, mu=not args.raw_guest)
     except PlanError as e:
         raise SystemExit(f"memory plan refused: {e}")
+    try:
+        check_frames((sw0, sw1), window_frames(args), plan["ranges"])
+    except PlanError as e:
+        raise SystemExit(f"memory plan refused: {e}")
     text = format_plan(plan)
+    for name, base, size in window_frames(args):
+        text += f"\n{name} frame {base:#x}..{base + size:#x} (synthetic window, EL2 hook)"
     print(text)
     (run_dir / "memory-plan.txt").write_text(text + "\n")
 
@@ -610,22 +813,11 @@ def main():
                 put("m5w,pl011-gsiv", struct.pack("<I", args.pl011_gsiv))
         if args.route == "gic":
             put("m5w,gic", struct.pack("<QQ", args.gicd, args.gicr))
+            put("m5w,irq-map", b"".join(struct.pack("<II", l, g) for l, g in args.irq_pairs))
 
-    # CPUs the guest may bring up (contract s2): real MPIDRs in ADT order, boot CPU first, minus the host CPU
-    cpus = []
-    for node in hv.adt["cpus"]:
-        v = p.hv_win_cpu_mpidr(node.cpu_id)
-        if not v:
-            continue
-        cpus.append((node.cpu_id, node.name, v & MPIDR_MASK, bool(v >> 63), bool((v >> 62) & 1)))
-    cpus.sort(key=lambda c: not c[3])
-    usable = [c for c in cpus if not c[4]]
-    for cid, name, mpidr, boot, res in cpus:
-        print(f"  {name}: cpu-id {cid} MPIDR {mpidr:#x}{' boot' if boot else ''}{' reserved-for-host' if res else ''}")
-    if len(usable) < args.cpus:
-        raise SystemExit(f"only {len(usable)} usable CPUs for {args.cpus} vCPUs")
-    put("m5w,cpus", b"".join(struct.pack("<Q", c[2]) for c in usable[:args.cpus]))
-    record(f"m5w,cpus: {', '.join(hex(c[2]) for c in usable[:args.cpus])}")
+    # the same bytes EL2 got as P_HV_WIN_CONFIGURE's sixth argument
+    put("m5w,cpus", cpus_prop)
+    record(f"m5w,cpus: {', '.join(hex(c[2]) for c in vcpus)}")
 
     if args.raw_guest:
         vuart = orig_adt["/arm-io/uart0"].get_reg(0)[0]
@@ -637,8 +829,11 @@ def main():
     if args.shell:
         run_shell(hv.shell_locals, "Entering hypervisor shell. Type ^D to start the guest.")
 
-    epoch = int(time.time())
-    put("m5w,epoch", struct.pack("<Q", epoch))
+    t0 = time.time()
+    cntpct = u.mrs(CNTPCT_EL0)
+    t1 = time.time()
+    epoch, epoch_cnt = epoch_with_counter(t0, t1, cntpct, cntfrq)
+    put("m5w,epoch", struct.pack("<QQ", epoch, epoch_cnt))
     blob = hv.adt.build()
     if len(blob) > align_up(u.ba.devtree_size):
         raise SystemExit(f"guest ADT grew to {len(blob):#x} bytes, more than iBoot's {u.ba.devtree_size:#x}")
@@ -647,7 +842,8 @@ def main():
     adt_out = run_dir / "adt-guest.bin"
     adt_out.write_bytes(blob)
     os.chmod(adt_out, 0o600)
-    record(f"hand-off: m5w,epoch {epoch} ({datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat()}), "
+    record(f"hand-off: m5w,epoch {epoch} ({datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat()}) "
+           f"at CNTPCT {epoch_cnt:#x} (read {cntpct:#x}, wall-clock window {(t1 - t0) * 1e3:.1f} ms), "
            f"guest ADT {len(blob):#x} bytes")
 
     # --- 6. run -------------------------------------------------------------------------------------------
@@ -657,6 +853,15 @@ def main():
     stats = p.hv_win_pl011_stats() if args.pl011 else 0
     record(f"guest exit: {HV_WIN_EXIT.get(status >> 32, status >> 32)} ({status >> 32}), PSCI calls {status & 0xffffffff}, "
            f"PL011 tx {stats & 0xffffffff} rx {(stats >> 32) & 0xffff} dropped {stats >> 48}")
+    if args.capture_vuart:
+        time.sleep(1)  # let the capture thread drain the pipe
+        try:
+            tail = (run_dir / "vuart.log").read_bytes().decode("utf-8", "replace").replace("\r", "").splitlines()[-12:]
+        except OSError:
+            tail = []
+        print("last vuart lines:" if tail else "vuart.log is empty")
+        for line in tail:
+            print(f"  | {line}")
     stop_capture.set()
 
     if args.after == "shell":
