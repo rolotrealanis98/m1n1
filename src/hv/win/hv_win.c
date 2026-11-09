@@ -179,7 +179,7 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
     if (flags & HV_WIN_F_PSCI_SMC)
         hcr |= HCR_TSC;
     if (irq_model == HV_WIN_IRQ_VGIC3)
-        hcr |= HCR_IMO | HCR_FMO;
+        hcr |= HCR_IMO | HCR_FMO | HCR_TID3;
     hv_write_hcr(hcr);
     sysop("isb");
 
@@ -250,6 +250,51 @@ bool hv_win_handle_smc(struct exc_info *ctx)
     return true;
 }
 
+/*
+ * HCR_EL2.TID3 (VGIC3 model) traps reads of the ID register space (op0 3, op1 0, CRn 0, CRm 1..7).
+ * Everything reads as the hardware does, except ID_AA64PFR0_EL1.GIC: the T6050 reports 0 (no
+ * physical GIC CPU interface), while the guest does get the GICv3 system-register interface through
+ * ICH_HCR_EL2.En, so it reads 1, as KVM reports to its vgic-v3 guests.
+ */
+#define ID_AA64PFR0_GIC GENMASK(27, 24)
+
+#define ID_CASE(crm, op2)                                                                          \
+    case (crm) << 3 | (op2):                                                                       \
+        return mrs(sys_reg(3, 0, 0, crm, op2))
+#define ID_CASES(crm)                                                                              \
+    ID_CASE(crm, 0);                                                                               \
+    ID_CASE(crm, 1);                                                                               \
+    ID_CASE(crm, 2);                                                                               \
+    ID_CASE(crm, 3);                                                                               \
+    ID_CASE(crm, 4);                                                                               \
+    ID_CASE(crm, 5);                                                                               \
+    ID_CASE(crm, 6);                                                                               \
+    ID_CASE(crm, 7)
+
+static u64 hv_win_read_id_reg(u32 crm, u32 op2)
+{
+    switch (crm << 3 | op2) {
+        ID_CASES(1);
+        ID_CASES(2);
+        ID_CASES(3);
+        ID_CASES(4);
+        ID_CASES(5);
+        ID_CASES(6);
+        ID_CASES(7);
+        default:
+            return 0;
+    }
+}
+
+static u64 hv_win_guest_id_reg(u32 crm, u32 op2)
+{
+    u64 val = hv_win_read_id_reg(crm, op2);
+
+    if (crm == 4 && op2 == 0) /* ID_AA64PFR0_EL1 */
+        val = (val & ~ID_AA64PFR0_GIC) | FIELD_PREP(ID_AA64PFR0_GIC, 1);
+    return val;
+}
+
 bool hv_win_handle_msr(struct exc_info *ctx, u64 iss)
 {
     if (!hv_win_vgic_enabled())
@@ -260,6 +305,16 @@ bool hv_win_handle_msr(struct exc_info *ctx, u64 iss)
     u64 rt = FIELD_GET(ESR_ISS_MSR_Rt, iss);
     bool is_read = iss & ESR_ISS_MSR_DIR;
     u64 val = rt == 31 ? 0 : ctx->regs[rt];
+    u32 crm = FIELD_GET(ESR_ISS_MSR_CRm, iss);
+
+    if (FIELD_GET(ESR_ISS_MSR_OP0, iss) == 3 && !FIELD_GET(ESR_ISS_MSR_OP1, iss) &&
+        !FIELD_GET(ESR_ISS_MSR_CRn, iss) && crm >= 1 && crm <= 7) {
+        if (!is_read)
+            return false;
+        if (rt != 31)
+            ctx->regs[rt] = hv_win_guest_id_reg(crm, FIELD_GET(ESR_ISS_MSR_OP2, iss));
+        return true;
+    }
 
     switch (reg) {
         case SYSREG_ISS(SYS_ICC_SGI1R_EL1):
