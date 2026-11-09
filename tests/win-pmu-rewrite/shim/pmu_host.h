@@ -33,7 +33,6 @@ void dc_cvac_range(void *addr, size_t length);
 
 /* src/heapblock.h */
 size_t heapblock_remaining(void);
-void *heapblock_alloc_aligned(size_t size, size_t align);
 
 /* src/smp.h */
 extern int host_cpu;
@@ -65,12 +64,10 @@ enum hv_xt_state {
     HV_XT_SCANNING,
     HV_XT_CODE,
     HV_XT_PINNED,
-    HV_XT_CODE_XO,
 };
 int hv_xt_track(u64 ipa, u64 size, bool dry_run, u64 *new_tables);
 enum hv_xt_state hv_xt_get(u64 ipa, u64 *pa, u32 *flips);
 int hv_xt_set(u64 ipa, enum hv_xt_state state, u32 flips);
-int hv_xt_remap(u64 ipa, u64 pa, enum hv_xt_state state, u32 flips);
 void hv_xt_tlbi(bool broadcast);
 bool hv_xt_fault_ipa(struct exc_info *ctx, bool s1ptw, bool write, u64 *ipa);
 
