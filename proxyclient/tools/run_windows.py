@@ -20,6 +20,11 @@
 #   6. HV.start(); report the exit reason (P_HV_WIN_STATUS) and, with --capture-vuart, the last vuart lines
 #      (the capture also answers win_smoke's vuart RX self-test: 'K' 200 ms after the smoke's vuart banner)
 #
+# --pmu-rewrite el2 (default off; m5pro-windows docs/PMU-EL2-REWRITE.md): right before the guest starts,
+# after HV.start() has mapped stage 2, one P_HV_WIN_PMU_REWRITE per m5w,memory range makes guest RAM
+# non-executable in stage 2; EL2 then rewrites the PMUv3 accesses of each 16 KiB page at its first
+# instruction fetch. P_HV_WIN_PMU_STATS is read at guest exit (RUN.txt line, pmu-rewrite.txt).
+#
 # Interrupt routes (CONTRACT s3/s9, MU-M1.md section 8):
 #   aic  M0 and m1-aic: the guest drives the real AIC itself (HCR_EL2.IMO = 0), one vCPU, no m5w,gic.
 #   gic  m1-gic and Windows: EL2 emulates GICv3 (HCR_EL2.IMO/FMO/TID3 set, ID_AA64PFR0_EL1.GIC = 1 in the
@@ -76,6 +81,13 @@ HV_WIN_F_PSCI_SMC = 1 << 0
 HV_WIN_F_RESERVE_CPU = 1 << 1
 HV_WIN_F_KEEP_STEAL = 1 << 2
 HV_WIN_CAP_VGIC3 = 1 << 2
+HV_WIN_CAP_PMU_RW = 1 << 4
+HV_WIN_PMU_MAGIC = 0x504d5552          # "PMUR", P_HV_WIN_PMU_STATS(0) >> 32
+HV_WIN_PMU_STATS = ("id", "pages", "ranges", "tables", "scans", "pages_rewritten", "insns", "insns_pmccntr",
+                    "insns_mrs", "insns_msr", "write_flips", "walk_flips", "pins", "pin_full", "sweeps",
+                    "unpins", "spurious", "ipa_fail", "not_ours", "stuck")   # src/hv/win/hv_win.h order
+HV_WIN_PMU_LOG_SIZE = 256
+HV_WIN_PMU_STAT_LOG_IPA, HV_WIN_PMU_STAT_LOG_OP, HV_WIN_PMU_STAT_LOG_ELR = 0x100, 0x200, 0x300
 GIC_SPI_MIN, GIC_SPI_MAX = 32, 1019  # GICD_TYPER.ITLinesNumber 31 (hv_vgic3.c)
 HV_WIN_EXIT = {0: "none", 1: "SYSTEM_OFF", 2: "SYSTEM_RESET"}
 
@@ -466,6 +478,9 @@ def parse_args():
     parser.add_argument("--run-dir", type=pathlib.Path, default=None,
                         help="run directory for logs and hashes (default runs/<stamp>-<label> in the cwd)")
     parser.add_argument("--label", default=None, help="run label (default m0 / smoke / mu)")
+    parser.add_argument("--pmu-rewrite", choices=("off", "el2"), default="off",
+                        help="el2: EL2 rewrites PMUv3 accesses at the first instruction fetch of each guest RAM page "
+                             "(stage-2 XN; docs/PMU-EL2-REWRITE.md)")
     parser.add_argument("--capture-vuart", action="store_true",
                         help="record the second CDC port (vuart + PL011) to <run>/vuart.log and answer win_smoke's vuart "
                              "RX self-test with one 'K'; do not combine with a terminal on that port")
@@ -480,9 +495,9 @@ def parse_args():
     if args.m0:
         if args.raw_guest or args.psci_smc or args.ramdisk or args.reserve_cpu or args.mu_profile != "m0" \
                 or args.route not in (None, "aic") or args.cpus not in (None, 1) or args.entry_offset not in (None, 0) \
-                or args.irq_map or args.irq_map_file:
+                or args.irq_map or args.irq_map_file or args.pmu_rewrite != "off":
             parser.error("--m0 is the fixed M0-RUNTIME-PLAN invocation (profile m0, aic route, 1 CPU, entry 0, "
-                         "no SMC, no RAM disk, no IRQ map)")
+                         "no SMC, no RAM disk, no IRQ map, no PMU rewrite)")
         if args.logfile is None:
             args.logfile = pathlib.Path("m0.log")
     profile_route = MU_IMAGES[args.mu_profile][0]
@@ -524,6 +539,26 @@ def parse_args():
     except PlanError as e:
         parser.error(f"synthetic window: {e}")
     return parser, args
+
+
+def report_pmu_rewrite(p, run_dir, record):
+    """P_HV_WIN_PMU_STATS at guest exit: one RUN.txt line, the counters and the last rewrites in pmu-rewrite.txt."""
+    st = {name: p.hv_win_pmu_stats(i) for i, name in enumerate(HV_WIN_PMU_STATS)}
+    record(f"PMU rewrite (EL2): {st['pages']} pages tracked, {st['scans']} first-execute scans, "
+           f"{st['pages_rewritten']} pages rewritten, {st['insns']} words (PMCCNTR {st['insns_pmccntr']}, "
+           f"other mrs {st['insns_mrs']}, msr {st['insns_msr']}); flips write {st['write_flips']} walker "
+           f"{st['walk_flips']}; pinned {st['pins']} (list full {st['pin_full']}), sweeps {st['sweeps']}; "
+           f"spurious {st['spurious']}, AT failures {st['ipa_fail']}, not ours {st['not_ours']}, stuck {st['stuck']}")
+    lines = [f"{k} {v}" for k, v in st.items() if k != "id"]
+    first = max(0, st["insns"] - HV_WIN_PMU_LOG_SIZE)
+    lines.append(f"last {st['insns'] - first} rewrite(s): seq IPA old new fetch-PC")
+    for seq in range(first, st["insns"]):
+        slot = seq % HV_WIN_PMU_LOG_SIZE
+        ipa = p.hv_win_pmu_stats(HV_WIN_PMU_STAT_LOG_IPA + slot)
+        op = p.hv_win_pmu_stats(HV_WIN_PMU_STAT_LOG_OP + slot)
+        pc = p.hv_win_pmu_stats(HV_WIN_PMU_STAT_LOG_ELR + slot)
+        lines.append(f"{seq} {ipa:#x} {op >> 32:08x} {op & 0xffffffff:08x} {pc:#x}")
+    (run_dir / "pmu-rewrite.txt").write_text("\n".join(lines) + "\n")
 
 
 def main():
@@ -700,6 +735,8 @@ def main():
         raise SystemExit("this m1n1 build has no Windows EL2 runtime (wrong caps magic)")
     if args.route == "gic" and not (feats & HV_WIN_CAP_VGIC3):
         raise SystemExit("GICv3 emulation (route gic) is not built/ready in this firmware; use --route aic")
+    if args.pmu_rewrite == "el2" and not (feats & HV_WIN_CAP_PMU_RW):
+        raise SystemExit("--pmu-rewrite el2: this firmware has no stage-2 PMU rewrite (P_HV_WIN_CAPS bit 4)")
 
     # CPUs the guest may bring up (contract s2/s9), fixed before CONFIGURE because EL2 builds its vCPU table
     # (vCPU i = GICR frame i = ACPI UID i) from the same list: real MPIDRs in ADT order, boot CPU first,
@@ -855,6 +892,30 @@ def main():
         p.hv_start = lambda entry, x0, *rest: hv_start(entry, x0, *regs)
         record(f"raw guest registers: x0 boot_args, x1 vuart {regs[0]:#x}, x2 PL011 {regs[1]:#x}, x3 {regs[2]:#x}")
 
+    if args.pmu_rewrite == "el2":
+        # Stage 2 is only built inside HV.start() (pt_update), so arm EL2 between that and the guest's first
+        # instruction: wrap P_HV_START (after the raw-guest register wrapper, so this runs first).
+        start_next = p.hv_start
+        ram_ranges = list(plan["ranges"])
+
+        def start_with_pmu_rewrite(entry, x0, *rest):
+            pages = 0
+            for s, e in ram_ranges:
+                n = p.hv_win_pmu_rewrite(s, e - s)
+                if n < 0:
+                    raise SystemExit(f"P_HV_WIN_PMU_REWRITE({s:#x}, {e - s:#x}) refused ({n}): see the m1n1 console")
+                pages += n
+            pid = p.hv_win_pmu_stats(0)
+            if pid >> 32 != HV_WIN_PMU_MAGIC or not pid & 1:
+                raise SystemExit(f"PMU rewrite not armed after P_HV_WIN_PMU_REWRITE (id {pid:#x})")
+            tables = p.hv_win_pmu_stats(HV_WIN_PMU_STATS.index("tables"))
+            record(f"PMU rewrite (EL2) armed: {len(ram_ranges)} range(s), {pages} pages of 16 KiB execute-tracked, "
+                   f"{tables} L3 table(s) ({tables * 16} KiB of m1n1 heap)")
+            return start_next(entry, x0, *rest)
+
+        p.hv_start = start_with_pmu_rewrite
+        record("PMU rewrite: el2 (stage-2 first-execute rewrite, armed at guest start)")
+
     if args.shell:
         run_shell(hv.shell_locals, "Entering hypervisor shell. Type ^D to start the guest.")
 
@@ -882,6 +943,8 @@ def main():
     stats = p.hv_win_pl011_stats() if args.pl011 else 0
     record(f"guest exit: {HV_WIN_EXIT.get(status >> 32, status >> 32)} ({status >> 32}), PSCI calls {status & 0xffffffff}, "
            f"PL011 tx {stats & 0xffffffff} rx {(stats >> 32) & 0xffff} dropped {stats >> 48}")
+    if args.pmu_rewrite == "el2":
+        report_pmu_rewrite(p, run_dir, record)
     if args.capture_vuart:
         time.sleep(1)  # let the capture thread drain the pipe
         try:
