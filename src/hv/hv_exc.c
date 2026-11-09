@@ -226,25 +226,32 @@ void hv_update_fiq(void)
 {
     u64 hcr = mrs(HCR_EL2);
     bool fiq_pending = false;
+    bool ptimer = false, vtimer = false;
 
     if (hv_vm_tmr_fiq_locked) {
-        fiq_pending |= hv_tmr_gate(HV_TMR_P);
-        fiq_pending |= hv_tmr_gate(HV_TMR_V);
+        ptimer = hv_tmr_gate(HV_TMR_P);
+        vtimer = hv_tmr_gate(HV_TMR_V);
     } else {
         if (mrs(CNTP_CTL_EL02) == (CNTx_CTL_ISTATUS | CNTx_CTL_ENABLE)) {
-            fiq_pending = true;
+            ptimer = true;
             reg_clr(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_P);
         } else {
             reg_set(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_P);
         }
 
         if (mrs(CNTV_CTL_EL02) == (CNTx_CTL_ISTATUS | CNTx_CTL_ENABLE)) {
-            fiq_pending = true;
+            vtimer = true;
             reg_clr(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_V);
         } else {
             reg_set(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, VM_TMR_FIQ_ENA_ENA_V);
         }
     }
+
+    /* Windows GIC model: guest timers are level PPIs 30/27 in the list registers, not vFIQs */
+    if (hv_win_vgic_enabled())
+        hv_win_update_virq(ptimer, vtimer);
+    else
+        fiq_pending = ptimer || vtimer;
 
     fiq_pending |= PERCPU(ipi_pending) || PERCPU(pmc_pending);
     fiq_pending |= hv_sprr_timer_pending();
@@ -641,7 +648,9 @@ bool hv_exc_sync(struct exc_info *ctx)
             break;
         case ESR_EC_MSR:
             hv_wdt_breadcrumb('m');
-            handled = hv_handle_msr_unlocked(ctx, FIELD_GET(ESR_ISS, ctx->esr));
+            /* ICC_SGI1R_EL1 (Windows GIC model) takes the vGIC's own lock, not the big HV lock */
+            handled = hv_win_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr)) ||
+                      hv_handle_msr_unlocked(ctx, FIELD_GET(ESR_ISS, ctx->esr));
             break;
         case ESR_EC_IMPDEF:
             hv_wdt_breadcrumb('a');
@@ -685,8 +694,7 @@ bool hv_exc_sync(struct exc_info *ctx)
             break;
         case ESR_EC_MSR:
             hv_wdt_breadcrumb('M');
-            handled = hv_win_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr)) ||
-                      hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));
+            handled = hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));
             break;
         case ESR_EC_SMC:
             /* SMCCC/PSCI over SMC (only trapped when HV_WIN_F_PSCI_SMC set HCR_EL2.TSC) */
@@ -769,6 +777,7 @@ void hv_exc_fiq(struct exc_info *ctx)
 {
     bool tick = false;
 
+    hv_win_fiq_entry();
     hv_maybe_exit();
 
     if (mrs(CNTP_CTL_EL0) == (CNTx_CTL_ISTATUS | CNTx_CTL_ENABLE)) {
