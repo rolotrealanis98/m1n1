@@ -127,13 +127,13 @@ GICR_STRIDE = 0x20000               # RD_base + SGI_base per vCPU, GICR frame i 
 # interrupt route each one runs on.
 MU_IMAGES = {
     "m0": ("aic", "0385facf4b9d57c6ab07ac598f38165b8a7adc1fe3613fc222403af39dfacbf5"),
-    "m1-gic": ("gic", "2322e8152ecb3bf918a963bdb34a144c747bc62c2045a832cb4444cd4459b4f0"),
-    "m1-aic": ("aic", "a46428a340507ff672f7f4f79c73ab78c792bce06411935bf966afc7d06cd6c2"),
-    "m1a": ("gic", "e1d162b11ce07bf6b88908ea8c1a6cb0526e4cac2dd8d82d551c607f12a5d897"),
+    "m1-gic": ("gic", "d0b7eef8c36fdf60fb5b1e07b937a3564ca523a5a1daacdc8a00d05ba83dd369"),
+    "m1-aic": ("aic", "26e2363bd84c92ba2c3a4d7748eb03d421ee8e92dd07452e9dc628ea3c94cb80"),
+    "m1a": ("gic", "dc609b3aa0a7f6ac39f568a84ea5f965c6d8d93716236a1c1882a6bbdc66b3f3"),
     # USB host profiles (docs/USB-HOST.md; --usb-host), m5pro-windows 12a245f + the USB host driver,
     # J716S_PMU_FALLBACK=FALSE
-    "m1-gic-usb": ("gic", "fefa29702b69f186710865ba1a0be39d23bb4e4f192e541fd2c23c76c79fe0ea"),
-    "m1-aic-usb": ("aic", "cf16807d703d4e6075d900e6ab65b2b499fdcf341e64455e7f5891f6f22fd26c"),
+    "m1-gic-usb": ("gic", "6508cc46fbf8928da8a83db92c232ac6c6780174100dc71e97eeae16f59dd300"),
+    "m1-aic-usb": ("aic", "c80761b431f99049da78d6db7c6f7916a07bab6aaa3db0e226df993d2a1670b2"),
 }
 MU_NEEDS_RAMDISK = {"m1a"}
 USB_PROFILES = ("m1-gic-usb", "m1-aic-usb")
