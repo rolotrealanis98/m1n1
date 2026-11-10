@@ -17,3 +17,5 @@ __pycache__/
 *.pyc
 source/build/
 source/.buildshim/librust.a
+harness/build/
+*.dSYM/
