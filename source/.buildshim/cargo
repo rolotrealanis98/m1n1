@@ -1,0 +1,8 @@
+#!/bin/sh
+# Offline build shim (display patch changes no Rust): materialise the pinned librust.a
+# (sha256 4ed52ac9ef8456ba088671c64531479d71cc6705d82ec231cc406a7c96efc304) at the path the
+# Makefile's `cargo build --target-dir build` rule expects, instead of invoking cargo.
+set -eu
+dir=build/aarch64-unknown-none-softfloat/release
+mkdir -p "$dir"
+cp "$(dirname "$0")/librust.a" "$dir/librust.a"

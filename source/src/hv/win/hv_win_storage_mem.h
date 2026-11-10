@@ -1,0 +1,49 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef HV_WIN_STORAGE_MEM_H
+#define HV_WIN_STORAGE_MEM_H
+#include "types.h"
+
+#define HV_SM_MAX_RAM 64
+#define HV_SM_MAX_PROTECTED 128
+#define HV_SM_MAX_SPAN (128UL * 1024)
+#define HV_SM_PAGE 0x4000UL
+
+struct hv_sm_range { u64 base, size; };
+enum hv_sm_state { HV_SM_EMPTY, HV_SM_READY, HV_SM_LEASED, HV_SM_DEAD };
+/* Private resident-owned object; never guest writable. Input arrays are copied.
+ * The controller supplies authoritative final launcher ranges, not guest tables.
+ * protected MUST include immutable FD/media, ADT, bootargs, handoff, framebuffers,
+ * carveouts and synthetic/physical MMIO. resident bounds cover EL2 and all heaps,
+ * including future allocations. RAM must not intersect resident. Guest-owned
+ * Mu boot-services workspace is permitted, except exact protected subranges.
+ * This function validates a declaration; it cannot prove omitted ownership. */
+struct hv_sm_config {
+    u64 epoch;
+    struct hv_sm_range resident;
+    const struct hv_sm_range *ram, *protected;
+    size_t nr_ram, nr_protected;
+};
+struct hv_storage_mem {
+    enum hv_sm_state state;
+    u64 epoch;
+    int owner_cpu;
+    struct hv_sm_range resident;
+    size_t nr_ram, nr_protected;
+    struct hv_sm_range ram[HV_SM_MAX_RAM], protected[HV_SM_MAX_PROTECTED];
+};
+/* Zero-initialized object, one registration only, before guest start. No alloc. */
+bool hv_storage_mem_register(struct hv_storage_mem *m, const struct hv_sm_config *cfg);
+/* Whole synchronous dispatch under bhl, boot vCPU stopped and IRQ/FIQ masked.
+ * No callbacks may release bhl, service proxy requests, remap S2, run PMU scans,
+ * or resume the guest until end. Returned pointers expire at end. No async DMA.
+ * Controller must retire BEFORE guest reset/reconfigure or ownership/map change;
+ * epoch belongs to that immutable launch contract, not a page-table attestation. */
+bool hv_storage_mem_begin(struct hv_storage_mem *m, u64 epoch);
+bool hv_storage_mem_end(struct hv_storage_mem *m);
+void hv_storage_mem_retire(struct hv_storage_mem *m);
+/* Exact S0/S1 guest_span ABI. Reads and writes both require actual RW pages;
+ * execute-tracked pages additionally must be DIRTY (RW+XN). Never changes S2,
+ * PMU state or cache attributes. No guest VA translation. Identity IPA == PA
+ * prevents distinct admitted IPAs aliasing the same physical bytes. */
+void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write);
+#endif

@@ -1,0 +1,18 @@
+== tests/win-wfi
+vctx diff only over the LRs in use                               ok
+KVM rule: active or invalid never wakes; pending under VPMR does ok
+0 failed
+== tests/win-vgic3
+test_smp2e_wfi_pending                   ok
+test_smp2f_vctx_and_diag                 ok
+3063 checks, 0 failed
+== tests/win-psci
+test_cpu_on_start_timeout                ok
+test_single_vcpu_quiet                   ok
+81 checks, 0 failed
+== tests/win-pmu-rewrite
+win-pmu-rewrite: 862849 checks, 0 failed
+== tests/win-launcher-smp2/test_args.py
+0 failed
+== tests/win-launcher-smp2/test_hv_sysreg.py (m1n1 venv)
+secondary DBGBVR0 shadow write/read ok (0xfffff80012345678); boot CPU unaffected

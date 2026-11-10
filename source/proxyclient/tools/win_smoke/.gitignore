@@ -1,0 +1,4 @@
+*.o
+smoke.elf
+smoke.bin
+smoke.bin.sha256
