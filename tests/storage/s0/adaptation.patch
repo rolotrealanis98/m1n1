@@ -1,0 +1,388 @@
+--- a/src/hv_nvme_queue.c
++++ b/src/hv_nvme_queue.c
+@@ -1,11 +1,6 @@
+ /* SPDX-License-Identifier: MIT */
+ 
+ #include "hv_nvme_queue.h"
+-#ifndef VNVME_HOST_TEST
+-#include "hv.h"
+-#else
+-u64 hv_ipa_to_pa(u64 ipa);
+-#endif
+ #include "string.h"
+ 
+ #define NVME_FID_ARBITRATION       0x01
+@@ -17,6 +12,36 @@
+ #define NVME_FID_IRQ_VECTOR_CONFIG 0x09
+ #define NVME_FID_ASYNC_EVENT       0x0b
+ 
++/* S0 adaptation: all guest accesses require a full permission-checked span. */
++static void *guest_span(struct vnvme_ctrl *ctrl, u64 addr, size_t length, bool write)
++{
++    if (!addr || !length || length > UINT64_MAX - addr || !ctrl->ops->guest_span)
++        return NULL;
++    return ctrl->ops->guest_span(ctrl->opaque, addr, length, write);
++}
++
++/* S0 requires disjoint guest-IPA intervals. A live mapper must additionally
++ * prevent distinct IPAs aliasing the same backing bytes and pin permissions. */
++static bool overlaps(u64 a, size_t an, u64 b, size_t bn)
++{
++    if (!an || !bn || an > UINT64_MAX - a || bn > UINT64_MAX - b)
++        return true; /* invalid spans fail closed */
++    return a <= b ? b - a < an : a - b < bn;
++}
++
++static bool overlaps_queue(struct vnvme_ctrl *ctrl, u64 addr, size_t length)
++{
++    for (size_t i = 0; i < VNVME_MAX_QUEUES; i++) {
++        const struct vnvme_queue *q = &ctrl->queues[i];
++        if ((q->sq_valid && overlaps(addr, length, q->sq_addr,
++                                     (size_t)q->sq_size * sizeof(struct vnvme_command))) ||
++            (q->cq_valid && overlaps(addr, length, q->cq_addr,
++                                     (size_t)q->cq_size * sizeof(struct vnvme_completion))))
++            return true;
++    }
++    return false;
++}
++
+ static void put_le16(u8 *p, u16 value)
+ {
+     p[0] = value;
+@@ -134,7 +159,11 @@
+ {
+     if (!sq_addr || !cq_addr || (sq_addr & (VNVME_PAGE_SIZE - 1)) ||
+         (cq_addr & (VNVME_PAGE_SIZE - 1)) || !sq_size || !cq_size || sq_size > VNVME_MAX_QSIZE ||
+-        cq_size > VNVME_MAX_QSIZE)
++        cq_size > VNVME_MAX_QSIZE ||
++        overlaps(sq_addr, (size_t)sq_size * sizeof(struct vnvme_command),
++                 cq_addr, (size_t)cq_size * sizeof(struct vnvme_completion)) ||
++        !guest_span(ctrl, sq_addr, (size_t)sq_size * sizeof(struct vnvme_command), false) ||
++        !guest_span(ctrl, cq_addr, (size_t)cq_size * sizeof(struct vnvme_completion), true))
+         return false;
+ 
+     memset(ctrl->queues, 0, sizeof(ctrl->queues));
+@@ -147,69 +176,79 @@
+     q->sq_valid = true;
+     q->cq_valid = true;
+     q->irq_enabled = true;
+-    ctrl->irq_asserted = false;
++    /* Preserve the prior external line until the reset queues deassert it. */
++    update_irq(ctrl);
+     return true;
+ }
+ 
+-static u8 *prp_pointer(const struct vnvme_command *cmd, size_t total, size_t offset,
+-                       size_t *available)
+-{
+-    if (!cmd->prp1 || offset >= total)
+-        return NULL;
+-
++/* Snapshot every PRP and validate every output span before the first copy.
++ * Max 128 KiB plus an unaligned first page = 33 segments. No chained lists.
++ * Reject output overlap with any active queue, another output, or the exact
++ * consumed list bytes. Metadata is snapshotted before output validation/copy.
++ * The error completion itself is still posted normally after payload rejection.
++ * This host-only experiment assumes mappings remain stable during a command. */
++struct prp_plan {
++    u8 *ptr[VNVME_MAX_BLOCKS + 1];
++    u64 addr[VNVME_MAX_BLOCKS + 1];
++    size_t len[VNVME_MAX_BLOCKS + 1];
++    size_t count;
++};
++static bool plan_prps(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
++                      size_t total, struct prp_plan *plan)
++{
++    memset(plan, 0, sizeof(*plan));
++    if (!total || total > sizeof(ctrl->bounce) || !cmd->prp1)
++        return false;
+     size_t first = VNVME_PAGE_SIZE - (cmd->prp1 & (VNVME_PAGE_SIZE - 1));
+-    if (first > total)
+-        first = total;
+-    if (offset < first) {
+-        *available = first - offset;
+-        return (u8 *)(uintptr_t)hv_ipa_to_pa(cmd->prp1 + offset);
+-    }
+-
+-    offset -= first;
+-    size_t remaining = total - first;
+-    if (!cmd->prp2)
+-        return NULL;
+-    if (remaining <= VNVME_PAGE_SIZE) {
+-        if (cmd->prp2 & (VNVME_PAGE_SIZE - 1))
+-            return NULL;
+-        *available = remaining - offset;
+-        return (u8 *)(uintptr_t)hv_ipa_to_pa(cmd->prp2 + offset);
+-    }
+-
+-    if (cmd->prp2 & (VNVME_PAGE_SIZE - 1))
+-        return NULL;
+-    u64 *list = (u64 *)(uintptr_t)hv_ipa_to_pa(cmd->prp2);
+-    if (!list)
+-        return NULL;
+-    size_t page = offset / VNVME_PAGE_SIZE;
+-    size_t in_page = offset & (VNVME_PAGE_SIZE - 1);
+-    if (page >= VNVME_PAGE_SIZE / sizeof(*list) || !list[page] ||
+-        (list[page] & (VNVME_PAGE_SIZE - 1)))
+-        return NULL;
+-    *available = VNVME_PAGE_SIZE - in_page;
+-    if (*available > total - first - offset)
+-        *available = total - first - offset;
+-    return (u8 *)(uintptr_t)hv_ipa_to_pa(list[page] + in_page);
+-}
+-
+-static bool prp_copy(const struct vnvme_command *cmd, size_t total, size_t offset, void *buffer,
+-                     size_t length, bool to_guest)
+-{
+-    u8 *local = buffer;
+-    while (length) {
+-        size_t available;
+-        u8 *guest = prp_pointer(cmd, total, offset, &available);
+-        if (!guest)
+-            return false;
+-        size_t chunk = available < length ? available : length;
+-        if (to_guest)
+-            memcpy(guest, local, chunk);
+-        else
+-            memcpy(local, guest, chunk);
+-        local += chunk;
+-        offset += chunk;
+-        length -= chunk;
+-    }
++    if (first > total) first = total;
++    u64 addr = cmd->prp1;
++    size_t remaining = total;
++    u64 entries[VNVME_MAX_BLOCKS] = {0};
++    size_t rest = total - first;
++    size_t list_bytes = 0;
++    if (rest) {
++        if (!cmd->prp2 || (cmd->prp2 & (VNVME_PAGE_SIZE - 1))) return false;
++        if (rest <= VNVME_PAGE_SIZE) entries[0] = cmd->prp2;
++        else {
++            size_t count = (rest + VNVME_PAGE_SIZE - 1) / VNVME_PAGE_SIZE;
++            list_bytes = count * sizeof(u64);
++            void *list = guest_span(ctrl, cmd->prp2, list_bytes, false);
++            if (!list) return false;
++            memcpy(entries, list, count * sizeof(u64));
++        }
++    }
++    while (remaining) {
++        size_t n = plan->count ? (remaining < VNVME_PAGE_SIZE ? remaining : VNVME_PAGE_SIZE) : first;
++        if (plan->count) {
++            addr = entries[plan->count - 1];
++            if (!addr || (addr & (VNVME_PAGE_SIZE - 1))) return false;
++        }
++        if (plan->count >= VNVME_MAX_BLOCKS + 1) return false;
++        u8 *ptr = guest_span(ctrl, addr, n, true);
++        if (!ptr || overlaps_queue(ctrl, addr, n) ||
++            (list_bytes && overlaps(addr, n, cmd->prp2, list_bytes))) return false;
++        for (size_t i = 0; i < plan->count; i++)
++            if (overlaps(addr, n, plan->addr[i], plan->len[i])) return false;
++        plan->addr[plan->count] = addr;
++        plan->ptr[plan->count] = ptr;
++        plan->len[plan->count++] = n;
++        remaining -= n;
++    }
++    return true;
++}
++static void copy_to_plan(const struct prp_plan *plan, const u8 *buffer)
++{
++    for (size_t i = 0; i < plan->count; i++) {
++        memcpy(plan->ptr[i], buffer, plan->len[i]);
++        buffer += plan->len[i];
++    }
++}
++static bool prp_copy(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
++                     size_t total, const void *buffer)
++{
++    struct prp_plan plan;
++    if (!plan_prps(ctrl, cmd, total, &plan)) return false;
++    copy_to_plan(&plan, buffer);
+     return true;
+ }
+ 
+@@ -219,7 +258,7 @@
+     put_le16(data + 0, 0x1b36);
+     put_le16(data + 2, 0x1b36);
+     put_ascii(data + 4, 20, "M1N1NVME000000000001");
+-    put_ascii(data + 24, 40, "m1n1 Apple ANS NVMe bridge");
++    put_ascii(data + 24, 40, "S0 immutable RAM disk (NO ANS)");
+     put_ascii(data + 64, 8, "0.1");
+     data[72] = 4; /* Recommended arbitration burst. */
+     data[77] = 5; /* MDTS = 2^5 4 KiB pages = 128 KiB. */
+@@ -232,9 +271,9 @@
+     data[512] = 0x66;             /* Required/max SQE size = 64 bytes. */
+     data[513] = 0x44;             /* Required/max CQE size = 16 bytes. */
+     put_le32(data + 516, 1);      /* One namespace. */
+-    put_le16(data + 520, BIT(2)); /* Dataset Management supported. */
+-    data[525] = BIT(0);           /* Flush applies to all namespaces. */
+-    data[526] = 0;                /* No volatile write cache. */
++    put_le16(data + 520, 0);      /* No Dataset Management support. */
++    data[525] = 0;               /* No volatile write cache: immutable RAM. */
++    data[526] = 0;               /* AWUN zero-based. */
+ }
+ 
+ static void identify_namespace(struct vnvme_ctrl *ctrl, u8 *data)
+@@ -274,7 +313,7 @@
+             return VNVME_SC_INVALID_FIELD;
+     }
+ 
+-    if (!prp_copy(cmd, VNVME_PAGE_SIZE, 0, ctrl->bounce, VNVME_PAGE_SIZE, true))
++    if (!prp_copy(ctrl, cmd, VNVME_PAGE_SIZE, ctrl->bounce))
+         return VNVME_SC_DATA_TRANSFER_ERROR;
+     return VNVME_SC_SUCCESS;
+ }
+@@ -287,7 +326,7 @@
+     if (length > VNVME_PAGE_SIZE || (lid != 1 && lid != 2))
+         return VNVME_SC_INVALID_FIELD;
+     memset(ctrl->bounce, 0, length);
+-    if (!prp_copy(cmd, length, 0, ctrl->bounce, length, true))
++    if (!prp_copy(ctrl, cmd, length, ctrl->bounce))
+         return VNVME_SC_DATA_TRANSFER_ERROR;
+     return VNVME_SC_SUCCESS;
+ }
+@@ -297,7 +336,9 @@
+     u16 qid = cmd->cdw10 & 0xffff;
+     u16 size = (cmd->cdw10 >> 16) + 1;
+     if (qid != 1 || size < 2 || size > VNVME_MAX_QSIZE || !(cmd->cdw11 & BIT(0)) || !cmd->prp1 ||
+-        (cmd->prp1 & (VNVME_PAGE_SIZE - 1)))
++        (cmd->prp1 & (VNVME_PAGE_SIZE - 1)) ||
++        overlaps_queue(ctrl, cmd->prp1, (size_t)size * sizeof(struct vnvme_completion)) ||
++        !guest_span(ctrl, cmd->prp1, (size_t)size * sizeof(struct vnvme_completion), true))
+         return VNVME_SC_INVALID_FIELD;
+     struct vnvme_queue *q = &ctrl->queues[qid];
+     if (q->cq_valid)
+@@ -316,7 +357,9 @@
+     u16 size = (cmd->cdw10 >> 16) + 1;
+     u16 cqid = cmd->cdw11 >> 16;
+     if (qid != 1 || cqid != 1 || size < 2 || size > VNVME_MAX_QSIZE || !(cmd->cdw11 & BIT(0)) ||
+-        !cmd->prp1 || (cmd->prp1 & (VNVME_PAGE_SIZE - 1)) || !ctrl->queues[cqid].cq_valid)
++        !cmd->prp1 || (cmd->prp1 & (VNVME_PAGE_SIZE - 1)) || !ctrl->queues[cqid].cq_valid ||
++        overlaps_queue(ctrl, cmd->prp1, (size_t)size * sizeof(struct vnvme_command)) ||
++        !guest_span(ctrl, cmd->prp1, (size_t)size * sizeof(struct vnvme_command), false))
+         return VNVME_SC_INVALID_FIELD;
+     struct vnvme_queue *q = &ctrl->queues[qid];
+     if (q->sq_valid)
+@@ -324,6 +367,7 @@
+     q->sq_addr = cmd->prp1;
+     q->sq_size = size;
+     q->sq_head = 0;
++    q->sq_tail = 0;
+     q->cq_id = cqid;
+     q->sq_valid = true;
+     return VNVME_SC_SUCCESS;
+@@ -389,53 +433,22 @@
+ 
+ static u16 process_io(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd)
+ {
+-    if (cmd->nsid != 1)
+-        return VNVME_SC_INVALID_NAMESPACE;
+-
+-    if (cmd->opcode == VNVME_IO_FLUSH)
+-        return ctrl->ops->flush(ctrl->opaque) ? VNVME_SC_SUCCESS : VNVME_SC_INTERNAL;
+-    if (cmd->opcode == VNVME_IO_DATASET_MANAGEMENT)
+-        return VNVME_SC_SUCCESS;
+-    if (cmd->opcode != VNVME_IO_READ && cmd->opcode != VNVME_IO_WRITE)
+-        return VNVME_SC_INVALID_OPCODE;
+-
++    if (cmd->nsid != 1) return VNVME_SC_INVALID_NAMESPACE;
++    /* No write/discard/vendor passthrough, even if a backend accidentally supplies it. */
++    if (cmd->opcode != VNVME_IO_READ) return VNVME_SC_INVALID_OPCODE;
++    if ((cmd->cdw12 & 0xffff0000) || cmd->cdw13 || cmd->cdw14 || cmd->cdw15)
++        return VNVME_SC_INVALID_FIELD;
+     u32 blocks = (cmd->cdw12 & 0xffff) + 1;
+-    if (blocks > VNVME_MAX_BLOCKS)
+-        return VNVME_SC_INVALID_FIELD;
++    if (blocks > VNVME_MAX_BLOCKS) return VNVME_SC_INVALID_FIELD;
+     u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
+     if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba)
+         return VNVME_SC_INVALID_FIELD;
+     size_t total = (size_t)blocks * VNVME_LBA_SIZE;
+-
+-    if (cmd->opcode == VNVME_IO_WRITE && ctrl->ops->write_blocks) {
+-        if (!prp_copy(cmd, total, 0, ctrl->bounce, total, false))
+-            return VNVME_SC_DATA_TRANSFER_ERROR;
+-        return ctrl->ops->write_blocks(ctrl->opaque, lba, blocks, ctrl->bounce)
+-                   ? VNVME_SC_SUCCESS
+-                   : VNVME_SC_INTERNAL;
+-    }
+-    if (cmd->opcode == VNVME_IO_READ && ctrl->ops->read_blocks) {
+-        if (!ctrl->ops->read_blocks(ctrl->opaque, lba, blocks, ctrl->bounce))
+-            return VNVME_SC_INTERNAL;
+-        return prp_copy(cmd, total, 0, ctrl->bounce, total, true) ? VNVME_SC_SUCCESS
+-                                                                 : VNVME_SC_DATA_TRANSFER_ERROR;
+-    }
+-
+-    /* Compatibility path for simple test or non-batching backends. */
+-    for (u32 i = 0; i < blocks; i++) {
+-        size_t offset = (size_t)i * VNVME_LBA_SIZE;
+-        if (cmd->opcode == VNVME_IO_WRITE) {
+-            if (!prp_copy(cmd, total, offset, ctrl->bounce, VNVME_LBA_SIZE, false))
+-                return VNVME_SC_DATA_TRANSFER_ERROR;
+-            if (!ctrl->ops->write(ctrl->opaque, lba + i, ctrl->bounce))
+-                return VNVME_SC_INTERNAL;
+-        } else {
+-            if (!ctrl->ops->read(ctrl->opaque, lba + i, ctrl->bounce))
+-                return VNVME_SC_INTERNAL;
+-            if (!prp_copy(cmd, total, offset, ctrl->bounce, VNVME_LBA_SIZE, true))
+-                return VNVME_SC_DATA_TRANSFER_ERROR;
+-        }
+-    }
++    struct prp_plan plan;
++    if (!plan_prps(ctrl, cmd, total, &plan)) return VNVME_SC_DATA_TRANSFER_ERROR;
++    if (!ctrl->ops->read_blocks || !ctrl->ops->read_blocks(ctrl->opaque, lba, blocks, ctrl->bounce))
++        return VNVME_SC_INTERNAL;
++    copy_to_plan(&plan, ctrl->bounce);
+     return VNVME_SC_SUCCESS;
+ }
+ 
+@@ -458,7 +471,7 @@
+         .cid = cid,
+         .status = (status_code << 1) | cq->cq_phase,
+     };
+-    void *cqe_dst = (void *)(uintptr_t)hv_ipa_to_pa(cq->cq_addr + cq->cq_tail * sizeof(cqe));
++    void *cqe_dst = guest_span(ctrl, cq->cq_addr + cq->cq_tail * sizeof(cqe), sizeof(cqe), true);
+     if (!cqe_dst)
+         return false;
+     memcpy(cqe_dst, &cqe, sizeof(cqe));
+@@ -510,11 +523,15 @@
+     if (cq->cq_pending)
+         return true;
+ 
++    /* Revalidate the entire queue spans each dispatch: no wrapped slot arithmetic. */
++    if (!guest_span(ctrl, sq->sq_addr, (size_t)sq->sq_size * sizeof(struct vnvme_command), false) ||
++        !guest_span(ctrl, cq->cq_addr, (size_t)cq->cq_size * sizeof(struct vnvme_completion), true))
++        return false;
+     u16 walked = 0;
+     while (sq->sq_head != sq->sq_tail) {
+         u16 slot = sq->sq_head;
+         struct vnvme_command cmd;
+-        void *sqe_src = (void *)(uintptr_t)hv_ipa_to_pa(sq->sq_addr + sq->sq_head * sizeof(cmd));
++        void *sqe_src = guest_span(ctrl, sq->sq_addr + sq->sq_head * sizeof(cmd), sizeof(cmd), false);
+         if (!sqe_src)
+             return false; // NOT break: breaking here returns true, so the doorbell would be
+                           // swallowed with no completion and the guest would wait forever.
+@@ -528,7 +545,9 @@
+ 
+         u32 result = 0;
+         bool complete = true;
+-        u16 status = qid ? process_io(ctrl, &cmd) : process_admin(ctrl, &cmd, &result, &complete);
++        u16 status = (cmd.flags || cmd.metadata || cmd.cdw2 || cmd.cdw3)
++                         ? VNVME_SC_INVALID_FIELD
++                         : qid ? process_io(ctrl, &cmd) : process_admin(ctrl, &cmd, &result, &complete);
+         struct vnvme_trace_event event = {
+             .type = VNVME_TRACE_SUBMISSION,
+             .qid = qid,
+--- a/src/hv_nvme_queue.h
++++ b/src/hv_nvme_queue.h
+@@ -107,6 +107,10 @@
+ };
+ 
+ struct vnvme_backend_ops {
++    /* Complete contiguous guest-RAM span, checked permissions; NULL rejects.
++     * Host-only S0. No fallback to raw IPA translation. Mapping must remain stable
++     * for this synchronous call; a concurrent guest needs pinning in S1. */
++    void *(*guest_span)(void *opaque, u64 ipa, size_t length, bool write);
+     bool (*read)(void *opaque, u64 lba, void *buffer);
+     bool (*write)(void *opaque, u64 lba, const void *buffer);
+     bool (*read_blocks)(void *opaque, u64 lba, u32 blocks, void *buffer);

@@ -1,0 +1,18 @@
+{"directed_backup":0,"accepted":0,"reason":18}
+{"directed_backup":1,"accepted":0,"reason":18}
+{"directed_backup":2,"accepted":0,"reason":18}
+{"directed_backup":3,"accepted":0,"reason":18}
+{"directed_backup":4,"accepted":0,"reason":18}
+{"directed_backup":5,"accepted":0,"reason":18}
+{"directed_backup":6,"accepted":0,"reason":18}
+{"directed_backup":7,"accepted":0,"reason":18}
+{"directed_backup":8,"accepted":0,"reason":18}
+{"directed_backup":9,"accepted":0,"reason":18}
+{"status":"pass","cases":60000,"accepted":1972,"false_negatives":0,"checks":117649032,"backup_directed":10,"backup_mutated_primary_valid":1891,"backup_mutated_accepted":56,"backup_mutated_rejected":1835} 
+guest_fuzz rc 0 | HV/win S1 native: window LBA 174213120 + 24424454 verified against live GPT (read-only) | HV/win S1: native read-only window (internal SSD GPT entry), ECAM 0xf28000000 BAR 0xf30000000 SPI 66, 24424454 x 4096, epoch 0x11 | info: 471 in-window guest reads served, 7027 ANS reads, all within [start, start+len); raw cmds: 1 froze (child), 608 non-terminal replayed in-session | {"scenario":"guest_fuzz","checks":62726} 
+freeze_total rc 0 | HV/win S1 native: window LBA 174213120 + 24424454 verified against live GPT (read-only) | HV/win S1: native read-only window (internal SSD GPT entry), ECAM 0xf28000000 BAR 0xf30000000 SPI 66, 24424454 x 4096, epoch 0x11 | info: freeze: 0 MMIO reads, 0 writes after the freeze | {"scenario":"freeze_total","checks":573} 
+select_no_prep rc 0 | HV/win S1 native: window LBA 174213120 + 24424454 verified against live GPT (read-only) | info: select without PREP, then retire: ans_ro state 4 (quiesced), cpu running 0, polls 5 | {"scenario":"select_no_prep","checks":5} 
+stale_bounce rc 0 | HV/win S1 native: window LBA 174213120 + 24424454 verified against live GPT (read-only) | HV/win S1: native read-only window (internal SSD GPT entry), ECAM 0xf28000000 BAR 0xf30000000 SPI 66, 24424454 x 4096, epoch 0x11 | info: READ completed without DMA (after GPT verification) -> guest status 0, guest sees all zeros (no GPT or stale data) | {"scenario":"stale_bounce","checks":4230} 
+stale_bounce_after_data rc 0 | HV/win S1 native: window LBA 174213120 + 24424454 verified against live GPT (read-only) | HV/win S1: native read-only window (internal SSD GPT entry), ECAM 0xf28000000 BAR 0xf30000000 SPI 66, 24424454 x 4096, epoch 0x11 | info: READ completed without DMA (after an in-window read) -> guest status 0, guest sees all zeros (no GPT or stale data) | {"scenario":"stale_bounce_after_data","checks":154} 
+stale_bounce_after_recheck rc 0 | HV/win S1 native: window LBA 174213120 + 24424454 verified against live GPT (read-write) | HV/win S1: native read-write window (internal SSD GPT entry), ECAM 0xf28000000 BAR 0xf30000000 SPI 66, 24424454 x 4096, epoch 0x11 | info: READ completed without DMA (after the first-write GPT recheck) -> guest status 0, guest sees all zeros (no GPT or stale data) | {"scenario":"stale_bounce_after_recheck","checks":109} 
+{"status": "pass", "results": {"gpt_fuzz": true, "guest_fuzz": true, "freeze_total": true, "select_no_prep": true, "stale_bounce": true, "stale_bounce_after_data": true, "stale_bounce_after_recheck": true}, "out": "/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.7-native-rw-20261110/scratch/m5w-r3-review-83torjnn"}

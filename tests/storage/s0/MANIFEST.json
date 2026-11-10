@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/paulsmir/m1n1_windows",
+  "commit": "9cd80ac652ac404e92ae279deeaec8c629d7d184",
+  "upstream": [
+    {
+      "source_path": "LICENSE",
+      "local_path": "upstream/LICENSE",
+      "git_blob": "aff0557da45ae68209934ef48887a8112663ca45",
+      "bytes": 1076
+    },
+    {
+      "source_path": "src/hv_nvme_queue.c",
+      "local_path": "upstream/hv_nvme_queue.c",
+      "git_blob": "574c5761d9f39506da5c9f704a0b4fc593a8e4eb",
+      "bytes": 21136
+    },
+    {
+      "source_path": "src/hv_nvme_queue.h",
+      "local_path": "upstream/hv_nvme_queue.h",
+      "git_blob": "34d99ceeecf2282328329dfde93e9f319186cc5b",
+      "bytes": 5155
+    },
+    {
+      "source_path": "src/types.h",
+      "local_path": "upstream/types.h",
+      "git_blob": "6e991e23a273a3452135fca3171583a9177b5862",
+      "bytes": 2110
+    },
+    {
+      "source_path": "tests/hv_nvme_queue_test.c",
+      "local_path": "upstream/hv_nvme_queue_test.c",
+      "git_blob": "6d8dc3657feccb4334bce046819733765905761e",
+      "bytes": 15145
+    }
+  ],
+  "fixture": {
+    "block_size": 4096,
+    "block_count": 40,
+    "byte_length": 163840,
+    "sha256": "fde628c9789113c9a8bd3ddddded42440997014c6717d382c6c9b53282792257",
+    "read_only": true
+  },
+  "files": {
+    "PROVENANCE.json": "3325769f23459ea54e9e42de3d3817625f6c4096b4234414a834bbc8d061a654",
+    "README.md": "b573cc163e481cebc39403372a9033371eb1071daf7852479d162299074cfcd0",
+    "adaptation.patch": "13afdd6f3a53cd691a4c3b15287b9fe62bb1af36e66c92e47ab2cb5066af8e58",
+    "run.py": "9caeb62271bf1ee3557352730888ddf6f02bcc63b42d5c16914aa26b997f6414",
+    "src/guest_memory.c": "9c03edcd440e0838dd07e64bef49eefb5d346c290b4eeca27c2c65ccd9d5d36c",
+    "src/guest_memory.h": "1a30526fd36587e81fcd0930526463b613d9f022604b06cf07ccb22c0015f73f",
+    "src/hv_nvme_queue.c": "85eeb46387904af0385c6703eec8b3764a07cd46b7b348e43a5a0d4f42bd3bf7",
+    "src/hv_nvme_queue.h": "e64b5d8aee0b3eeda503421cb9f7fe0e8aaa79f69cef36804ee664c150ee0042",
+    "src/ram_disk.c": "b2e96d255d4691d7e27407d6f9f48a4ad3e5ac5b5c6f136288f09f023ad60078",
+    "src/ram_disk.h": "d42a06974a23e6f680ed99e612983f7f8daa53953596078d2a512d896578b66e",
+    "test_s0.c": "c8af6ebd6d6510b198567eb093d5cf5ee0d8cbbd7395f38940af25be65bf2faf",
+    "upstream/LICENSE": "11ca423a564b52d3b7f260398baa20d016c25ae180fbdd0067c27b7d1ed7b420",
+    "upstream/hv_nvme_queue.c": "915fdb08bffe15165e5b283dd8fb23e14f13d90ba63616712e4428e745daa6ee",
+    "upstream/hv_nvme_queue.h": "8a9273956c5893a513bbcaf1f02ffc9711cebbee8755adb539f89367a8124c8c",
+    "upstream/hv_nvme_queue_test.c": "a2fab83af09893f58f32812cdc0d26afe44993a9f968900799b9397d6348d09f",
+    "upstream/types.h": "60d40042d215c8f8d8e1c9a0325759079b40cbfa3615a41d296b58ac3f1b83cf"
+  }
+}

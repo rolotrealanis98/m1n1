@@ -1,0 +1,7 @@
+{
+  "status": "pass",
+  "git_apply_check": true,
+  "applied_bytes_match_src": true,
+  "scope": "two donor C files; model.h is a separate new source",
+  "patch_sha256": "6d3da9913fddf0332f11083faa8b00c51ed993030637a2fdb1bcfb81976bc4e6"
+}

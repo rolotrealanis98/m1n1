@@ -1,0 +1,38 @@
+{
+  "repository": "https://github.com/paulsmir/m1n1_windows",
+  "commit": "9cd80ac652ac404e92ae279deeaec8c629d7d184",
+  "license": "MIT (upstream/LICENSE; existing file notices retained)",
+  "import_method": "GitHub connector raw file fetch; original Git blob hashes independently verified",
+  "files": [
+    {
+      "source_path": "LICENSE",
+      "local_path": "upstream/LICENSE",
+      "git_blob": "aff0557da45ae68209934ef48887a8112663ca45",
+      "bytes": 1076
+    },
+    {
+      "source_path": "src/hv_nvme_queue.c",
+      "local_path": "upstream/hv_nvme_queue.c",
+      "git_blob": "574c5761d9f39506da5c9f704a0b4fc593a8e4eb",
+      "bytes": 21136
+    },
+    {
+      "source_path": "src/hv_nvme_queue.h",
+      "local_path": "upstream/hv_nvme_queue.h",
+      "git_blob": "34d99ceeecf2282328329dfde93e9f319186cc5b",
+      "bytes": 5155
+    },
+    {
+      "source_path": "src/types.h",
+      "local_path": "upstream/types.h",
+      "git_blob": "6e991e23a273a3452135fca3171583a9177b5862",
+      "bytes": 2110
+    },
+    {
+      "source_path": "tests/hv_nvme_queue_test.c",
+      "local_path": "upstream/hv_nvme_queue_test.c",
+      "git_blob": "6d8dc3657feccb4334bce046819733765905761e",
+      "bytes": 15145
+    }
+  ]
+}
