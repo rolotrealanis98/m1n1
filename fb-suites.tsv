@@ -26,8 +26,8 @@ QF	vgic3	source/src/hv/win/*vgic* source/src/hv/win/hv_win.h source/tests/win-vg
 QF	static-elf	*	if [ -f artifacts/m1n1-raw.elf ]; then python3 -I tests/static_r31.py; else echo 'static ELF gate: unverified (run fb build first)'; fi
 QF	s1wc	*	python3 -I tests/s1wc_test.py
 F	r46-run	source/src/hv/win/s1/* source/src/hv/win/* tests/native/*	python3 -I tests/native/r46_run.py > $FB_OUT/r46.json 2>&1; rc=$?; tail -c 200 $FB_OUT/r46.json | tr '\n' ' '; echo; exit $rc
-F	twin-proof	source/src/hv/win/s1/* source/src/hv/win/* tests/twin-v2/*	python3 -I tests/twin-v2/twin_proof.py "$PWD" > $FB_OUT/twin.json 2>&1; rc=$?; tail -c 200 $FB_OUT/twin.json | tr '\n' ' '; echo; exit $rc
-F	stage-proof	source/src/hv/win/s1/* source/src/hv/win/* tests/twin-v2/*	python3 -I tests/twin-v2/stage_proof.py "$PWD" > $FB_OUT/twin-stages.json 2>&1; rc=$?; tail -c 200 $FB_OUT/twin-stages.json | tr '\n' ' '; echo; exit $rc
+M	twin-proof	source/src/hv/win/s1/* source/src/hv/win/* tests/twin-v2/*	python3 -I tests/twin-v2/twin_proof.py "$PWD" > $FB_OUT/twin.json 2>&1; rc=$?; tail -c 200 $FB_OUT/twin.json | tr '\n' ' '; echo; exit $rc
+M	stage-proof	source/src/hv/win/s1/* source/src/hv/win/* tests/twin-v2/*	python3 -I tests/twin-v2/stage_proof.py "$PWD" > $FB_OUT/twin-stages.json 2>&1; rc=$?; tail -c 200 $FB_OUT/twin-stages.json | tr '\n' ' '; echo; exit $rc
 M	native-mutants	*	S1_MUTANT_JOBS=$FB_JOBS python3 -I tests/native/run.py > $FB_OUT/native.json 2>&1; python3 -I -c "import json;d=json.load(open('$FB_OUT/native.json'));print('native:',d['status'],d['scenarios'],'scenarios',d['checks'],'checks, mutants',d['mutants_caught'],'/',d['mutants_total']);assert d['mutants_caught']==d['mutants_total']"
 M	r46-inherited	*	python3 -I tests/native/r46_inherited.py > $FB_OUT/inherited.json 2>&1; rc=$?; tail -c 200 $FB_OUT/inherited.json | tr '\n' ' '; echo; exit $rc
 M	r45-mutants	*	python3 -I tests/native/r45_mutants.py > $FB_OUT/r45m.json 2>&1; rc=$?; tail -c 200 $FB_OUT/r45m.json | tr '\n' ' '; echo; exit $rc
