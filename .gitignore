@@ -1,0 +1,19 @@
+# fastbuild: outputs never go in git
+/scratch/
+/artifacts/
+/check-*/
+/build-verify/
+/kd/
+/run/
+/logs/
+/snapshots/
+/.fb/
+build1.*
+build2.*
+*.log
+handoff.out
+last.json
+__pycache__/
+*.pyc
+source/build/
+source/.buildshim/librust.a

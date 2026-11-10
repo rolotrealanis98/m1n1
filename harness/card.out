@@ -1,0 +1,40 @@
+new converter: fbec3de75ed38ac3  conv: 911e5bc7d631ffdb
+-- cost wdom (rd 1.40 ns/B, wr 1.725 ns/B), TLB prefetch p=0.45 --
+r3.2-disp 2x, no pause             cpu  52.4% faults/s  3767 spur 21.9% passes/s   26 pg/pass 145.2 fps 60.8 | lat p50    1.3 p95   29.1 p99   36.6 max   38.7 ms | EL2 max_lat  132.1 ms | stale 0 lost 0
+r3.2-disp 2x, 245 ms host pause    cpu  50.1% faults/s  3600 spur 21.8% passes/s   25 pg/pass 145.4 fps 58.3 | lat p50    1.3 p95   29.1 p99   36.9 max  276.1 ms | EL2 max_lat  311.4 ms | stale 0 lost 0
+r3.2-disp 1x (native)              cpu  53.7% faults/s  9849 spur 19.2% passes/s   16 pg/pass 592.2 fps 48.0 | lat p50    1.6 p95   33.4 p99   53.6 max   60.3 ms | EL2 max_lat  200.5 ms | stale 0 lost 0
+-- cost rdom (rd 6.50 ns/B, wr 0.450 ns/B), TLB prefetch p=0.45 --
+r3.2-disp 2x, no pause             cpu  52.4% faults/s  3767 spur 21.9% passes/s   26 pg/pass 145.2 fps 60.8 | lat p50    1.3 p95   29.1 p99   36.6 max   38.7 ms | EL2 max_lat  132.1 ms | stale 0 lost 0
+r3.2-disp 2x, 245 ms host pause    cpu  50.1% faults/s  3600 spur 21.8% passes/s   25 pg/pass 145.4 fps 58.3 | lat p50    1.3 p95   29.1 p99   36.9 max  276.1 ms | EL2 max_lat  311.4 ms | stale 0 lost 0
+r3.2-disp 1x (native)              cpu  52.4% faults/s  4530 spur 19.0% passes/s    7 pg/pass 594.2 fps 50.0 | lat p50    1.3 p95   17.7 p99   49.9 max  116.5 ms | EL2 max_lat  432.6 ms | stale 0 lost 0
+-- cost wdom (rd 1.40 ns/B, wr 1.725 ns/B), TLB prefetch p=0.45 --
+disp3     2x, no pause             cpu  29.4% faults/s  9084 spur  0.0% passes/s   63 pg/pass 145.0 fps 62.8 | lat p50    0.9 p95   10.8 p99   11.2 max   19.8 ms | EL2 max_lat  126.2 ms card net   35.5 | wr  5.5% of chunks | stale 0 lost 0
+disp3     2x, 245 ms host pause    cpu  28.2% faults/s  8712 spur  0.0% passes/s   60 pg/pass 145.0 fps 60.3 | lat p50    0.9 p95   10.8 p99   11.2 max   19.8 ms | EL2 max_lat  126.2 ms card net   35.5 | wr  5.5% of chunks | stale 0 lost 0
+disp3     2x tlbi=far              cpu  29.9% faults/s  9015 spur 21.8% passes/s   62 pg/pass 145.0 fps 62.3 | lat p50    0.8 p95   10.7 p99   11.0 max   19.6 ms | EL2 max_lat  126.2 ms card net   35.5 | wr  5.5% of chunks | stale 0 lost 0
+disp3     2x tlbi=all              cpu  29.4% faults/s  9084 spur  0.0% passes/s   63 pg/pass 145.0 fps 62.8 | lat p50    0.9 p95   10.8 p99   11.2 max   19.8 ms | EL2 max_lat  126.2 ms card net   35.5 | wr  5.5% of chunks | stale 0 lost 0
+disp3     2x no-diff               cpu  52.2% faults/s  3767 spur  0.0% passes/s   26 pg/pass 145.2 fps 61.3 | lat p50    1.7 p95   28.3 p99   35.9 max   38.5 ms | EL2 max_lat  126.2 ms card net   75.4 | wr  0.0% of chunks | stale 0 lost 0
+disp3     2x merge-ahead           cpu  29.4% faults/s  9097 spur  0.0% passes/s   63 pg/pass 145.0 fps 62.8 | lat p50    0.9 p95   10.8 p99   11.2 max   19.8 ms | EL2 max_lat  126.2 ms card net   35.5 | wr  5.5% of chunks | stale 0 lost 0
+disp3     1x (native)              cpu  54.6% faults/s 19848 spur  0.0% passes/s   33 pg/pass 593.9 fps 46.4 | lat p50    1.7 p95   20.8 p99   27.4 max   29.9 ms | EL2 max_lat  193.9 ms card net   71.6 | wr  5.0% of chunks | stale 0 lost 0
+    [EL2 console] FBS t=3b9fc2be calls=413 faults=7105 spur=0/0/0/0/0 passes=50 pages=7577 merged=0 chunks=244782/1939516 busy_us=283252 fault_us=0 stop_us=0 gaps=0/0 rt=60/1376/2270 print_us=0
+    [EL2 console] FBS2 t=3b9fc2be iv_lat_us=126173/126173 iv_gap_us=1046@26fafe1c gapf=68 iv_fault_us=0 iv_tick_us=1110 iv_backlog=218 hist=0,0,0,0,47,1,1,1,0,0,0,0
+    [EL2 console] FBS t=7755fa8c calls=853 faults=16240 spur=0/0/0/0/0 passes=112 pages=16708 merged=0 chunks=369343/4277052 busy_us=549330 fault_us=0 stop_us=0 gaps=0/0 rt=131/3004/4341 print_us=0
+    [EL2 console] FBS2 t=7755fa8c iv_lat_us=13034/13034 iv_gap_us=1058@63b7cfe1 gapf=145 iv_fault_us=0 iv_tick_us=1037 iv_backlog=145 hist=0,0,0,0,109,1,1,1,0,0,0,0
+    [EL2 console] FBS t=b30478fc calls=1185 faults=23200 spur=0/0/0/0/0 passes=160 pages=23555 merged=0 chunks=463086/6029884 busy_us=749019 fault_us=0 stop_us=243531 gaps=1/1 rt=185/4243/5913 print_us=0
+    [EL2 console] FBS2 t=b30478fc iv_lat_us=13080/13080 iv_gap_us=245531@afee7f32 gapf=7 iv_fault_us=0 iv_tick_us=1030 iv_backlog=145 hist=1,0,0,0,156,1,1,1,0,0,0,0
+    [EL2 console] FBS t=eeb31ca0 calls=1625 faults=32335 spur=0/0/0/0/0 passes=223 pages=32677 merged=0 chunks=587699/8365116 busy_us=1014914 fault_us=0 stop_us=243531 gaps=1/1 rt=256/5872/7966 print_us=0
+    [EL2 console] FBS2 t=eeb31ca0 iv_lat_us=13173/13173 iv_gap_us=1050@d6df1863 gapf=128 iv_fault_us=0 iv_tick_us=1034 iv_backlog=145 hist=1,0,0,0,219,1,1,1,0,0,0,0
+    [EL2 console] FBS t=12a589fb1 calls=2064 faults=41435 spur=0/0/0/0/0 passes=286 pages=41797 merged=0 chunks=711054/10699836 busy_us=1280207 fault_us=0 stop_us=243531 gaps=1/1 rt=327/7500/10033 print_us=0
+    [EL2 console] FBS2 t=12a589fb1 iv_lat_us=13077/13077 iv_gap_us=1060@10b0d1d8f gapf=145 iv_fault_us=0 iv_tick_us=1041 iv_backlog=145 hist=1,0,0,0,282,1,1,1,0,0,0,0
+    [EL2 console] FBS t=165fcf1e4 calls=2504 faults=50460 spur=0/0/0/0/0 passes=349 pages=50932 merged=0 chunks=835764/13038396 busy_us=1546442 fault_us=0 stop_us=243531 gaps=1/1 rt=398/9129/12067 print_us=0
+    [EL2 console] FBS2 t=165fcf1e4 iv_lat_us=13247/13247 iv_gap_us=1055@1606c63f1 gapf=128 iv_fault_us=0 iv_tick_us=1033 iv_backlog=145 hist=1,0,0,0,345,1,1,1,0,0,0,0
+disp3     2x pause, stats 1 s      cpu  28.2% faults/s  8712 spur  0.0% passes/s   60 pg/pass 145.0 fps 60.3 | lat p50    0.9 p95   10.8 p99   11.2 max   19.8 ms | EL2 max_lat  126.2 ms card net   35.5 | wr  5.5% of chunks | stale 0 lost 0
+          hist(<1,<2,<4,..,>=1024 ms): 1 0 0 0 358 1 1 1 0 0 0 0  gap_max 245.5 ms gaps>5ms 1 stopped 243.5 ms sp same/sub/alias/rep 0/0/0/0
+-- cost rdom (rd 6.50 ns/B, wr 0.450 ns/B), TLB prefetch p=0.45 --
+disp3     2x, no pause             cpu  52.8% faults/s  4726 spur  0.0% passes/s   32 pg/pass 145.2 fps 60.9 | lat p50    1.7 p95   25.8 p99   30.1 max   32.1 ms | EL2 max_lat  126.5 ms card net   59.6 | wr  6.2% of chunks | stale 0 lost 0
+disp3     2x, 245 ms host pause    cpu  50.6% faults/s  4533 spur  0.0% passes/s   31 pg/pass 145.2 fps 58.4 | lat p50    1.7 p95   25.7 p99   30.2 max   32.1 ms | EL2 max_lat  299.4 ms card net   59.6 | wr  6.2% of chunks | stale 0 lost 0
+disp3     2x tlbi=far              cpu  53.2% faults/s  4727 spur 21.8% passes/s   32 pg/pass 145.1 fps 60.2 | lat p50    1.3 p95   23.9 p99   29.9 max   32.3 ms | EL2 max_lat  126.5 ms card net   59.7 | wr  6.2% of chunks | stale 0 lost 0
+disp3     2x tlbi=all              cpu  52.8% faults/s  4726 spur  0.0% passes/s   32 pg/pass 145.2 fps 60.9 | lat p50    1.7 p95   25.8 p99   30.1 max   32.1 ms | EL2 max_lat  126.5 ms card net   59.6 | wr  6.2% of chunks | stale 0 lost 0
+disp3     2x no-diff               cpu  52.3% faults/s  3767 spur  0.0% passes/s   26 pg/pass 145.9 fps 61.1 | lat p50    1.7 p95   28.0 p99   36.0 max   38.5 ms | EL2 max_lat  126.5 ms card net   75.7 | wr  0.0% of chunks | stale 0 lost 0
+disp3     2x merge-ahead           cpu  53.7% faults/s  7696 spur  0.0% passes/s   32 pg/pass 145.2 fps 60.8 | lat p50    1.4 p95   24.0 p99   30.1 max   32.2 ms | EL2 max_lat  126.5 ms card net   59.6 | wr  6.2% of chunks | stale 0 lost 0
+disp3     1x (native)              cpu  53.5% faults/s  4915 spur  0.0% passes/s    8 pg/pass 591.8 fps 49.2 | lat p50    1.5 p95   41.0 p99   90.8 max  122.6 ms | EL2 max_lat  430.2 ms card net  246.8 | wr  7.7% of chunks | stale 0 lost 0
+disp3     2x pause, stats 1 s      cpu  50.6% faults/s  4533 spur  0.0% passes/s   31 pg/pass 145.2 fps 58.4 | lat p50    1.7 p95   25.7 p99   30.2 max   32.1 ms | EL2 max_lat  299.4 ms card net   59.6 | wr  6.2% of chunks | stale 0 lost 0

@@ -1,0 +1,132 @@
+new converter: fbec3de75ed38ac3  conv: 911e5bc7d631ffdb
+strict reprotect small, tlbi sub          faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict reprotect small, tlbi all          faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict reprotect small, tlbi far          faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict reprotect small, 2x                faults 1383 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/1383
+strict reprotect small, merge-ahead       faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict random, sub, pf 0                  faults 18841 spurious 0 passes 172 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/18841
+strict random, sub, pf 0.5                faults 19217 spurious 0 passes 173 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/19217
+strict random, 2x sub, pf 0.5             faults 7143 spurious 0 passes 227 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/7143
+strict random, all, pf 0.5                faults 19237 spurious 0 passes 174 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/19237
+strict random, merge-ahead, pf 0.5        faults 21713 spurious 0 passes 157 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/21713
+strict random, no elision, pf 0.5         faults 7144 spurious 0 passes 226 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/7144
+PASSED: 0 failure(s)
+== disp3 strict: pass (expected)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi sub: stale pixels 4122, untracked stores 29168, TLBI-before-leaf-store 1131 (stale S2 refills 1131), sequence violations 0, unaligned ipas2e1 234, fault-path TLBI operand mismatches 234/1131, spurious 234
+strict reprotect small, tlbi sub          faults 1131 spurious 234 passes 300 | stale 4122 untracked 29168 order 1131 seq 0 unaligned 234 operand-bad 234/1131
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi all: stale pixels 4122, untracked stores 29168, TLBI-before-leaf-store 1131 (stale S2 refills 1131), sequence violations 0, unaligned ipas2e1 234, fault-path TLBI operand mismatches 234/1131, spurious 234
+strict reprotect small, tlbi all          faults 1131 spurious 234 passes 300 | stale 4122 untracked 29168 order 1131 seq 0 unaligned 234 operand-bad 234/1131
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi far: stale pixels 4122, untracked stores 29168, TLBI-before-leaf-store 1131 (stale S2 refills 1131), sequence violations 0, unaligned ipas2e1 234, fault-path TLBI operand mismatches 234/1131, spurious 234
+strict reprotect small, tlbi far          faults 1131 spurious 234 passes 300 | stale 4122 untracked 29168 order 1131 seq 0 unaligned 234 operand-bad 234/1131
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, 2x: stale pixels 1640, untracked stores 31120, TLBI-before-leaf-store 659 (stale S2 refills 659), sequence violations 0, unaligned ipas2e1 206, fault-path TLBI operand mismatches 206/659, spurious 206
+strict reprotect small, 2x                faults 659 spurious 206 passes 286 | stale 1640 untracked 31120 order 659 seq 0 unaligned 206 operand-bad 206/659
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, merge-ahead: stale pixels 4122, untracked stores 29168, TLBI-before-leaf-store 1131 (stale S2 refills 1131), sequence violations 0, unaligned ipas2e1 234, fault-path TLBI operand mismatches 234/1131, spurious 234
+strict reprotect small, merge-ahead       faults 1131 spurious 234 passes 300 | stale 4122 untracked 29168 order 1131 seq 0 unaligned 234 operand-bad 234/1131
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, sub, pf 0: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 13 (stale S2 refills 13), sequence violations 0, unaligned ipas2e1 1172, fault-path TLBI operand mismatches 1172/18841, spurious 1172
+strict random, sub, pf 0                  faults 18841 spurious 1172 passes 172 | stale 0 untracked 0 order 13 seq 0 unaligned 1172 operand-bad 1172/18841
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, sub, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 1142, fault-path TLBI operand mismatches 1142/19810, spurious 1142
+strict random, sub, pf 0.5                faults 19810 spurious 1142 passes 171 | stale 0 untracked 0 order 0 seq 0 unaligned 1142 operand-bad 1142/19810
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, 2x sub, pf 0.5: stale pixels 149599, untracked stores 10996760, TLBI-before-leaf-store 160 (stale S2 refills 160), sequence violations 0, unaligned ipas2e1 61, fault-path TLBI operand mismatches 61/493, spurious 61
+strict random, 2x sub, pf 0.5             faults 493 spurious 61 passes 20 | stale 149599 untracked 10996760 order 160 seq 0 unaligned 61 operand-bad 61/493
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, all, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 1195, fault-path TLBI operand mismatches 1195/19825, spurious 1195
+strict random, all, pf 0.5                faults 19825 spurious 1195 passes 180 | stale 0 untracked 0 order 0 seq 0 unaligned 1195 operand-bad 1195/19825
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, merge-ahead, pf 0.5: stale pixels 0, untracked stores 113170, TLBI-before-leaf-store 3281 (stale S2 refills 3281), sequence violations 0, unaligned ipas2e1 1309, fault-path TLBI operand mismatches 1309/22423, spurious 1309
+strict random, merge-ahead, pf 0.5        faults 22423 spurious 1309 passes 160 | stale 0 untracked 113170 order 3281 seq 0 unaligned 1309 operand-bad 1309/22423
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, no elision, pf 0.5: stale pixels 149599, untracked stores 10996760, TLBI-before-leaf-store 160 (stale S2 refills 160), sequence violations 0, unaligned ipas2e1 61, fault-path TLBI operand mismatches 61/493, spurious 61
+strict random, no elision, pf 0.5         faults 493 spurious 61 passes 20 | stale 149599 untracked 10996760 order 160 seq 0 unaligned 61 operand-bad 61/493
+child failed (status 256)
+FAILED: 11 failure(s)
+== disp2 parent strict: fail (expected)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi sub: stale pixels 27866, untracked stores 53797, TLBI-before-leaf-store 152 (stale S2 refills 152), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/152, spurious 0
+strict reprotect small, tlbi sub          faults 152 spurious 0 passes 62 | stale 27866 untracked 53797 order 152 seq 0 unaligned 0 operand-bad 0/152
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi all: stale pixels 27866, untracked stores 53797, TLBI-before-leaf-store 152 (stale S2 refills 152), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/152, spurious 0
+strict reprotect small, tlbi all          faults 152 spurious 0 passes 62 | stale 27866 untracked 53797 order 152 seq 0 unaligned 0 operand-bad 0/152
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi far: stale pixels 27866, untracked stores 53797, TLBI-before-leaf-store 152 (stale S2 refills 152), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/152, spurious 0
+strict reprotect small, tlbi far          faults 152 spurious 0 passes 62 | stale 27866 untracked 53797 order 152 seq 0 unaligned 0 operand-bad 0/152
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, 2x: stale pixels 26582, untracked stores 56128, TLBI-before-leaf-store 38 (stale S2 refills 38), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/38, spurious 0
+strict reprotect small, 2x                faults 38 spurious 0 passes 23 | stale 26582 untracked 56128 order 38 seq 0 unaligned 0 operand-bad 0/38
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, merge-ahead: stale pixels 27866, untracked stores 53797, TLBI-before-leaf-store 152 (stale S2 refills 152), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/152, spurious 0
+strict reprotect small, merge-ahead       faults 152 spurious 0 passes 62 | stale 27866 untracked 53797 order 152 seq 0 unaligned 0 operand-bad 0/152
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, sub, pf 0: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 13 (stale S2 refills 13), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/18841, spurious 0
+strict random, sub, pf 0                  faults 18841 spurious 0 passes 172 | stale 0 untracked 0 order 13 seq 0 unaligned 0 operand-bad 0/18841
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, sub, pf 0.5: stale pixels 0, untracked stores 4382, TLBI-before-leaf-store 10 (stale S2 refills 10), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/19014, spurious 0
+strict random, sub, pf 0.5                faults 19014 spurious 0 passes 170 | stale 0 untracked 4382 order 10 seq 0 unaligned 0 operand-bad 0/19014
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, 2x sub, pf 0.5: stale pixels 149733, untracked stores 11721403, TLBI-before-leaf-store 38 (stale S2 refills 38), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/110, spurious 0
+strict random, 2x sub, pf 0.5             faults 110 spurious 0 passes 6 | stale 149733 untracked 11721403 order 38 seq 0 unaligned 0 operand-bad 0/110
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, all, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 23 (stale S2 refills 23), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/19237, spurious 0
+strict random, all, pf 0.5                faults 19237 spurious 0 passes 174 | stale 0 untracked 0 order 23 seq 0 unaligned 0 operand-bad 0/19237
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, merge-ahead, pf 0.5: stale pixels 4251, untracked stores 1560633, TLBI-before-leaf-store 3402 (stale S2 refills 3402), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/19505, spurious 0
+strict random, merge-ahead, pf 0.5        faults 19505 spurious 0 passes 159 | stale 4251 untracked 1560633 order 3402 seq 0 unaligned 0 operand-bad 0/19505
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, no elision, pf 0.5: stale pixels 149733, untracked stores 11721403, TLBI-before-leaf-store 38 (stale S2 refills 38), sequence violations 0, unaligned ipas2e1 0, fault-path TLBI operand mismatches 0/110, spurious 0
+strict random, no elision, pf 0.5         faults 110 spurious 0 passes 6 | stale 149733 untracked 11721403 order 38 seq 0 unaligned 0 operand-bad 0/110
+child failed (status 256)
+FAILED: 11 failure(s)
+== mutant no-barrier strict: fail (expected)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi sub: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 479, fault-path TLBI operand mismatches 479/2280, spurious 479
+strict reprotect small, tlbi sub          faults 2280 spurious 479 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 479 operand-bad 479/2280
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi all: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 479, fault-path TLBI operand mismatches 479/2280, spurious 479
+strict reprotect small, tlbi all          faults 2280 spurious 479 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 479 operand-bad 479/2280
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, tlbi far: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 479, fault-path TLBI operand mismatches 479/2280, spurious 479
+strict reprotect small, tlbi far          faults 2280 spurious 479 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 479 operand-bad 479/2280
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, 2x: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 447, fault-path TLBI operand mismatches 447/1383, spurious 447
+strict reprotect small, 2x                faults 1383 spurious 447 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 447 operand-bad 447/1383
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: reprotect small, merge-ahead: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 479, fault-path TLBI operand mismatches 479/2280, spurious 479
+strict reprotect small, merge-ahead       faults 2280 spurious 479 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 479 operand-bad 479/2280
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, sub, pf 0: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 1172, fault-path TLBI operand mismatches 1172/18841, spurious 1172
+strict random, sub, pf 0                  faults 18841 spurious 1172 passes 172 | stale 0 untracked 0 order 0 seq 0 unaligned 1172 operand-bad 1172/18841
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, sub, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 1142, fault-path TLBI operand mismatches 1142/19810, spurious 1142
+strict random, sub, pf 0.5                faults 19810 spurious 1142 passes 171 | stale 0 untracked 0 order 0 seq 0 unaligned 1142 operand-bad 1142/19810
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, 2x sub, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 891, fault-path TLBI operand mismatches 891/7269, spurious 891
+strict random, 2x sub, pf 0.5             faults 7269 spurious 891 passes 234 | stale 0 untracked 0 order 0 seq 0 unaligned 891 operand-bad 891/7269
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, all, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 1195, fault-path TLBI operand mismatches 1195/19825, spurious 1195
+strict random, all, pf 0.5                faults 19825 spurious 1195 passes 180 | stale 0 untracked 0 order 0 seq 0 unaligned 1195 operand-bad 1195/19825
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, merge-ahead, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 1295, fault-path TLBI operand mismatches 1295/21888, spurious 1295
+strict random, merge-ahead, pf 0.5        faults 21888 spurious 1295 passes 159 | stale 0 untracked 0 order 0 seq 0 unaligned 1295 operand-bad 1295/21888
+child failed (status 256)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:628: random, no elision, pf 0.5: stale pixels 0, untracked stores 0, TLBI-before-leaf-store 0 (stale S2 refills 0), sequence violations 0, unaligned ipas2e1 893, fault-path TLBI operand mismatches 893/7253, spurious 893
+strict random, no elision, pf 0.5         faults 7253 spurious 893 passes 234 | stale 0 untracked 0 order 0 seq 0 unaligned 893 operand-bad 893/7253
+child failed (status 256)
+FAILED: 11 failure(s)
+== mutant no-align strict: fail (expected)
+strict reprotect small, tlbi sub          faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict reprotect small, tlbi all          faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict reprotect small, tlbi far          faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict reprotect small, 2x                faults 1383 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/1383
+strict reprotect small, merge-ahead       faults 2280 spurious 0 passes 377 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/2280
+strict random, sub, pf 0                  faults 18841 spurious 0 passes 172 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/18841
+strict random, sub, pf 0.5                faults 19217 spurious 0 passes 173 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/19217
+strict random, 2x sub, pf 0.5             faults 7143 spurious 0 passes 227 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/7143
+strict random, all, pf 0.5                faults 19237 spurious 0 passes 174 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/19237
+strict random, merge-ahead, pf 0.5        faults 21713 spurious 0 passes 157 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/21713
+strict random, no elision, pf 0.5         faults 7144 spurious 0 passes 226 | stale 0 untracked 0 order 0 seq 0 unaligned 0 operand-bad 0/7144
+PASSED: 0 failure(s)
+== mutant no-print strict: pass (expected)

@@ -1,0 +1,39 @@
+new converter: fbec3de75ed38ac3  conv: 911e5bc7d631ffdb
+full-frame orig-sweep                   1000x600 stride 4160: first complete frame at 787.0 ms, bad=0
+full-frame orig-sweep-native-geom       3456x2234 stride 13824: first complete frame at 2930.4 ms, bad=0
+PASSED: 0 failure(s)
+colour: 2^24 values + 1M pairs + 2000 spans/2x spans bit-exact vs legacy formula
+full-frame sweep                        1000x600 stride 4160: first complete frame at 1.0 ms, bad=0
+full-frame sweep-native-geom(mid)       3456x2234 stride 13824: first complete frame at 101.3 ms, bad=0
+full-frame dirty-native-geom(mid)       3456x2234 stride 13824: first complete frame at 101.3 ms, bad=0
+full-frame dirty+scale2(mid)            1728x1117 stride 6912: first complete frame at 36.9 ms, bad=0
+random-dirty flags=2 tuning=0 pf=0.00: 3000 rects, partial passes; faults 17825 spurious 0 passes 145, stale after idle = 0, lost-update stores = 0
+random-dirty flags=6 tuning=0 pf=0.00: 3000 rects, partial passes; faults 6490 spurious 0 passes 191, stale after idle = 0, lost-update stores = 0
+random-dirty flags=2 tuning=0 pf=0.50: 3000 rects, partial passes; faults 17132 spurious 5647 passes 139, stale after idle = 0, lost-update stores = 0
+random-dirty flags=6 tuning=0 pf=0.50: 3000 rects, partial passes; faults 6332 spurious 2036 passes 188, stale after idle = 0, lost-update stores = 0
+scale2: 1-px guest checkerboard -> exact 2x2 native blocks, bad=0
+PASSED: 0 failure(s)
+colour: 2^24 values + 1M pairs + 2000 spans/2x spans bit-exact vs legacy formula
+diff spans (1x and 2x): 3000 x 4 random partial updates bit-exact, unchanged chunks never rewritten (2815430 chunks examined, 293535 written)
+full-frame sweep                        1000x600 stride 4160: first complete frame at 1.0 ms, bad=0
+full-frame sweep-native-geom(mid)       3456x2234 stride 13824: first complete frame at 95.7 ms, bad=0
+full-frame dirty-native-geom(mid)       3456x2234 stride 13824: first complete frame at 95.7 ms, bad=0
+full-frame dirty+scale2(mid)            1728x1117 stride 6912: first complete frame at 31.0 ms, bad=0
+random-dirty flags=2 tuning=0 pf=0.00: 3000 rects, partial passes; faults 19313 spurious 0 passes 172 merged 0, stale after idle = 0, lost-update stores = 0
+random-dirty flags=6 tuning=0 pf=0.00: 3000 rects, partial passes; faults 7194 spurious 0 passes 226 merged 0, stale after idle = 0, lost-update stores = 0
+random-dirty flags=2 tuning=0 pf=0.50: 3000 rects, partial passes; faults 19338 spurious 0 passes 178 merged 0, stale after idle = 0, lost-update stores = 0
+random-dirty flags=6 tuning=0 pf=0.50: 3000 rects, partial passes; faults 7368 spurious 0 passes 237 merged 0, stale after idle = 0, lost-update stores = 0
+random-dirty flags=2 tuning=0x10000000000 pf=0.50: 3000 rects, partial passes; faults 19028 spurious 0 passes 172 merged 0, stale after idle = 0, lost-update stores = 0
+random-dirty flags=2 tuning=0x20000000000 pf=0.50: 3000 rects, partial passes; faults 19548 spurious 6396 passes 171 merged 0, stale after idle = 0, lost-update stores = 0
+random-dirty flags=6 tuning=0x40000000000 pf=0.50: 3000 rects, partial passes; faults 7105 spurious 0 passes 229 merged 0, stale after idle = 0, lost-update stores = 0
+random-dirty flags=6 tuning=0x80000000000 pf=0.50: 3000 rects, partial passes; faults 7689 spurious 0 passes 210 merged 1086, stale after idle = 0, lost-update stores = 0
+random-dirty flags=2 tuning=0x80000000000 pf=0.50: 3000 rects, partial passes; faults 22347 spurious 0 passes 155 merged 5783, stale after idle = 0, lost-update stores = 0
+random-dirty flags=0 tuning=0 pf=0.00: 3000 rects, partial passes; faults 0 spurious 0 passes 1586 merged 0, stale after idle = 0, lost-update stores = 0
+pause accounting: 300 ms EL2 hold -> gap 300.1 ms, pass latency gross 300.7 ms / net 10.6 ms, stopped 298.1 ms; read-reset clears gap and net max
+scale2: 1-px guest checkerboard -> exact 2x2 native blocks, bad=0
+PASSED: 0 failure(s)
+reject unknown flag bit4: -1
+reject escalated budget 5000 us: -4
+reject tuning tlbi=3: -4
+reject tuning 0x100000000000: -4
+reject tuning 0x100000000000000: -4

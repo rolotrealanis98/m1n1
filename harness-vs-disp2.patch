@@ -1,0 +1,503 @@
+--- s1-resident-r3.2-disp2-20261110/harness/sim.c	2026-11-10 06:04:34
++++ s1-resident-r3.2-disp3-20261110/harness/sim.c	2026-11-10 08:50:08
+@@ -3,7 +3,8 @@
+  * Compiles the ACTUAL hv_win_fb.c of three trees against stubs (stub/hv/fbstub.h):
+  *   -DORIG : r3.2/r4.1 legacy raster sweep (sha c5f57839...), hv_win_fb_prepare(native, flags)
+  *   -DPREV : r3.2-disp (bin 053623c1) converter, the one the 2026-11-10 2x hardware run used
+- *   (none) : this tree (disp2)
++ *   -DPARENT: disp2 (bin ed252158), the parent of this build (same API as this tree, no ST_PRINT)
++ *   (none) : this tree (disp3); run.sh also builds mutants of it with one disp3 fix reverted
+  * with a simulated 1 GHz counter, a fake stage-2 write-protect table, a model of the guest's
+  * combined stage-1+2 TLB (4 KiB guest pages over 16 KiB stage-2 pages, read-only entries cached,
+  * optional speculative caching of the next 4 KiB page) and a memory cost model.
+@@ -12,6 +13,20 @@
+  * read / scanout byte written) is calibrated so that the PREV converter costs what the hardware
+  * run measured (136 us per 2x page); the read/write split is NOT known and is given as two
+  * bracketing scenarios. Fault cost, TLB refill cost and prefetch probability are assumptions.
++ *
++ * disp3, mode "strict": an adversarial stage-2 model on top of the combined-entry TLB:
++ *  - a stage-2 leaf store (hv_wp_set) is not visible to the table walker until the next DSB;
++ *  - stage-2-only TLB entries per 16 KiB page: filled on every walk (permission-faulting entries
++ *    included), removed by ipas2e1* / vmalls12e1*, NOT by vmalle1* or vaae1;
++ *  - a stage-2 invalidation issued while that page's leaf store is still invisible is followed by
++ *    a speculative walk that refills the entry from the OLD leaf (worst case the architecture allows);
++ *  - an ipas2e1* operand with IPA[13:12] != 0 matches no 16 KiB entry (a core that honours those
++ *    RES0 bits; the other legal behaviour, ignoring them, would hide the bug);
++ *  - guest VA = IPA + va_off (a linear mapping whose offset is 4 KiB- but not 16 KiB-aligned);
++ *  - at every return to the guest: no invisible leaf store, no TLBI without a later DSB, and an
++ *    ISB after that DSB (sequence check).
++ * It does NOT model cycles, real speculation, other CPUs, AT/HPFAR, non-linear guest mappings or
++ * the EL2&0 regime; barriers are ordering events only.
+  */
+ #include "stub/hv/fbstub.h"
+ #undef printf
+@@ -53,14 +68,23 @@
+ static u64 lines_base __attribute__((unused));
+ static u64 n_tlbi, n_tlbi_all, n_sysop;
+ static int print_on;
++static double print_ns;      /* disp3: modelled cost of one console line (0 = free, as before) */
++static u64 n_print_lines;
++static char last_line[2][512];
+ int stub_printf(const char *fmt, ...)
+ {
+-    if (!print_on)
+-        return 0;
+-    va_list ap;
++    va_list ap, aq;
+     va_start(ap, fmt);
+-    printf("    [EL2 console] ");
+-    int r = vprintf(fmt, ap);
++    va_copy(aq, ap);
++    vsnprintf(last_line[n_print_lines & 1], sizeof(last_line[0]), fmt, aq);
++    va_end(aq);
++    n_print_lines++;
++    sim_now += print_ns;
++    int r = 0;
++    if (print_on) {
++        printf("    [EL2 console] ");
++        r = vprintf(fmt, ap);
++    }
+     va_end(ap);
+     return r;
+ }
+@@ -74,11 +98,32 @@
+     return (u64)sim_now;
+ }
+ static void tlb_flush_all(void);
++/* disp3 strict stage-2 model state (see header) */
++static int strict;
++static u64 va_off;
++static unsigned char *wp_vis, *wp_pend, *s2tlb; /* walker-visible leaf RO?, store invisible?, cached S2 entry */
++static u64 n_pend;
++static int tlbi_open, isb_due;
++static u64 order_viol, seq_viol, stale_refill, s2_op_unaligned, win_bad, win_checked;
++static void s2_drain(void);
++static void s2_inval_all(void);
+ void stub_sysop(const char *s)
+ {
+     n_sysop++;
+-    if (strstr(s, "tlbi vmalle1") || strstr(s, "tlbi vmalls12e1"))
++    if (strict && strstr(s, "dsb")) {
++        s2_drain();
++        if (tlbi_open) { tlbi_open = 0; isb_due = 1; }
++    } else if (strict && strstr(s, "isb")) {
++        isb_due = 0;
++    }
++    if (strstr(s, "tlbi vmalls12e1")) {
++        if (strict) s2_inval_all();
+         tlb_flush_all();
++    } else if (strstr(s, "tlbi vmalle1")) {
++        tlb_flush_all(); /* stage-1 and combined entries only: stage-2-only entries survive */
++    }
++    if (strict && strstr(s, "tlbi") && !strstr(s, "alle2"))
++        tlbi_open = 1;
+ }
+ void dc_civac_range(void *p, size_t n) { (void)p; (void)n; }
+ static size_t heap_left = 256UL << 20;
+@@ -105,19 +150,59 @@
+ {
+     wp_base = ipa;
+     wp_pages = size >> 14;
+-    free(wp_ro);
++    free(wp_ro); free(wp_vis); free(wp_pend); free(s2tlb);
+     wp_ro = malloc(wp_pages);
++    wp_vis = malloc(wp_pages);
++    wp_pend = calloc(wp_pages, 1);
++    s2tlb = calloc(wp_pages, 1);
+     memset(wp_ro, 1, wp_pages);
++    memset(wp_vis, 1, wp_pages); /* the real hv_wp_prepare ends with dsb ishst */
++    n_pend = 0;
+     return (int)wp_pages;
+ }
+ int hv_wp_set(u64 ipa, bool w)
+ {
+     if (ipa < wp_base || ((ipa - wp_base) >> 14) >= wp_pages || (ipa & 0x3fff))
+         abort();
+-    wp_ro[(ipa - wp_base) >> 14] = !w;
++    u64 pg = (ipa - wp_base) >> 14;
++    wp_ro[pg] = !w;
++    if (!strict)
++        wp_vis[pg] = !w;
++    else if (!wp_pend[pg] && wp_vis[pg] != wp_ro[pg]) {
++        wp_pend[pg] = 1; /* plain store: the walker sees it only after a DSB */
++        n_pend++;
++    }
+     return 0;
+ }
+-bool hv_xt_fault_ipa(struct exc_info *c, bool s1, bool w, u64 *ipa) { (void)s1; (void)w; *ipa = c->far; return true; }
++static void s2_drain(void)
++{
++    if (!n_pend) return;
++    for (u64 i = 0; i < wp_pages; i++)
++        if (wp_pend[i]) { wp_pend[i] = 0; wp_vis[i] = wp_ro[i]; }
++    n_pend = 0;
++}
++static void s2_inval_page(u64 pg)
++{
++    if (wp_pend[pg]) { /* TLBI overtook the leaf store: a walk refills from the old leaf */
++        order_viol++;
++        stale_refill++;
++        s2tlb[pg] = wp_vis[pg] ? 1 : 2;
++    } else {
++        s2tlb[pg] = 0;
++    }
++}
++static void s2_inval_all(void) { for (u64 i = 0; i < wp_pages; i++) s2_inval_page(i); }
++static unsigned char s2_walk(u64 pg) /* 1 = RO, 2 = RW */
++{
++    if (!strict) return wp_ro[pg] ? 1 : 2;
++    if (!s2tlb[pg]) s2tlb[pg] = wp_vis[pg] ? 1 : 2;
++    return s2tlb[pg];
++}
++static void seq_check(void) /* at every return to the guest */
++{
++    if (strict && (n_pend || tlbi_open || isb_due)) seq_viol++;
++}
++bool hv_xt_fault_ipa(struct exc_info *c, bool s1, bool w, u64 *ipa) { (void)s1; (void)w; *ipa = c->far - va_off; return true; }
+ 
+ /* ---- guest TLB model: combined entries per 4 KiB guest page of the shadow (VA == IPA here) ----
+  * 0 = none, 1 = read-only (a walk while stage 2 was RO: such entries may be cached), 2 = RW.
+@@ -129,15 +214,35 @@
+ static double p_pf;
+ static u64 stale_rw; /* store that went through on a cached RW entry while stage 2 was RO: lost update */
+ static void tlb_flush_all(void) { if (tlb) memset(tlb, 0, tlb_n); }
+-void hv_xt_tlbi(bool b) { (void)b; n_tlbi_all++; tlb_flush_all(); }
++void hv_xt_tlbi(bool b) /* dsb ishst; tlbi vmalls12e1(is); dsb; isb */
++{
++    (void)b;
++    n_tlbi_all++;
++    if (strict) { s2_drain(); s2_inval_all(); }
++    tlb_flush_all();
++}
++static u64 log_vaae1[8], log_ipas2;
++static int n_log_vaae1, n_log_ipas2;
+ void stub_tlbi(const char *op, u64 v)
+ {
+     n_tlbi++;
++    if (strict) tlbi_open = 1;
+     if (tlb && !strcmp(op, "vaae1")) {
+-        u64 base = wp_base >> 12;
++        if (n_log_vaae1 < 8) log_vaae1[n_log_vaae1] = v;
++        n_log_vaae1++;
++        u64 base = (wp_base + va_off) >> 12; /* stage-1 entries are per guest VA page */
+         if (v >= base && v - base < tlb_n)
+             tlb[v - base] = 0;
+     }
++    if (strict && !strncmp(op, "ipas2e1", 7)) {
++        log_ipas2 = v;
++        n_log_ipas2++;
++        u64 base = wp_base >> 12;
++        if (v & 3)
++            s2_op_unaligned++; /* IPA[13:12] set: matches no 16 KiB stage-2 entry (see header) */
++        else if (v >= base && ((v - base) >> 2) < wp_pages)
++            s2_inval_page((v - base) >> 2);
++    }
+ }
+ static u64 rng = 0x9e3779b97f4a7c15ULL;
+ static u32 rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (u32)rng; }
+@@ -160,6 +265,7 @@
+ static u64 flags_used;
+ static double next_tick;
+ static u64 faults_seen, guest_faults;
++static u64 tlbi_mode_used;
+ 
+ static int setup(u32 w, u32 h, u32 stride, u64 flags, u64 tuning)
+ {
+@@ -178,6 +284,7 @@
+     cur_boot_args.video.depth = 30 | 0x10000; /* retina flag above the low byte */
+     sim_now = 0;
+     flags_used = flags;
++    tlbi_mode_used = (tuning >> 40) & 3;
+ #ifdef ORIG
+     (void)tuning;
+     s64 r = hv_win_fb_prepare((u64)native, flags);
+@@ -221,9 +328,9 @@
+         for (int tries = 0;; tries++) {
+             unsigned char e = tlb[vp];
+             if (!e) {
+-                e = tlb[vp] = wp_ro[pg] ? 1 : 2;
++                e = tlb[vp] = s2_walk(pg);
+                 if (p_pf > 0 && vp + 1 < tlb_n && !tlb[vp + 1] && rnd01() < p_pf)
+-                    tlb[vp + 1] = wp_ro[(vp + 1) >> 2] ? 1 : 2;
++                    tlb[vp + 1] = s2_walk((vp + 1) >> 2);
+             }
+             if (e == 2) {
+                 if (wp_ro[pg])
+@@ -231,8 +338,27 @@
+                 break;
+             }
+             /* read-only entry: permission fault (real if stage 2 is RO, spurious otherwise) */
+-            struct exc_info c = {a, 0x0c | BIT(6), 0};
++            struct exc_info c = {a + va_off, 0x0c | BIT(6), 0};
++            u64 f_before = strict ? hv_win_fb_stat(15) : 0;
++            n_log_vaae1 = n_log_ipas2 = 0;
+             bool ok = hv_win_fb_handle_dabort(&c, c.esr);
++            seq_check();
++            if (strict && ok && hv_win_fb_stat(15) != f_before) {
++                /* a real fault: the fault-path TLBIs must name exactly the faulting 16 KiB IPA
++                 * page (aligned) and, in sub mode, exactly its four 4 KiB VAs */
++                u64 pipa = wp_base + (pg << 14), bad = n_log_ipas2 != 1 || log_ipas2 != pipa >> 12;
++                if (tlbi_mode_used == 0) {
++                    u64 seen = 0;
++                    bad |= n_log_vaae1 != 4;
++                    for (int k = 0; k < n_log_vaae1 && k < 8; k++) {
++                        u64 d = log_vaae1[k] - ((pipa + va_off) >> 12);
++                        if (d < 4) seen |= 1u << d; else bad = 1;
++                    }
++                    bad |= seen != 0xf;
++                }
++                win_checked++;
++                win_bad += bad != 0;
++            }
+             if (!ok || tries > 6) {
+                 printf("FATAL: fault not handled (ok=%d tries=%d)\n", ok, tries);
+                 exit(2);
+@@ -270,6 +396,7 @@
+ #else
+     hv_win_fb_tick();
+ #endif
++    seq_check();
+     busy_ns += sim_now - t0;
+     next_tick = sim_now + 1e6; /* hv_arm_tick re-arms 1 ms after the tick ends */
+ }
+@@ -483,8 +610,97 @@
+           (unsigned long long)g3, (unsigned long long)n2, (unsigned long long)n3);
+     printf("pause accounting: 300 ms EL2 hold -> gap %.1f ms, pass latency gross %.1f ms / net %.1f ms, stopped %.1f ms; "
+            "read-reset clears gap and net max\n", gap / 1e6, gross / 1e6, net / 1e6, stop / 1e6);
++    teardown();
++}
++#endif
++
++#ifdef NEW
++/* ---- disp3 tests ---- */
++static void strict_report(const char *name, u64 bad, int want_no_spurious)
++{
++    u64 sp = hv_win_fb_stat(32);
++    CHECK(bad == 0 && stale_rw == 0 && order_viol == 0 && seq_viol == 0 && s2_op_unaligned == 0 && win_bad == 0 &&
++          (!want_no_spurious || sp == 0),
++          "%s: stale pixels %llu, untracked stores %llu, TLBI-before-leaf-store %llu (stale S2 refills %llu), "
++          "sequence violations %llu, unaligned ipas2e1 %llu, fault-path TLBI operand mismatches %llu/%llu, spurious %llu",
++          name, (unsigned long long)bad, (unsigned long long)stale_rw, (unsigned long long)order_viol,
++          (unsigned long long)stale_refill, (unsigned long long)seq_viol, (unsigned long long)s2_op_unaligned,
++          (unsigned long long)win_bad, (unsigned long long)win_checked, (unsigned long long)sp);
++    printf("strict %-34s faults %llu spurious %llu passes %llu | stale %llu untracked %llu order %llu seq %llu "
++           "unaligned %llu operand-bad %llu/%llu\n", name, (unsigned long long)hv_win_fb_stat(15),
++           (unsigned long long)sp, (unsigned long long)hv_win_fb_stat(16), (unsigned long long)bad,
++           (unsigned long long)stale_rw, (unsigned long long)order_viol, (unsigned long long)seq_viol,
++           (unsigned long long)s2_op_unaligned, (unsigned long long)win_bad, (unsigned long long)win_checked);
++}
++
++/* M1: small-pass re-protect. Dirty a few pages, let the pass re-protect them (<= 32 pages: the
++ * per-IPA path), then store to the same pages again: every second store must fault and be shown. */
++static void test_strict_reprotect(const char *name, u64 flags, u64 tuning)
++{
++    strict = 1; va_off = 0x5000; p_pf = 0;
++    int r = setup(1000, 600, 4160, flags, tuning);
++    CHECK(r == 1, "setup %d", r);
++    run_until_idle(5e9);
++    for (int it = 0; it < 300; it++) {
++        u32 x = rnd() % (GW - 8), y = rnd() % (GH - 12), v = rnd();
++        guest_rect(x, y, 8, 12, v);           /* 12 rows x 4160 B: 3-5 x 16 KiB pages, 4 KiB sub-pages vary */
++        run_until_idle(1e9);                  /* pass converts and re-protects them (small pass) */
++        guest_rect(x, y, 8, 12, v ^ 0x00ffffff); /* must fault again */
++        if (it % 4 == 0) run_until_idle(1e9);
++    }
++    run_until_idle(5e9);
++    strict_report(name, verify_full(), tlbi_mode_used != 2);
++    teardown();
++}
++
++static void test_strict_random(const char *name, u64 flags, u64 tuning, double pf)
++{
++    strict = 1; va_off = 0x5000; p_pf = pf;
++    int r = setup(1000, 600, 4160, flags, tuning);
++    CHECK(r == 1, "setup %d", r);
++    run_until_idle(5e9);
++    for (int ev = 0; ev < 3000; ev++) {
++        u32 x = rnd() % GW, y = rnd() % GH, w = 1 + rnd() % 200, h = 1 + rnd() % 100;
++        guest_rect(x, y, w, h, rnd());
++        if (rnd() % 3 == 0) { sim_now = sim_now > next_tick ? sim_now : next_tick; do_tick(); }
++    }
++    run_until_idle(10e9);
++    strict_report(name, verify_full(), tlbi_mode_used != 2);
+     teardown();
+ }
++
++/* L2: the time spent printing FBS/FBS2 lines is busy time, its own counter (stat 77, print_us) and
++ * not a gap. Model: 40 us per console line, stats every 1 s, idle guest (ticks do no other work). */
++static void test_print_accounting(void)
++{
++    p_pf = 0;
++    int r = setup(1000, 600, 4160, 2, 1ULL << 48);
++    CHECK(r == 1, "setup %d", r);
++    run_until_idle(3e9);
++    print_ns = 40000;
++    hv_win_fb_stat(51 | 0x100);
++    hv_win_fb_stat(76 | 0x100);
++    u64 b0 = hv_win_fb_stat(30), p0 = hv_win_fb_stat(77), l0 = n_print_lines;
++    double t_end = sim_now + 5.5e9;
++    while (sim_now < t_end) { sim_now = next_tick; do_tick(); }
++    u64 lines = n_print_lines - l0, db = hv_win_fb_stat(30) - b0, dp = hv_win_fb_stat(77) - p0;
++    u64 tick = hv_win_fb_stat(76), gap = hv_win_fb_stat(51), want = lines / 2 * 80000;
++    /* the latest FBS line reports print_us cumulative up to the previous print */
++    const char *fbs = strstr(last_line[0], "FBS ") ? last_line[0] : last_line[1];
++    const char *pu = strstr(fbs, "print_us=");
++    u64 shown = pu ? strtoull(pu + 9, NULL, 10) : ~0ULL;
++    u64 now77 = hv_win_fb_stat(77);
++    CHECK(lines >= 10 && dp == want && db == want && tick >= 80000 && gap <= 1000000 + 1000 &&
++          shown == (now77 - 80000) / 1000,
++          "print accounting: %llu lines, d_print %llu d_busy %llu (want %llu), tick_max %llu, gap_max %llu, "
++          "FBS print_us %llu (want %llu)", (unsigned long long)lines, (unsigned long long)dp,
++          (unsigned long long)db, (unsigned long long)want, (unsigned long long)tick, (unsigned long long)gap,
++          (unsigned long long)shown, (unsigned long long)((now77 - 80000) / 1000));
++    printf("print accounting: %llu console lines at 40 us -> print %.0f us, busy +%.0f us, tick_max %.0f us, "
++           "gap_max %.3f ms, FBS print_us=%llu\n", (unsigned long long)lines, dp / 1e3, db / 1e3, tick / 1e3,
++           gap / 1e6, (unsigned long long)shown);
++    teardown();
++}
+ #endif
+ 
+ /* ---------------- workloads ---------------- */
+@@ -705,8 +921,10 @@
+     return "orig";
+ #elif defined(PREV)
+     return "r3.2-disp";
+-#else
++#elif defined(PARENT)
+     return "disp2";
++#else
++    return "disp3";
+ #endif
+ }
+ 
+@@ -828,6 +1046,30 @@
+         printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+         return failures != 0;
+     }
++#ifdef NEW
++    if (!strcmp(what, "strict")) { /* disp3: M1 barrier and L1 alignment under the strict stage-2 model */
++        rd_ns_per_b = 1.4; wr_ns_per_b = 0.1;
++        CHILD(test_strict_reprotect("reprotect small, tlbi sub", 2, 0));
++        CHILD(test_strict_reprotect("reprotect small, tlbi all", 2, 1ULL << 40));
++        CHILD(test_strict_reprotect("reprotect small, tlbi far", 2, 2ULL << 40));
++        CHILD(test_strict_reprotect("reprotect small, 2x", 6, 0));
++        CHILD(test_strict_reprotect("reprotect small, merge-ahead", 2, 1ULL << 43));
++        CHILD(test_strict_random("random, sub, pf 0", 2, 0, 0));
++        CHILD(test_strict_random("random, sub, pf 0.5", 2, 0, 0.5));
++        CHILD(test_strict_random("random, 2x sub, pf 0.5", 6, 0, 0.5));
++        CHILD(test_strict_random("random, all, pf 0.5", 2, 1ULL << 40, 0.5));
++        CHILD(test_strict_random("random, merge-ahead, pf 0.5", 2, 1ULL << 43, 0.5));
++        CHILD(test_strict_random("random, no elision, pf 0.5", 6, 1ULL << 42, 0.5));
++        printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
++        return failures != 0;
++    }
++    if (!strcmp(what, "print")) { /* disp3: L2 */
++        rd_ns_per_b = 1.4; wr_ns_per_b = 0.1;
++        CHILD(test_print_accounting());
++        printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
++        return failures != 0;
++    }
++#endif
+     if (!strcmp(what, "reject")) {
+ #ifndef ORIG
+         int r = setup(3456, 2234, 13824, 0x10, 0);
+--- s1-resident-r3.2-disp2-20261110/harness/run.sh	2026-11-10 05:57:54
++++ s1-resident-r3.2-disp3-20261110/harness/run.sh	2026-11-10 08:51:15
+@@ -1,23 +1,47 @@
+ #!/bin/sh
+-# Host harness, second round. Builds the ACTUAL converter of three trees against the same stubs:
+-#   orig = r3.2/r4.1 legacy sweep (c5f57839), prev = r3.2-disp (bin 053623c1, the 2026-11-10 2x run),
+-#   new  = this tree (disp2). Host-only; no device access.
+-# Usage: ./run.sh [test|work|card|all]   (outputs: test.out, work.out, card.out when run via all)
++# Host harness, disp3. Builds the ACTUAL converter of several trees against the same stubs:
++#   orig   = r3.2/r4.1 legacy sweep (c5f57839), prev = r3.2-disp (bin 053623c1),
++#   parent = disp2 (bin ed252158, read-only parent tree), new = this tree (disp3),
++#   and three mutants of new, each with exactly one disp3 fix reverted (sed, verified to apply once):
++#     mut_nobarrier  (M1: no dsb ishst before the small-pass ipas2e1is)
++#     mut_noalign    (L1: fault-path ipas2e1 operand not aligned to the 16 KiB page)
++#     mut_noprint    (L2: print time not added to busy)
++# Host-only; no device access.
++# Usage: ./run.sh [test|strict|print|work|card|all]
++#   "strict" and "print" require new to PASS and parent + the matching mutant to FAIL (the new tests
++#   catch each reverted fix); the script exits 1 otherwise.
+ set -eu
+ H=$(cd "$(dirname "$0")" && pwd)
+ D=$(dirname "$H")
+ B="$H/build"
+ PREV_TREE=${PREV_TREE:-"$D/../s1-resident-r3.2-disp-20261109/source"}
++PARENT_TREE=${PARENT_TREE:-"$D/../s1-resident-r3.2-disp2-20261110/source"}
+ ORIG_FB=${ORIG_FB:-"$D/../../display/improve-20261109/orig/src/hv/win/hv_win_fb.c"}
+-rm -rf "$B"; mkdir -p "$B/orig/hv/win" "$B/prev/hv/win" "$B/new/hv/win"
+-for v in orig prev new; do cp -R "$H/stub/hv/." "$B/$v/hv/"; done
++V="orig prev parent new mut_nobarrier mut_noalign mut_noprint"
++rm -rf "$B"
++for v in $V; do mkdir -p "$B/$v/hv/win"; cp -R "$H/stub/hv/." "$B/$v/hv/"; done
+ cp "$ORIG_FB" "$B/orig/hv/win/hv_win_fb.c"
+ cp "$PREV_TREE/src/hv/win/hv_win_fb.c" "$PREV_TREE/src/hv/win/hv_win_fb_conv.h" "$B/prev/hv/win/"
+-cp "$D/source/src/hv/win/hv_win_fb.c" "$D/source/src/hv/win/hv_win_fb_conv.h" "$B/new/hv/win/"
++cp "$PARENT_TREE/src/hv/win/hv_win_fb.c" "$PARENT_TREE/src/hv/win/hv_win_fb_conv.h" "$B/parent/hv/win/"
++for v in new mut_nobarrier mut_noalign mut_noprint; do
++  cp "$D/source/src/hv/win/hv_win_fb.c" "$D/source/src/hv/win/hv_win_fb_conv.h" "$B/$v/hv/win/"
++done
+ chk() { test "$(shasum -a 256 "$1" | cut -d' ' -f1)" = "$2" || { echo "hash mismatch: $1"; exit 1; }; }
+ chk "$B/orig/hv/win/hv_win_fb.c" c5f5783928c1922aca747e0771a3ce85f6a9f90b020544ef50cdf554f2d3262a
+ chk "$B/prev/hv/win/hv_win_fb.c" 8598bd0195ff2f220b4cace30c5296e9237ee20c6d6bf046ae107006354dc1ac
+ chk "$B/prev/hv/win/hv_win_fb_conv.h" d0afb111a6a8f141515318e312c0e1485e19cb120e991a478ccf5c8ab6850b46
++chk "$B/parent/hv/win/hv_win_fb.c" c43fc76d3de70508a156cf563df00394f2ecfa76d28ac92c9f3f233efc68af2b
++chk "$B/parent/hv/win/hv_win_fb_conv.h" 911e5bc7d631ffdbc5fae6f456090ea957e626adfe6afbbdf946aa05470203e3
++# mutants: each sed must change exactly one line of this tree's converter
++mut() { # variant, sed expression
++  f="$B/$1/hv/win/hv_win_fb.c"
++  sed "$2" "$D/source/src/hv/win/hv_win_fb.c" > "$f"
++  n=$(diff "$D/source/src/hv/win/hv_win_fb.c" "$f" | grep -c '^[<>]' || true)
++  test "$n" -ge 1 -a "$n" -le 2 || { echo "mutant $1 did not apply cleanly ($n diff lines)"; exit 1; }
++}
++mut mut_nobarrier '/^            sysop("dsb ishst");$/d'
++mut mut_noalign 's/((ipa & ~(FB_PAGE - 1)) >> 12)/(ipa >> 12)/'
++mut mut_noprint '/^        win_fb.busy += after - now;$/d'
+ echo "new converter: $(shasum -a 256 "$B/new/hv/win/hv_win_fb.c" | cut -c1-16)  conv: $(shasum -a 256 "$B/new/hv/win/hv_win_fb_conv.h" | cut -c1-16)"
+ CC=${CC:-cc}
+ W="-std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-include-next-absolute-path"
+@@ -28,9 +52,17 @@
+ }
+ bld sim_orig_san "-DORIG -Wno-unused" orig "$SAN"; bld sim_orig "-DORIG -Wno-unused" orig "$FAST"
+ bld sim_prev_san -DPREV prev "$SAN"; bld sim_prev -DPREV prev "$FAST"
++bld sim_parent_san -DPARENT parent "$SAN"
+ bld sim_new_san "" new "$SAN";       bld sim_new "" new "$FAST"
++for m in mut_nobarrier mut_noalign mut_noprint; do bld "sim_${m}_san" "" "$m" "$SAN"; done
+ $CC $W -O2 -mgeneral-regs-only -I"$B/new/hv/win" -o "$B/bench" "$H/bench.c" 2>/dev/null || \
+   $CC $W -O2 -I"$B/new/hv/win" -o "$B/bench" "$H/bench.c"
++bad=0
++expect() { # pass|fail, label, command...
++  want=$1; label=$2; shift 2
++  if "$@"; then got=pass; else got=fail; fi
++  if [ "$got" = "$want" ]; then echo "== $label: $got (expected)"; else echo "== $label: $got (UNEXPECTED, wanted $want)"; bad=1; fi
++}
+ what=${1:-all}
+ if [ "$what" = test ] || [ "$what" = all ]; then
+   "$B/sim_orig_san" test
+@@ -42,6 +74,19 @@
+   "$B/sim_new_san" reject-tuning2 0x100000000000   # bit 44 reserved
+   "$B/sim_new_san" reject-tuning2 0x100000000000000 # bit 56 reserved
+ fi
++if [ "$what" = strict ] || [ "$what" = all ]; then
++  expect pass "disp3 strict"                "$B/sim_new_san" strict
++  expect fail "disp2 parent strict"         "$B/sim_parent_san" strict
++  expect fail "mutant no-barrier strict"    "$B/sim_mut_nobarrier_san" strict
++  expect fail "mutant no-align strict"      "$B/sim_mut_noalign_san" strict
++  expect pass "mutant no-print strict"      "$B/sim_mut_noprint_san" strict
++fi
++if [ "$what" = print ] || [ "$what" = all ]; then
++  expect pass "disp3 print"                 "$B/sim_new_san" print
++  expect fail "disp2 parent print"          "$B/sim_parent_san" print
++  expect fail "mutant no-print print"       "$B/sim_mut_noprint_san" print
++  expect pass "mutant no-barrier print"     "$B/sim_mut_nobarrier_san" print
++fi
+ if [ "$what" = work ] || [ "$what" = all ]; then
+   "$B/bench"
+   "$B/sim_prev" work
+@@ -51,3 +96,4 @@
+   "$B/sim_prev" card
+   "$B/sim_new" card
+ fi
++exit $bad
