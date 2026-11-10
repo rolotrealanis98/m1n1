@@ -20,4 +20,6 @@ source/.buildshim/librust.a
 harness/build/
 *.dSYM/
 source/tests/*/test_*
-!source/tests/*/test_*.*
+!source/tests/*/test_*.[chS]
+!source/tests/*/test_*.py
+*.dSYM/
