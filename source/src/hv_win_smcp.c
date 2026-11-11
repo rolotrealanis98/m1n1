@@ -34,12 +34,14 @@ static rtkit_dev_t *smc_rtk;
 static volatile u8 *shmem;
 static bool attempted, exposed, retired, irq_level, power_done;
 static u32 rec_flags;
+static u32 guest_reads, guest_writes, irq_raises; /* evidence that Windows evaluated the ACPI methods */
 
 static void update_irq(void)
 {
     bool level = exposed && !retired && smcp_irq(&core);
     if (level != irq_level) {
         irq_level = level;
+        irq_raises += level;
         hv_vgic3_set_spi_level(SMCP_GSIV, level);
     }
 }
@@ -117,6 +119,10 @@ static bool access_page(struct exc_info *ctx, u64 address, u64 *value, bool writ
         if (width == 4)
             value[1] = 0;
     }
+    if (write)
+        guest_writes++;
+    else
+        guest_reads++;
     if (exposed && width == 2 && !(off & 3)) {
         if (write)
             smcp_reg_write(&core, off, (u32)*value);
@@ -197,12 +203,21 @@ s64 hv_win_smcp_configure(u64 version, u64 flags)
     return smcp_failed(&core) ? -3 : 0;
 }
 
+#define SMCP_STAT_PERIOD_US 30000000u /* one console line every 30 s while the guest runs */
+
 void hv_win_smcp_tick(void)
 {
+    static u64 next_stat;
     if (!exposed || retired || smp_id() != boot_cpu_idx)
         return;
     smcp_tick(&core);
     update_irq();
+    u64 t = ticks_to_usecs(get_ticks());
+    if (t >= next_stat) {
+        if (next_stat)
+            hv_win_smcp_stat();
+        next_stat = t + SMCP_STAT_PERIOD_US;
+    }
 }
 
 void hv_win_smcp_retire(void)
@@ -218,14 +233,15 @@ s64 hv_win_smcp_stat(void)
     if (!exposed)
         return -1;
     printf("HV/win SMCP: status 0x%x seq %u pending 0x%x enable 0x%x pwrb %u errors %u (last %08x) timeouts %u "
-           "notif %u bst %x/%u/%u/%u psr %u lid %u tcmb %u\n",
+           "notif %u bst %x/%u/%u/%u psr %u lid %u tcmb %u guest r/w %u/%u irq %u\n",
            smcp_reg_read(&core, SMCP_R_STATUS), smcp_reg_read(&core, SMCP_R_SEQ),
            smcp_reg_read(&core, SMCP_R_EVT_PENDING), smcp_reg_read(&core, SMCP_R_EVT_ENABLE),
            smcp_reg_read(&core, SMCP_R_PWRB_COUNT), smcp_reg_read(&core, SMCP_R_ERR_COUNT),
            smcp_reg_read(&core, SMCP_R_LAST_ERR), smcp_reg_read(&core, SMCP_R_TIMEOUTS), core.notifications,
            smcp_reg_read(&core, SMCP_R_BST_STATE), smcp_reg_read(&core, SMCP_R_BST_RATE),
            smcp_reg_read(&core, SMCP_R_BST_REMAIN), smcp_reg_read(&core, SMCP_R_BST_VOLTAGE),
-           smcp_reg_read(&core, SMCP_R_PSR), smcp_reg_read(&core, SMCP_R_LID), smcp_reg_read(&core, SMCP_R_TEMP0));
+           smcp_reg_read(&core, SMCP_R_PSR), smcp_reg_read(&core, SMCP_R_LID), smcp_reg_read(&core, SMCP_R_TEMP0),
+           guest_reads, guest_writes, irq_raises);
     return smcp_reg_read(&core, SMCP_R_STATUS);
 }
 
@@ -261,6 +277,8 @@ s64 hv_win_smcp_power(u64 action)
 
 void hv_win_smcp_after_exit(void)
 {
+    if (exposed)
+        hv_win_smcp_stat(); /* one line at every guest exit: the run's evidence */
     if (!(rec_flags & SMCP_REC_F_POWER_ACTIONS))
         return;
     if (hv_win.exit_reason == HV_WIN_EXIT_SYSTEM_OFF)
