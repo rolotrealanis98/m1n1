@@ -73,13 +73,37 @@ cfgm, _ = run_windows.dvfs_plan(adt, vcpus, fixed={"P": 10})
 check("fixed P only: M clusters keep p1..p15", [struct.unpack_from("<II", cfgm, 56 + 144 * i + 8) for i in range(3)]
       == [(1, 15), (1, 15), (10, 10)])
 
+# --cpu-dvfs governor
+a = parse(["--cpu-dvfs", "governor"])
+check("--cpu-dvfs governor (uniform classes) accepted", a is not None and a.cpu_dvfs == "governor" and
+      a.dvfs_fixed["max"] == {"M": 12, "P": 14} and a.dvfs_fixed["floor"] == {"M": 2, "P": 2})
+a = parse(["--cpu-dvfs", "governor:max=M15,P17,mid=M8,P10"])
+check("--cpu-dvfs governor:max=M15,P17,mid=M8,P10", a is not None and a.dvfs_fixed["max"] == {"M": 15, "P": 17}
+      and a.dvfs_fixed["mid"] == {"M": 8, "P": 10})
+for bad in ["governor:max=M16", "governor:max=P18", "governor:floor=M7,mid=M6", "governor:speed=M3",
+            "governor:M12", "governor:max=X3", "governor:floor=M12,max=M12", "governor:max=Mx"]:
+    check(f"--cpu-dvfs {bad} refused", parse(["--cpu-dvfs", bad]) is None)
+adt, vcpus = j716s()
+gv = run_windows.parse_governor("max=M15,P17")
+cfgg, _ = run_windows.dvfs_plan(adt, vcpus, governor=gv)
+g = struct.unpack_from("<7I4I4I3iI", cfgg, 632)
+check("governor block: enabled, 10 ms, 60/25 %, 2/5/20 periods", g[:7] == (1, 10000, 60, 25, 2, 5, 20))
+check("governor block: mid 6/6/6, safe ceiling 12/12/14 when max is above it", g[7:10] == (6, 6, 6) and
+      g[11:14] == (12, 12, 14))
+check("governor block: hot 95 / crit 100 / release 90 C", g[15:18] == (95000, 100000, 90000))
+check("governor clusters: floor p2, max p15/p15/p17", [struct.unpack_from("<II", cfgg, 56 + 144 * i + 8) for i in range(3)]
+      == [(2, 15), (2, 15), (2, 17)])
+cfgd, _ = run_windows.dvfs_plan(adt, vcpus, governor=run_windows.parse_governor(""))
+check("default governor: safe ceiling = max (12/12/14)", struct.unpack_from("<4I", cfgd, 632 + 44)[:3] == (12, 12, 14))
+
 # the config
 adt, vcpus = j716s()
 cfg, lines = run_windows.dvfs_plan(adt, vcpus)
-check("config is 632 bytes", len(cfg) == 632)
+check("config is 712 bytes (version 2)", len(cfg) == 712)
 magic, ver, ncl, ncpu, interval = struct.unpack_from("<IIIIQ", cfg)
-check("header: magic DVFS, v1, 3 clusters, 18 CPUs, 1 ms", (magic, ver, ncl, ncpu, interval) ==
-      (0x53465644, 1, 3, 18, 1000000))
+check("header: magic DVFS, v2, 3 clusters, 18 CPUs, 1 ms", (magic, ver, ncl, ncpu, interval) ==
+      (0x53465644, 2, 3, 18, 1000000))
+check("no governor: governor block all zero", cfg[632:] == bytes(80))
 check("cluster_of: 0 x6, 1 x6, 2 x6", list(cfg[24:42]) == [0] * 6 + [1] * 6 + [2] * 6 and cfg[42:56] == bytes(14))
 cl = [struct.unpack_from("<QII32I", cfg, 56 + 144 * i) for i in range(4)]
 check("bases mc0 / mc1 / pc", [c[0] for c in cl[:3]] == [0x210e20000, 0x211e20000, 0x212e20000])
@@ -127,6 +151,7 @@ except run_windows.PlanError:
 if len(ARGV) == 3 and ARGV[1] == "--write":
     adt, vcpus = j716s()
     pathlib.Path(ARGV[2]).write_bytes(run_windows.dvfs_plan(adt, vcpus)[0])
+    pathlib.Path(ARGV[2] + ".gov").write_bytes(run_windows.dvfs_plan(adt, vcpus, governor=run_windows.parse_governor(""))[0])
 
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)

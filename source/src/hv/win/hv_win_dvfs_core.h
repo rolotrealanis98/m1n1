@@ -41,7 +41,29 @@
 #define DVFS_MIN_INTERVAL_NS 1000000UL /* default rate limit: one write per cluster per ms */
 
 #define DVFS_CFG_MAGIC   0x53465644U /* "DVFS" */
-#define DVFS_CFG_VERSION 1
+#define DVFS_CFG_VERSION 2 /* cpuperf-G: + struct dvfs_gov_cfg */
+#define DVFS_TEMP_UNKNOWN (-2147483647 - 1)
+
+/*
+ * cpuperf-G governor (--cpu-dvfs governor): per cluster, every period, util = the busiest online vCPU's
+ * non-WFI share of the period (from the resident's trapped-WFI time). Levels floor < mid < ceiling:
+ *   util >= up_pct for up_periods        -> ceiling (fast up)
+ *   at floor, util >= down_pct for mid_periods -> mid
+ *   util < down_pct for down_periods     -> one level down (slow down; the count restarts per step)
+ * Thermal guard (only with a temperature source): temp >= hot -> ceiling capped at mid, >= crit -> floor,
+ * released below release. Without a temperature the ceiling is capped at safe_ceiling. The write itself is
+ * dvfs_service's (same single Linux CMD write, rate limit, clamp, latch).
+ */
+struct dvfs_gov_cfg {
+    u32 enabled;
+    u32 period_us;
+    u32 up_pct, down_pct;
+    u32 up_periods, mid_periods, down_periods;
+    u32 mid[DVFS_MAX_CLUSTERS];          /* floor = cluster pmin, ceiling = cluster pmax */
+    u32 safe_ceiling[DVFS_MAX_CLUSTERS]; /* ceiling used when no temperature is available */
+    s32 temp_hot_mc, temp_crit_mc, temp_release_mc;
+    u32 reserved;
+};
 
 /* Launcher -> EL2 configuration (P_HV_WIN_CPPC_DVFS), little endian, packed by construction. */
 struct dvfs_cfg_cluster {
@@ -55,6 +77,7 @@ struct dvfs_cfg {
     u64 min_interval_ns;
     u8 cluster_of[DVFS_MAX_CPUS]; /* vCPU i (= ACPI UID i = CPPC slot i) -> cluster index */
     struct dvfs_cfg_cluster c[DVFS_MAX_CLUSTERS];
+    struct dvfs_gov_cfg gov;
 };
 
 struct dvfs_io {
@@ -84,6 +107,10 @@ struct dvfs_cluster {
     u64 fail_cmd;
     u64 writes, busy_ticks, rate_limited, no_change;
     u32 min_written, max_written;
+    /* governor */
+    u32 gov_target, level, util; /* level 0 floor, 1 mid, 2 ceiling; util = last period's max busy % */
+    u32 up_cnt, down_cnt, mid_cnt;
+    u64 gov_changes;
 };
 
 struct dvfs_state {
@@ -92,6 +119,11 @@ struct dvfs_state {
     u64 min_interval_ns;
     u8 cluster_of[DVFS_MAX_CPUS];
     struct dvfs_cluster c[DVFS_MAX_CLUSTERS];
+    struct dvfs_gov_cfg gov;
+    u64 gov_last, gov_prev_idle[DVFS_MAX_CPUS];
+    bool gov_primed, thermal_hot, thermal_crit;
+    s32 last_temp;
+    u64 gov_evals;
 };
 
 /* Bases EL2 accepts (T6050 die 0: cpufreq_mc0/mc1/pc, linux-cs wt-power t6050-dieX.dtsi:17-36). */
@@ -126,6 +158,22 @@ static inline int dvfs_check_cfg(const struct dvfs_cfg *cfg, u32 ncpus)
             if (p == 0 || c->perf[p] <= last || c->perf[p] > 0xffff)
                 return -6; /* strictly increasing, p0 never an operating point */
             last = c->perf[p];
+        }
+    }
+    if (cfg->gov.enabled) {
+        const struct dvfs_gov_cfg *g = &cfg->gov;
+        if (g->enabled != 1 || g->period_us < 1000 || g->period_us > 1000000 || g->up_pct > 100 ||
+            g->down_pct >= g->up_pct || !g->up_periods || !g->mid_periods || !g->down_periods ||
+            g->up_periods > 1000 || g->mid_periods > 1000 || g->down_periods > 1000)
+            return -8;
+        if (g->temp_crit_mc < g->temp_hot_mc || g->temp_release_mc >= g->temp_hot_mc ||
+            g->temp_crit_mc > 110000 || g->temp_hot_mc < 40000)
+            return -8;
+        for (u32 i = 0; i < cfg->nclusters; i++) {
+            const struct dvfs_cfg_cluster *c = &cfg->c[i];
+            if (c->pmin >= c->pmax || g->mid[i] < c->pmin || g->mid[i] > c->pmax || !c->perf[g->mid[i]] ||
+                g->safe_ceiling[i] < g->mid[i] || g->safe_ceiling[i] > c->pmax || !c->perf[g->safe_ceiling[i]])
+                return -9;
         }
     }
     for (u32 i = 0; i < ncpus; i++)
@@ -166,6 +214,8 @@ static inline int dvfs_probe(struct dvfs_state *s, const struct dvfs_cfg *cfg, c
         p[i] = 0;
     s->nclusters = cfg->nclusters;
     s->ncpus = cfg->ncpus;
+    s->gov = cfg->gov;
+    s->last_temp = DVFS_TEMP_UNKNOWN;
     s->min_interval_ns = cfg->min_interval_ns;
     for (u32 i = 0; i < DVFS_MAX_CPUS; i++)
         s->cluster_of[i] = cfg->cluster_of[i];
@@ -180,6 +230,8 @@ static inline int dvfs_probe(struct dvfs_state *s, const struct dvfs_cfg *cfg, c
         if (!c->cfg.perf[c->expected])
             return -20 - (int)i; /* "current P-state has no OPP" */
         c->target = c->expected;
+        c->gov_target = c->expected; /* the governor starts from the inherited state */
+        c->level = 1;
         c->min_written = 0xffffffffU;
     }
     s->enabled = true;
@@ -217,9 +269,13 @@ static inline void dvfs_service(struct dvfs_state *s, const struct dvfs_io *io, 
             if (desired[k] > want)
                 want = desired[k];
         }
-        if (!any && c->cfg.pmin != c->cfg.pmax)
-            continue; /* follow-Desired cluster without a request: untouched; fixed cluster: always */
-        c->target = dvfs_pstate_for(&c->cfg, want);
+        if (s->gov.enabled) {
+            c->target = c->gov_target; /* set by dvfs_governor() */
+        } else {
+            if (!any && c->cfg.pmin != c->cfg.pmax)
+                continue; /* follow-Desired cluster without a request: untouched; fixed cluster: always */
+            c->target = dvfs_pstate_for(&c->cfg, want);
+        }
 
         u64 cmd = io->rd64(io->ctx, c->cfg.base + DVFS_CMD);
         if (cmd & DVFS_CMD_BUSY) {
@@ -258,6 +314,107 @@ static inline void dvfs_service(struct dvfs_state *s, const struct dvfs_io *io, 
             c->min_written = c->target;
         if (c->target > c->max_written)
             c->max_written = c->target;
+    }
+}
+
+/* Nearest operating point at or below p in [pmin, p] (p itself is checked to be one by dvfs_check_cfg). */
+static inline u32 dvfs_op_at_or_below(const struct dvfs_cfg_cluster *c, u32 p)
+{
+    while (p > c->pmin && !c->perf[p])
+        p--;
+    return p;
+}
+
+/*
+ * cpuperf-G: one call per EL2 tick, before dvfs_service. idle_ns[i] = vCPU i's accumulated trapped-WFI
+ * time (monotonic, including a WFI in progress), online[i] = the vCPU runs (an offline vCPU counts as
+ * idle). temp_mc = CPU temperature in milli-degC or DVFS_TEMP_UNKNOWN. Sets each cluster's gov_target.
+ */
+static inline void dvfs_governor(struct dvfs_state *s, const u64 *idle_ns, const bool *online, s32 temp_mc,
+                                 u64 now)
+{
+    const struct dvfs_gov_cfg *g = &s->gov;
+    if (!s->enabled || !g->enabled)
+        return;
+    u64 period = (u64)g->period_us * 1000;
+    if (!s->gov_primed) {
+        for (u32 k = 0; k < s->ncpus; k++)
+            s->gov_prev_idle[k] = idle_ns[k];
+        s->gov_last = now;
+        s->gov_primed = true;
+        return;
+    }
+    u64 dt = now - s->gov_last;
+    if (dt < period)
+        return;
+    s->gov_last = now;
+    s->gov_evals++;
+
+    /* thermal state (hysteresis) */
+    s->last_temp = temp_mc;
+    bool have_temp = temp_mc != DVFS_TEMP_UNKNOWN;
+    if (have_temp) {
+        if (temp_mc >= g->temp_crit_mc)
+            s->thermal_crit = s->thermal_hot = true;
+        else if (temp_mc >= g->temp_hot_mc)
+            s->thermal_hot = true;
+        if (temp_mc < g->temp_release_mc)
+            s->thermal_crit = s->thermal_hot = false;
+    }
+
+    u32 busy[DVFS_MAX_CLUSTERS] = {0};
+    for (u32 k = 0; k < s->ncpus; k++) {
+        u64 d = idle_ns[k] - s->gov_prev_idle[k];
+        s->gov_prev_idle[k] = idle_ns[k];
+        if (!online[k])
+            continue;
+        if (d > dt)
+            d = dt;
+        u32 pct = (u32)(((dt - d) * 100) / dt);
+        u32 cl = s->cluster_of[k];
+        if (cl < DVFS_MAX_CLUSTERS && pct > busy[cl])
+            busy[cl] = pct;
+    }
+
+    for (u32 i = 0; i < s->nclusters; i++) {
+        struct dvfs_cluster *c = &s->c[i];
+        if (c->fail)
+            continue;
+        u32 u = busy[i];
+        c->util = u;
+        c->up_cnt = u >= g->up_pct ? c->up_cnt + 1 : 0;
+        c->down_cnt = u < g->down_pct ? c->down_cnt + 1 : 0;
+        c->mid_cnt = (u >= g->down_pct && c->level == 0) ? c->mid_cnt + 1 : 0;
+        u32 level = c->level;
+        if (c->up_cnt >= g->up_periods) {
+            level = 2;
+            c->down_cnt = 0;
+        } else if (c->level == 0 && c->mid_cnt >= g->mid_periods) {
+            level = 1;
+            c->mid_cnt = 0;
+        } else if (c->down_cnt >= g->down_periods && c->level > 0) {
+            level = c->level - 1;
+            c->down_cnt = 0;
+        }
+        u32 ceiling = have_temp ? c->cfg.pmax : g->safe_ceiling[i];
+        if (s->thermal_hot && ceiling > g->mid[i])
+            ceiling = g->mid[i];
+        if (s->thermal_crit)
+            ceiling = c->cfg.pmin;
+        /* Recompute the state only on a level change (the inherited state is kept until the first one), but
+         * apply a lowered ceiling (thermal guard) at once. */
+        u32 p = c->gov_target;
+        if (level != c->level)
+            p = level == 2 ? ceiling : level == 1 ? g->mid[i] : c->cfg.pmin;
+        else if (level == 2 && p < ceiling)
+            p = ceiling; /* ceiling restored after a thermal cap */
+        if (p > ceiling)
+            p = ceiling;
+        p = dvfs_op_at_or_below(&c->cfg, p);
+        if (p != c->gov_target)
+            c->gov_changes++;
+        c->level = level;
+        c->gov_target = p;
     }
 }
 

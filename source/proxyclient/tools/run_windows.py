@@ -451,16 +451,49 @@ CPPC_PERF_T6050 = {t: t6050_cpc(t) for t in ("M", "P")}
 # linux-cs wt-power t6050-dieX.dtsi:17-36 (cpufreq_mc0/mc1/pc) and t6050-max.dtsi:30-47 (CPU -> domain).
 T6050_DVFS = {0x040000: (0x210e20000, "M"), 0x040100: (0x211e20000, "M"), 0x010200: (0x212e20000, "P")}
 DVFS_CFG_MAGIC = 0x53465644
-DVFS_CFG_SIZE = 632
+DVFS_CFG_SIZE = 712   # hv_win_dvfs_core.h struct dvfs_cfg, version 2 (+ governor block)
 
 
 T6050_FIXED_DEFAULT = {"M": 6, "P": 6}   # --cpu-dvfs fixed: mc0's iBoot level (p6 2652 MHz) on every cluster
 
 
+# cpuperf-G governor defaults (perf/GOVERNOR.md). Levels per cluster type: floor, mid, ceiling. SAFE = the ceiling
+# EL2 uses when it has no CPU temperature (no SMC reads); Linux's daily runs to M p15/P p21 under firmware thermal
+# control only, its draft thermal zone throttles at TCMb 100 C (passive) / 105 (hot) / 110 (critical).
+GOV_FLOOR = {"M": 2, "P": 2}
+GOV_MID = {"M": 6, "P": 6}
+GOV_SAFE = {"M": 12, "P": 14}
+GOV_PARAMS = dict(period_us=10000, up_pct=60, down_pct=25, up_periods=2, mid_periods=5, down_periods=20,
+                  temp_hot_mc=95000, temp_crit_mc=100000, temp_release_mc=90000)
+
+
+def parse_governor(rest):
+    """'max=M12,P14,floor=M2,P2,mid=M6,P6' (any subset, any order) -> {'max': {..}, 'floor': {..}, 'mid': {..}}."""
+    out = {"floor": dict(GOV_FLOOR), "mid": dict(GOV_MID), "max": dict(GOV_SAFE)}
+    key = None
+    for tok in filter(None, rest.split(",")):
+        if "=" in tok:
+            key, _, tok = tok.partition("=")
+            if key not in out:
+                raise ValueError(f"governor key {key!r}: use max=, floor=, mid=")
+        if key is None or len(tok) < 2 or tok[0] not in "MP" or not tok[1:].isdigit():
+            raise ValueError(f"governor value {tok!r}: want M<pstate> or P<pstate> after max=/floor=/mid=")
+        out[key][tok[0]] = int(tok[1:])
+    for t in ("M", "P"):
+        lo, mid, hi = out["floor"][t], out["mid"][t], out["max"][t]
+        if not (T6050_PMIN <= lo <= mid <= hi <= T6050_PMAX[t]) or lo == hi or \
+                any(x not in T6050_OPP_MHZ[t] for x in (lo, mid, hi)):
+            raise ValueError(f"governor {t}: need p{T6050_PMIN} <= floor <= mid <= max <= p{T6050_PMAX[t]} and "
+                             f"floor < max (got {lo}/{mid}/{hi})")
+    return out
+
+
 def parse_dvfs_mode(text):
-    """--cpu-dvfs off | el2 | fixed[:M=n,P=n] -> (mode, {type: pstate} for fixed). Raises ValueError."""
+    """--cpu-dvfs off | el2 | fixed[:M=n,P=n] | governor[:max=Mn,Pn,...] -> (mode, params). Raises ValueError."""
     if text in ("off", "el2"):
         return text, {}
+    if text == "governor" or text.startswith("governor:"):
+        return "governor", parse_governor(text.partition(":")[2])
     head, _, rest = text.partition(":")
     if head != "fixed":
         raise ValueError(f"--cpu-dvfs {text!r}: off, el2 or fixed[:M=n,P=n]")
@@ -474,7 +507,7 @@ def parse_dvfs_mode(text):
     return "fixed", fixed
 
 
-def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000, fixed=None):
+def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000, fixed=None, governor=None):
     """cpuperf-B: the P_HV_WIN_CPPC_DVFS config (hv_win_dvfs_core.h struct dvfs_cfg) and a summary.
     fixed = {type: pstate}: those clusters get pmin = pmax = pstate (EL2 drives them there with no Desired).
     Raises PlanError for a vCPU outside the three T6050 clusters or with the wrong cluster-type."""
@@ -495,7 +528,7 @@ def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000, fixed=None):
         cluster_of.append(order.index(base))
     if len(vcpus) > 32 or interval_ns < 1000000:
         raise PlanError("cpuperf-B: at most 32 vCPUs and a rate limit of at least 1 ms")
-    out = struct.pack("<IIIIQ", DVFS_CFG_MAGIC, 1, len(order), len(vcpus), interval_ns)
+    out = struct.pack("<IIIIQ", DVFS_CFG_MAGIC, 2, len(order), len(vcpus), interval_ns)
     out += bytes(cluster_of) + bytes(32 - len(cluster_of))
     lines = []
     for i in range(4):
@@ -511,8 +544,21 @@ def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000, fixed=None):
         lo = T6050_PMIN
         if fixed and t in fixed:
             lo = hi = fixed[t]
+        if governor:
+            lo, hi = governor["floor"][t], governor["max"][t]
         out += struct.pack("<QII32I", base, lo, hi, *perf)
         lines.append((i, base, t, lo, hi))
+    if governor:
+        types = [next(v[1] for v in T6050_DVFS.values() if v[0] == b) for b in order]
+        mid = [governor["mid"][t] for t in types] + [0] * (4 - len(types))
+        safe = [max(governor["mid"][t], min(governor["max"][t], GOV_SAFE[t])) for t in types] + [0] * (4 - len(types))
+        g = GOV_PARAMS
+        out += struct.pack("<7I4I4I3iI", 1, g["period_us"], g["up_pct"], g["down_pct"], g["up_periods"],
+                           g["mid_periods"], g["down_periods"], *mid, *safe, g["temp_hot_mc"], g["temp_crit_mc"],
+                           g["temp_release_mc"], 0)
+    else:
+        out += bytes(76)
+    out += bytes(DVFS_CFG_SIZE - len(out))
     assert len(out) == DVFS_CFG_SIZE
     return out, lines
 
@@ -828,11 +874,14 @@ def parse_args():
                              "or uniform (one class, as --cpu-classes uniform; the _CPC values still differ per type)")
     parser.add_argument("--cppc-autonomous", action="store_true",
                         help="cpuperf-A: _CPC Autonomous Selection Enable = 1 (variant; default 0 = OS-directed)")
-    parser.add_argument("--cpu-dvfs", default="off", metavar="off|el2|fixed[:M=n,P=n]",
+    parser.add_argument("--cpu-dvfs", default="off", metavar="off|el2|fixed[:M=n,P=n]|governor[:max=Mn,Pn]",
                         help="cpuperf-B: el2 = EL2 maps Windows' CPPC Desired Performance to the T6050 cluster "
                              "p-states (CMD +0x20 writes, the Linux driver's sequence, perf/WRITES.md); needs "
                              "--cpu-classes cppc. fixed = EL2 sets every cluster once to a fixed p-state at guest "
-                             "start (default M=6,P=6), with any --cpu-classes. Default off: no DVFS register is touched")
+                             "start (default M=6,P=6), with any --cpu-classes. governor = EL2 load-following governor "
+                             "(trapped-WFI utilisation; floor/mid/max default M2/6/12, P2/6/14; max above M12/P14 is "
+                             "only used when the resident reads the CPU temperature). Default off: no DVFS register "
+                             "is touched")
     parser.add_argument("--dvfs-max", dest="dvfs_max_raw", action="append", default=[], metavar="TYPE=PSTATE",
                         help="cpuperf-B: highest p-state EL2 may request for M or P (default M=15, P=17); also sets "
                              "the _CPC highest/nominal")
@@ -1351,7 +1400,8 @@ def main():
             raise SystemExit(f"--cpu-dvfs {args.cpu_dvfs}: this proxyclient has no P_HV_WIN_CPPC_DVFS")
         try:
             cfg, dlines = dvfs_plan(hv.adt, vcpus, args.dvfs_max, args.dvfs_interval_us * 1000,
-                                    args.dvfs_fixed if args.cpu_dvfs == "fixed" else None)
+                                    args.dvfs_fixed if args.cpu_dvfs == "fixed" else None,
+                                    args.dvfs_fixed if args.cpu_dvfs == "governor" else None)
         except PlanError as e:
             raise SystemExit(f"--cpu-dvfs {args.cpu_dvfs}: {e}")
         buf = p.malloc(len(cfg))
@@ -1360,9 +1410,16 @@ def main():
         p.free(buf)
         if rc != 0:
             raise SystemExit(f"P_HV_WIN_CPPC_DVFS refused ({rc}): see the EL2 console (probe or config)")
-        record(f"cpuperf-B: EL2 DVFS ON ({args.cpu_dvfs}): " + "; ".join(f"cluster {i} {b:#x} {t} p{lo}..p{hi}"
-                                                                         for i, b, t, lo, hi in dlines)
-               + f"; rate limit {args.dvfs_interval_us} us")
+        record(f"cpuperf-B: EL2 DVFS ON ({args.cpu_dvfs}): " + "; ".join(
+            f"cluster {i} {b:#x} {t} p{lo}..p{hi} ({T6050_OPP_MHZ[t][lo]}-{T6050_OPP_MHZ[t][hi]} MHz)"
+            for i, b, t, lo, hi in dlines) + f"; rate limit {args.dvfs_interval_us} us")
+        if args.cpu_dvfs == "governor":
+            gv = args.dvfs_fixed
+            record("cpuperf-G: governor levels " + "; ".join(
+                f"{t} floor p{gv['floor'][t]} {T6050_OPP_MHZ[t][gv['floor'][t]]} MHz, mid p{gv['mid'][t]} "
+                f"{T6050_OPP_MHZ[t][gv['mid'][t]]} MHz, max p{gv['max'][t]} {T6050_OPP_MHZ[t][gv['max'][t]]} MHz"
+                f"{' (capped at p%d without SMC temperature)' % GOV_SAFE[t] if gv['max'][t] > GOV_SAFE[t] else ''}"
+                for t in ("M", "P")))
 
     # m5w,irq-map: one P_HV_WIN_MAP_IRQ per pair, after CONFIGURE and before start (CONTRACT s9)
     for line, gsiv in args.irq_pairs:
