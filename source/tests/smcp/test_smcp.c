@@ -572,6 +572,54 @@ static void t_flt(void)
     }
 }
 
+/* nightly-2 (review finding 3): a full mailbox never blocks the tick; the step is retried, no error counted,
+ * the message ID sequence stays contiguous; full for 200 ms counts as one failed send (quarantine) */
+static void t_busy(void)
+{
+    setup(0);
+    run_ms(300);
+    CHECK(rd(SMCP_R_STATUS) & SMCP_ST_VALID);
+    uint32_t e0 = rd(SMCP_R_ERR_COUNT);
+    int n0 = M.nlog;
+    uint8_t id_before = n0 ? (uint8_t)((M.log[n0 - 1].msg >> 12) & 0xf) : 0;
+    M.busy_left = 5;
+    int sends_before = M.sends;
+    max_sends_per_tick = 0;
+    run_ms(120);                                              /* covers the next fast round (50 ms period) */
+    CHECK_EQ(M.busy_answers, 5);
+    CHECK(M.sends - sends_before >= 6);                       /* retried, one try per tick at most */
+    CHECK(max_sends_per_tick <= 1);
+    CHECK_EQ(rd(SMCP_R_ERR_COUNT), e0);                         /* BUSY is not an error */
+    CHECK(S.quarantine_until <= M.t);
+    CHECK(S.send_busy >= 5);
+    CHECK(M.nlog > n0);
+    CHECK_EQ((uint8_t)((M.log[n0].msg >> 12) & 0xf), (uint8_t)((id_before + 1) & 0xf)); /* ID not consumed */
+    run_ms(300);
+    CHECK(rd(SMCP_R_STATUS) & SMCP_ST_VALID);
+    /* full for longer than 200 ms: exactly one failed send, then quarantine */
+    setup(0);
+    run_ms(300);
+    e0 = rd(SMCP_R_ERR_COUNT);
+    M.busy_left = 1000000;
+    run_ms(150);
+    CHECK_EQ(rd(SMCP_R_ERR_COUNT), e0);
+    run_ms(100);
+    CHECK_EQ(rd(SMCP_R_ERR_COUNT), e0 + 1);
+    CHECK(S.quarantine_until > M.t);
+    CHECK(!smcp_failed(&S));
+    /* the guest-stopped power path retries a briefly full mailbox instead of failing */
+    setup(SMCP_REC_F_POWER_ACTIONS);
+    run_ms(200);
+    M.pmu[0xf801] = 0x30;
+    M.pmu[0xf80f] = 0x41;
+    M.busy_left = 3;
+    smcp_pmu_ops p = mock_pmu_ops(&M);
+    smcp_power_trace t;
+    CHECK_EQ(smcp_power_run(&S, &p, SMCP_POWER_OFF, &t), 0);
+    CHECK_EQ(t.n, 7);
+    CHECK_EQ(t.step[0].result, 0);
+}
+
 static void t_power_off(void)
 {
     setup(SMCP_REC_F_POWER_ACTIONS);
@@ -774,7 +822,7 @@ int main(void)
         {"notifications", t_notifications}, {"timeouts", t_timeouts}, {"stale_and_dead", t_stale_and_dead},
         {"size_mismatch", t_size_mismatch}, {"edges", t_edges}, {"repulse", t_repulse}, {"registers", t_registers}, {"flt", t_flt},
         {"power_off", t_power_off}, {"restart", t_restart}, {"power_failures", t_power_failures},
-        {"fuzz", t_fuzz},
+        {"fuzz", t_fuzz}, {"busy", t_busy},
     };
     int groups_failed = 0;
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {

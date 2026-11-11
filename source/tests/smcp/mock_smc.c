@@ -81,6 +81,11 @@ static int m_send(void *ctx, uint64_t msg)
     m->sends++;
     if (m->send_fail)
         return -1;
+    if (m->busy_left > 0) {
+        m->busy_left--;
+        m->busy_answers++;
+        return SMCP_SEND_BUSY;
+    }
     uint8_t type = msg & 0xff, id = (msg >> 12) & 0xf, size = (msg >> 16) & 0xff;
     uint32_t key = (uint32_t)(msg >> 32);
     assert(m->nlog < MOCK_MAXLOG);

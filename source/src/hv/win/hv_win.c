@@ -9,6 +9,7 @@
 #include "hv_win_smcp.h"
 #include "hv_win_m5wn.h"
 #include "hv_win_n1.h"
+#include "hv_win_storage.h" /* nightly-2: hv_win_storage_model / native_stat (read-only) */
 #include "aic.h"
 #include "aic_regs.h"
 #include "cpu_regs.h"
@@ -193,6 +194,14 @@ static bool u1_storage_touched;
 
 bool hv_win_storage_smp_gate(const char *what)
 {
+    if (hv_win_smcp_actions_armed()) {
+        printf("HV/win nightly-2: %s REFUSED: SMC power actions are armed (no power cut with a disk path)\n", what);
+        return false;
+    }
+    if (hv_win_m5wn_attempted()) {
+        printf("HV/win nightly-2: %s REFUSED: the M5WN network device was configured this session\n", what);
+        return false;
+    }
     if (hv_win_n1_touched()) {
         printf("HV/win nightly: %s REFUSED: the N1 Wi-Fi probe/bring-up ran this session (shared PCIe/PHY); "
                "no disk path after N1 (wireless/n1-20261111 WRITES.md)\n", what);
@@ -206,6 +215,14 @@ bool hv_win_storage_smp_gate(const char *what)
     }
     u1_storage_touched = true;
     return true;
+}
+
+/* nightly-2 (review finding 2): any disk path admitted or tried this session (gate, native select, S1 PREP) */
+bool hv_win_disk_path_used(void)
+{
+    bool attempted = false, ready = false;
+    hv_win_storage_model(&attempted, &ready);
+    return u1_storage_touched || (hv_win_storage_native_stat(0) & 6) || attempted;
 }
 
 /* smp2d: EL2 is emulating the guest's WFI (HCR_EL2.TWI set in hv_win_configure) */

@@ -49,6 +49,67 @@
 #define PTE_SP_END GENMASK(51, 40)
 #define LOW36 ((1ull << 36) - 1)
 
+/*
+ * nightly-2 (review finding 1): which physical pages the MTP may be pointed at. A DART table page, or a page a
+ * table maps, must be resident-owned (m1n1 image + heap allocated so far) or lie outside the RAM iBoot hands
+ * to the OS (boot_args phys_base..+mem_size), which contains every page the launcher can give the guest
+ * (m5w,memory) and Windows' memory map. Table pages must also be inside m1n1's DRAM mapping before they
+ * are read. The host test provides its own versions (MTP_DMA_MEM_PROVIDED).
+ */
+#ifndef MTP_DMA_MEM_PROVIDED
+#include "heapblock.h"
+#include "memory.h"
+#include "xnuboot.h"
+static bool mtp_dma_resident(u64 pa, u64 len)
+{
+    u64 lo = (u64)_base, hi = (u64)heapblock_peek();
+    return len && pa >= lo && pa <= hi && len <= hi - pa;
+}
+static bool mtp_dma_os_ram(u64 pa, u64 len)
+{
+    u64 lo = cur_boot_args.phys_base, hi = lo + cur_boot_args.mem_size;
+    return pa < hi && lo < pa + len;
+}
+static bool mtp_dma_dram(u64 pa, u64 len)
+{
+    return len && pa >= ram_base && pa - ram_base <= mem_size_actual && len <= mem_size_actual - (pa - ram_base);
+}
+#endif
+static bool page_ok(u64 pa)
+{
+    return mtp_dma_resident(pa, SZ_16K) || !mtp_dma_os_ram(pa, SZ_16K);
+}
+static u64 refused_pa;
+/* Every table page and every page the existing iBoot tables map; false = refuse the iBoot-tables mode. */
+static bool iboot_tables_ok(u64 root_pa)
+{
+    if ((root_pa & (SZ_16K - 1)) || !mtp_dma_dram(root_pa, SZ_16K) || !page_ok(root_pa)) {
+        refused_pa = root_pa;
+        return false;
+    }
+    const u64 *root = TP_PTR(root_pa);
+    for (u32 i = 0; i < SZ_16K / 8; i++) {
+        if (!(root[i] & PTE_VALID))
+            continue;
+        u64 t = (u64)FIELD_GET(PTE_OFFSET, root[i]) << 14;
+        if (!mtp_dma_dram(t, SZ_16K) || !page_ok(t)) {
+            refused_pa = t;
+            return false;
+        }
+        const u64 *tbl = TP_PTR(t);
+        for (u32 j = 0; j < SZ_16K / 8; j++) {
+            if (!(tbl[j] & PTE_VALID))
+                continue;
+            u64 leaf = (u64)FIELD_GET(PTE_OFFSET, tbl[j]) << 14;
+            if (!page_ok(leaf)) {
+                refused_pa = leaf;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static enum mtp_dma_mode mode = MTP_DMA_OFF;
 static u64 window, slot_base;
 static u64 *l2;
@@ -109,11 +170,17 @@ enum mtp_dma_mode mtp_dma_init(void)
     if (first < 1) first = 1;
     u64 *root;
     if (tcr == TCR_TRANSLATE && (ttbr & TTBR_VALID)) {
-        root = TP_PTR((u64)FIELD_GET(TTBR_ADDR, ttbr) << 14);
+        u64 root_pa = (u64)FIELD_GET(TTBR_ADDR, ttbr) << 14;
+        if (!iboot_tables_ok(root_pa)) {
+            printf("MTP-DMA: decision dart-mtp: iBoot tables REFUSED: page %#lx is OS/guest RAM and not resident-owned "
+                   "(or outside the DRAM mapping) -> off\n", refused_pa);
+            return mode;
+        }
+        root = TP_PTR(root_pa);
         mode = MTP_DMA_IBOOT_TABLES;
     } else if (!tcr && !(ttbr & TTBR_VALID) && !(prot & 1)) {
         root = memalign(SZ_16K, SZ_16K);
-        if (!root) return mode;
+        if (!root || !mtp_dma_resident(TP_PA(root), SZ_16K)) return mode;
         memset(root, 0, SZ_16K);
         mode = MTP_DMA_OWN_TABLES;
     } else {
@@ -127,6 +194,7 @@ enum mtp_dma_mode mtp_dma_init(void)
         if (!(root[idx] & PTE_VALID)) break;
     l2 = memalign(SZ_16K, SZ_16K);
     if (idx > 127 || !l2) { printf("MTP-DMA: no free root slot -> off\n"); mode = MTP_DMA_OFF; return mode; }
+    if (!mtp_dma_resident(TP_PA(l2), SZ_16K)) { printf("MTP-DMA: L2 table not resident-owned -> off\n"); mode = MTP_DMA_OFF; return mode; }
     memset(l2, 0, SZ_16K);
     dma_wmb();
     root[idx] = FIELD_PREP(PTE_OFFSET, TP_PA(l2) >> 14) | PTE_VALID;
@@ -156,6 +224,7 @@ bool mtp_dma_alloc(size_t sz, void **cpu, u64 *iova)
     if (!sz || mode == MTP_DMA_OFF) return false;
     u8 *buf = memalign(SZ_16K, size);
     if (!buf) return false;
+    if (!mtp_dma_resident(TP_PA(buf), size)) { free(buf); return false; } /* nightly-2: only resident pages */
     memset(buf, 0, size);
     if (mode == MTP_DMA_BYPASS) {
         *cpu = buf; *iova = TP_PA(buf);

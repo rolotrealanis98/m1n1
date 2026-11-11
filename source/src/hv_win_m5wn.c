@@ -5,6 +5,7 @@
  * (the storage line's lease contract, unchanged) registered from the launcher's final plan with
  * the same wire layout as the S1 registration; storage files are not modified. */
 #include "hv_win_m5wn.h"
+#include "hv_win_feature_policy.h"
 #include "m5wn/service/m5wn_fake.h"
 #include "m5wn/n1/n1_core.h"
 #include "hv_win_n1.h"
@@ -78,6 +79,7 @@ static void n1_sink_link(void *s, int up, n1_u32 mbps) { wn_service_set_link(s, 
 static void n1_sink_event(void *s) { wn_service_event(s); }
 static const wn_backend_ops n1_ops = {n1_wn_tx, 0, 0, n1_wn_scan, n1_wn_results, n1_wn_join, n1_wn_leave, n1_wn_status};
 
+bool hv_win_m5wn_attempted(void) { return attempted; }
 bool hv_win_m5wn_claims_spi(u64 gsiv) { return attempted && gsiv == WN_GSIV; }
 
 static bool access_page(struct exc_info *ctx, u64 address, u64 *value, bool write, int width)
@@ -133,6 +135,10 @@ s64 hv_win_m5wn_configure(u64 data, u64 size)
 {
     struct wn_registration c;
     if (attempted) return -1;
+    if (!fp_m5wn_configure_ok(hv_win_disk_path_used())) { /* nightly-2: before any state, lease or hook */
+        printf("HV/win M5WN: configure REFUSED: a disk path was used this session\n");
+        return -1;
+    }
     attempted = true; /* one attempt per launch, success or not */
     if (!data || (data & 7) || data > UINT64_MAX - size || size < sizeof(c) ||
         size > sizeof(c) + (HV_SM_MAX_RAM + HV_SM_MAX_PROTECTED) * 16)

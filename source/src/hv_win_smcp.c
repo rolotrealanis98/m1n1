@@ -7,6 +7,7 @@
  * Trap and tick already hold bhl (hv_exc_entry); configure is pre-guest only.
  */
 #include "hv_win_smcp.h"
+#include "hv_win_feature_policy.h"
 #include "smcp/core/smcp_core.h"
 #include "smcp/core/smcp_power.h"
 
@@ -54,11 +55,14 @@ static void update_irq(void)
 bool hv_win_smcp_claims_spi(u64 gsiv) { return attempted && gsiv == SMCP_GSIV; }
 
 /* ---- transport ---- */
+/* nightly-2 (review finding 3): one readiness check and the mailbox writes, never asc_send's 200 ms poll on the
+ * guest's 1 ms tick (the storage path's timeouts share that tick). Same words as rtkit_send for a non-MTP IOP:
+ * msg0 = the message, msg1 = the endpoint. Full -> SMCP_SEND_BUSY, the core retries on a later tick. */
 static int t_send(void *ctx, uint64_t msg)
 {
     (void)ctx;
-    struct rtkit_message m = {.ep = SMC_ENDPOINT, .msg = msg};
-    return rtkit_send(smc_rtk, &m) ? 0 : -1;
+    struct asc_message m = {.msg0 = msg, .msg1 = SMC_ENDPOINT};
+    return asc_try_send(smc_asc, &m) ? 0 : SMCP_SEND_BUSY;
 }
 
 static int t_recv(void *ctx, uint64_t *msg)
@@ -171,10 +175,17 @@ static bool smc_bringup(void)
 
 extern bool hv_started_cpus[];
 
+_Static_assert(FP_SMCP_F_POWER_ACTIONS == SMCP_REC_F_POWER_ACTIONS, "policy flag bit");
+bool hv_win_smcp_actions_armed(void) { return attempted && (rec_flags & SMCP_REC_F_POWER_ACTIONS); }
+
 s64 hv_win_smcp_configure(u64 version, u64 flags)
 {
     if (attempted || version != SMCP_VERSION || (flags & ~(u64)SMCP_REC_F_POWER_ACTIONS))
         return -1;
+    if (!fp_smcp_configure_ok(flags, hv_win_disk_path_used())) { /* nightly-2: before any state or hardware */
+        printf("HV/win SMCP: power actions REFUSED: a disk path was used this session\n");
+        return -1;
+    }
     for (unsigned i = 0; i < MAX_CPUS; i++)
         if (hv_started_cpus[i])
             return -1;
@@ -259,6 +270,11 @@ static const char *step_name(u8 k)
 /* action: SMCP_POWER_OFF / SMCP_POWER_RESTART. Only after every vCPU left the guest. */
 s64 hv_win_smcp_power(u64 action)
 {
+    if (!fp_smcp_power_ok(hv_win_disk_path_used())) { /* nightly-2: before power_done and the first SMC write */
+        printf("HV/win SMCP: power %s REFUSED: a disk path was used this session\n",
+               action == SMCP_POWER_OFF ? "off" : "restart");
+        return -1;
+    }
     if (!exposed || smcp_failed(&core) || power_done)
         return -1;
     for (unsigned i = 0; i < MAX_CPUS; i++)

@@ -383,7 +383,26 @@ static bool send_cmd(smcp *s, uint8_t kind, uint32_t key, const uint8_t *wbuf, u
     /* macsmc.c:98-102: MSG 7:0, ID 15:12, SIZE 23:16, WSIZE 31:24 (0 here), DATA 63:32 */
     uint64_t msg = (uint64_t)type | ((uint64_t)(s->msgid & 0xf) << 12) |
                    ((uint64_t)(kind == SMCP_K_INFO ? 0 : len) << 16) | ((uint64_t)key << 32);
-    if (s->ops.send(s->ops.ctx, msg) < 0) {
+    int r = s->ops.send(s->ops.ctx, msg);
+    s->last_send_busy = false;
+    if (r == SMCP_SEND_BUSY) {
+        /* nightly-2: nothing was sent: undo the ID, retry this step on a later tick */
+        uint64_t t = now(s);
+        s->msgid = (s->msgid - 1) & 0xf;
+        s->send_busy++;
+        if (!s->busy_since) {
+            s->busy_since = t ? t : 1;
+        } else if (t - s->busy_since >= SMCP_MAX_BUSY_US) {
+            s->busy_since = 0;
+            r = -1;   /* full for 200 ms: one failed send, as before */
+        }
+        if (r == SMCP_SEND_BUSY) {
+            s->last_send_busy = true;
+            return false;
+        }
+    }
+    s->busy_since = 0;
+    if (r < 0) {
         /* treated like a timeout: back off, count towards FAILED, retry the same step */
         s->last_result = -2;
         record_err(s, key);
@@ -651,8 +670,13 @@ int smcp_cmd_blocking(smcp *s, uint8_t kind, uint32_t key, const uint8_t *wbuf, 
     }
     if (s->phase == SMCP_PH_FAILED)
         return -4;
-    if (!send_cmd(s, kind, key, wbuf, len, -1, timeout_us))
-        return -2;
+    /* nightly-2: guest stopped here (power sequence); a full mailbox is retried within the atomic timeout */
+    uint64_t t1 = now(s);
+    while (!send_cmd(s, kind, key, wbuf, len, -1, timeout_us)) {
+        if (!s->last_send_busy || s->phase == SMCP_PH_FAILED || now(s) - t1 > SMCP_ATOMIC_TIMEOUT_US)
+            return -2;
+        pump(s);
+    }
     while (s->busy && s->phase != SMCP_PH_FAILED)
         pump(s);
     if (s->phase == SMCP_PH_FAILED && s->busy)

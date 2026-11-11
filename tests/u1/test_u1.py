@@ -40,6 +40,12 @@ static struct { u32 nr_vcpus; } hv_win;
 static int lines;
 static bool n1;                                  /* nightly: N1 probe/bring-up ran */
 static bool hv_win_n1_touched(void) { return n1; }
+static bool smcp_act, m5wn_cfg, s1_attempted;      /* nightly-2 */
+static unsigned long long native_stat0;
+static bool hv_win_smcp_actions_armed(void) { return smcp_act; }
+static bool hv_win_m5wn_attempted(void) { return m5wn_cfg; }
+static const void *hv_win_storage_model(bool *a, bool *r) { *a = s1_attempted; *r = false; return 0; }
+static unsigned long long hv_win_storage_native_stat(unsigned long long i) { return i ? 0 : native_stat0; }
 #define printf(...) (lines++, fprintf(stderr, __VA_ARGS__))
 ''' + gate + r'''
 static int configure(long nr_vcpus) {
@@ -63,6 +69,17 @@ int main(void) {
     bad |= u1_storage_touched;
     hv_win.nr_vcpus = 0; bad |= hv_win_storage_smp_gate("t") != false;
     n1 = false;
+    /* nightly-2: storage refused while SMC power actions are armed or once M5WN was configured */
+    u1_storage_touched = false; hv_win.nr_vcpus = 1;
+    smcp_act = true; l = lines; bad |= hv_win_storage_smp_gate("t") != false; bad |= lines != l + 1; bad |= u1_storage_touched;
+    smcp_act = false; m5wn_cfg = true; bad |= hv_win_storage_smp_gate("t") != false; bad |= u1_storage_touched;
+    m5wn_cfg = false;
+    /* nightly-2: hv_win_disk_path_used() = gate admitted, native tried/selected (stat0 bits 1-2) or S1 PREP attempted */
+    u1_storage_touched = false; native_stat0 = 0; s1_attempted = false; bad |= hv_win_disk_path_used();
+    native_stat0 = 1; bad |= hv_win_disk_path_used();                    /* bit 0 alone is not "used" */
+    native_stat0 = 2; bad |= !hv_win_disk_path_used(); native_stat0 = 4; bad |= !hv_win_disk_path_used();
+    native_stat0 = 0; s1_attempted = true; bad |= !hv_win_disk_path_used(); s1_attempted = false;
+    bad |= !hv_win_storage_smp_gate("t") || !hv_win_disk_path_used();    /* admitted -> used */
     printf("gate harness %s\n", bad ? "FAILED" : "passed");
     return bad;
 }

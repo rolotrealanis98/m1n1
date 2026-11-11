@@ -40,6 +40,8 @@ typedef struct mock_smc {
     int sends, recvs, recv_calls;
     bool dead;                   /* recv returns -1 */
     bool send_fail;
+    int busy_left;               /* nightly-2: the next N sends answer SMCP_SEND_BUSY (mailbox full) */
+    int busy_answers;
     uint8_t write_result;        /* result for WRITE_KEY */
     bool writes_no_reply;
     /* PMU */

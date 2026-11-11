@@ -71,3 +71,6 @@ QF	kbd-hidm	source/src/mtp_kbd* source/src/mtp_tp* source/src/mtp_dma* source/sr
 # nightly-2: dcpw pinned to the merged commit (review finding 4): tests/dcpw-pinned = the author's tests as of 280f964, run against this tree; identity vs the 280f964 blobs
 QF	dcpw	source/src/dcpw/* source/src/hv_win_dcpw.c source/src/rtkit.c tests/dcpw-pinned/*	OUT=$FB_OUT CC=/opt/homebrew/opt/llvm/bin/clang PATH=/opt/homebrew/opt/llvm/bin:$PATH bash tests/dcpw-pinned/run-pinned.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 M	dcpw-mutants	source/src/dcpw/* tests/dcpw-pinned/*	OUT=$FB_OUT CC=/opt/homebrew/opt/llvm/bin/clang PATH=/opt/homebrew/opt/llvm/bin:$PATH bash tests/dcpw-pinned/run-pinned.sh mutants 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+# ---- nightly-2 review fixes (F1-F3)
+QF	nightly2-policy	source/src/hv_win_smcp.c source/src/hv_win_m5wn.c source/src/hv_win_n1.c source/src/hv_win_feature_policy.h source/src/hv/win/hv_win.c source/src/smcp/* source/src/proxy.c tests/nightly2/*	python3 -I tests/nightly2/test_policy.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+M	nightly2-mutants	*	OUT=$FB_OUT bash tests/nightly2/mutants.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0

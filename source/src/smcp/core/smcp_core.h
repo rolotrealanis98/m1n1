@@ -35,11 +35,15 @@
 #define SMCP_MAX_TIMEOUTS      16u       /* consecutive: then FAILED, no more commands */
 #define SMCP_RECV_BUDGET       8u        /* messages drained per tick */
 #define SMCP_REPULSE_US        100000u   /* re-pulse the GED edge while enabled events stay unacked */
+/* nightly-2 (review finding 3): ops.send may answer BUSY (mailbox full, nothing sent); the step is retried on a
+ * later tick, never polled. A mailbox full for this long counts as one failed send (asc_send's old 200 ms poll). */
+#define SMCP_SEND_BUSY         1
+#define SMCP_MAX_BUSY_US       200000u
 
 /* transport, supplied by the resident glue / the mock */
 typedef struct smcp_ops {
     void *ctx;
-    int (*send)(void *ctx, uint64_t msg);                 /* 0 sent, <0 failed */
+    int (*send)(void *ctx, uint64_t msg);                 /* 0 sent, SMCP_SEND_BUSY full (retry later), <0 failed */
     int (*recv)(void *ctx, uint64_t *msg);                /* 1 message, 0 none, <0 dead */
     void (*shmem_read)(void *ctx, uint8_t *dst, unsigned len);
     void (*shmem_write)(void *ctx, const uint8_t *src, unsigned len);
@@ -81,6 +85,9 @@ typedef struct smcp {
     uint64_t timeout_us;
     uint64_t quarantine_until;
     int last_result;   /* of the last completed command: SMC result byte, -1 timeout, -2 send */
+    uint64_t busy_since;   /* nightly-2: first BUSY send of the current step (0 = none) */
+    uint32_t send_busy;    /* nightly-2: BUSY answers (statistics) */
+    bool last_send_busy;   /* nightly-2: the last send_cmd() returned false because of BUSY */
     uint8_t last_reply_len;
     uint32_t last_reply_data;
     /* schedule */
