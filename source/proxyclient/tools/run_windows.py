@@ -312,14 +312,20 @@ def window_frames(args):
         frames += [("GICD", args.gicd, GICD_FRAME), ("GICR", args.gicr, args.cpus * GICR_STRIDE)]
     if args.pl011:
         frames.append(("PL011", args.pl011, PL011_FRAME))
-    if getattr(args, "builtin_keyboard", False):
+    # HIDM (0xF38100000, 2 x 16 KiB) and M5WN (0xF38108000, 2 x 16 KiB) share one 64 KiB frame:
+    # frames must be 64 KiB aligned (check_frames), so one frame covers whichever of them is enabled.
+    hidm = getattr(args, "builtin_keyboard", False)
+    m5wn = getattr(args, "m5wn_fake", False) or getattr(args, "m5wn_n1", None)
+    if hidm and m5wn:
+        frames.append(("HIDM+M5WN", 0xF38100000, 0x10000))
+    elif hidm:
         frames.append(("HIDM", 0xF38100000, 0x8000))
+    elif m5wn:
+        frames.append(("M5WN", 0xF38100000, 0x10000))
     if getattr(args, "smc_power", False):
         frames.append(("SMCP", 0xF38110000, 0x4000))
     if getattr(args, "cpu_classes", None) == "cppc":
         frames.append(("CPPC", args.cppc_page, CPPC_PAGE_SIZE))
-    if getattr(args, "m5wn_fake", False) or getattr(args, "m5wn_n1", None):
-        frames.append(("M5WN", 0xF38108000, 0x8000))
     return frames
 
 

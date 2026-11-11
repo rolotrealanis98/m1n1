@@ -15,4 +15,5 @@ grep "m5wn host tests" "${FB_OUT:-/tmp}/m5wn-host.log"
 "$D/tools/test-n1.sh" > "${FB_OUT:-/tmp}/n1-host.log" 2>&1 || { tail -5 "${FB_OUT:-/tmp}/n1-host.log"; exit 1; }
 grep "n1 host tests" "${FB_OUT:-/tmp}/n1-host.log"
 python3 -I tests/m5wn/test_m5wn_contract.py
+python3 -I tests/m5wn/test_launcher_args.py | tail -1
 echo "m5wn: all PASS"
