@@ -461,8 +461,29 @@ DVFS_CFG_MAGIC = 0x53465644
 DVFS_CFG_SIZE = 632
 
 
-def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000):
+T6050_FIXED_DEFAULT = {"M": 6, "P": 6}   # --cpu-dvfs fixed: mc0's iBoot level (p6 2652 MHz) on every cluster
+
+
+def parse_dvfs_mode(text):
+    """--cpu-dvfs off | el2 | fixed[:M=n,P=n] -> (mode, {type: pstate} for fixed). Raises ValueError."""
+    if text in ("off", "el2"):
+        return text, {}
+    head, _, rest = text.partition(":")
+    if head != "fixed":
+        raise ValueError(f"--cpu-dvfs {text!r}: off, el2 or fixed[:M=n,P=n]")
+    fixed = dict(T6050_FIXED_DEFAULT)
+    for part in filter(None, rest.split(",")):
+        t, _, v = part.partition("=")
+        if t not in T6050_PMAX or not v.isdigit() or int(v) not in T6050_OPP_MHZ[t] or int(v) < T6050_PMIN \
+                or int(v) > T6050_PMAX[t]:
+            raise ValueError(f"--cpu-dvfs {text!r}: {part!r} must be M=1..{T6050_PMAX['M']} or P=1..{T6050_PMAX['P']}")
+        fixed[t] = int(v)
+    return "fixed", fixed
+
+
+def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000, fixed=None):
     """cpuperf-B: the P_HV_WIN_CPPC_DVFS config (hv_win_dvfs_core.h struct dvfs_cfg) and a summary.
+    fixed = {type: pstate}: those clusters get pmin = pmax = pstate (EL2 drives them there with no Desired).
     Raises PlanError for a vCPU outside the three T6050 clusters or with the wrong cluster-type."""
     pmax = dict(T6050_PMAX, **(pmax or {}))
     nodes = {c.name: c for c in adt["/cpus"]}
@@ -494,8 +515,11 @@ def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000):
         if not (T6050_PMIN <= hi <= max(T6050_OPP_MHZ[t])):
             raise PlanError(f"--dvfs-max {t}={hi}: outside p{T6050_PMIN}..p{max(T6050_OPP_MHZ[t])}")
         perf = [t6050_perf(t, p) if p in T6050_OPP_MHZ[t] else 0 for p in range(32)]
-        out += struct.pack("<QII32I", base, T6050_PMIN, hi, *perf)
-        lines.append((i, base, t, T6050_PMIN, hi))
+        lo = T6050_PMIN
+        if fixed and t in fixed:
+            lo = hi = fixed[t]
+        out += struct.pack("<QII32I", base, lo, hi, *perf)
+        lines.append((i, base, t, lo, hi))
     assert len(out) == DVFS_CFG_SIZE
     return out, lines
 
@@ -820,12 +844,16 @@ def parse_args():
                         help="cpuperf-A: synthetic-window base of the 16 KiB EL2 CPPC page (--cpu-classes cppc)")
     parser.add_argument("--no-cppc-psd", action="store_true",
                         help="cpuperf-A: publish _CPC without _PSD (default: _PSD per cluster, HW_ALL)")
+    parser.add_argument("--cppc-classes", choices=("adt", "uniform"), default="adt",
+                        help="cpuperf: with --cpu-classes cppc, the MADT efficiency classes: adt (M = 0, P = 1, default) "
+                             "or uniform (one class, as --cpu-classes uniform; the _CPC values still differ per type)")
     parser.add_argument("--cppc-autonomous", action="store_true",
                         help="cpuperf-A: _CPC Autonomous Selection Enable = 1 (variant; default 0 = OS-directed)")
-    parser.add_argument("--cpu-dvfs", choices=("off", "el2"), default="off",
+    parser.add_argument("--cpu-dvfs", default="off", metavar="off|el2|fixed[:M=n,P=n]",
                         help="cpuperf-B: el2 = EL2 maps Windows' CPPC Desired Performance to the T6050 cluster "
                              "p-states (CMD +0x20 writes, the Linux driver's sequence, perf/WRITES.md); needs "
-                             "--cpu-classes cppc. Default off: no DVFS register is touched")
+                             "--cpu-classes cppc. fixed = EL2 sets every cluster once to a fixed p-state at guest "
+                             "start (default M=6,P=6), with any --cpu-classes. Default off: no DVFS register is touched")
     parser.add_argument("--dvfs-max", dest="dvfs_max_raw", action="append", default=[], metavar="TYPE=PSTATE",
                         help="cpuperf-B: highest p-state EL2 may request for M or P (default M=15, P=17); also sets "
                              "the _CPC highest/nominal")
@@ -1037,9 +1065,13 @@ def parse_args():
             parser.error(f"--dvfs-max {text!r}: TYPE is M or P and PSTATE an operating point of that cluster")
         args.dvfs_max[t] = n
         args.cppc_table[t] = t6050_cpc(t, n)
-    if args.cpu_dvfs != "off" or args.dvfs_max:
+    try:
+        args.cpu_dvfs, args.dvfs_fixed = parse_dvfs_mode(args.cpu_dvfs)
+    except ValueError as e:
+        parser.error(str(e))
+    if args.cpu_dvfs == "el2" or args.dvfs_max:
         if args.cpu_classes != "cppc":
-            parser.error("--cpu-dvfs / --dvfs-max need --cpu-classes cppc")
+            parser.error("--cpu-dvfs el2 / --dvfs-max need --cpu-classes cppc")
     if args.dvfs_interval_us < 1000:
         parser.error("--dvfs-interval-us must be >= 1000")
     for text in args.cppc_perf:
@@ -1050,8 +1082,8 @@ def parse_args():
         except ValueError as e:
             parser.error(str(e))
         args.cppc_table[t] = v
-    if (args.no_cppc_psd or args.cppc_autonomous) and args.cpu_classes != "cppc":
-        parser.error("--no-cppc-psd / --cppc-autonomous need --cpu-classes cppc")
+    if (args.no_cppc_psd or args.cppc_autonomous or args.cppc_classes != "adt") and args.cpu_classes != "cppc":
+        parser.error("--no-cppc-psd / --cppc-autonomous / --cppc-classes need --cpu-classes cppc")
     if args.cpu_classes == "cppc":
         if args.route != "gic":
             parser.error("--cpu-classes cppc needs --route gic (Mu publishes _CPC on the GIC route only)")
@@ -1398,22 +1430,24 @@ def main():
         hv.add_tracer(irange(args.cppc_page, CPPC_PAGE_SIZE), "WIN-CPPC", TraceMode.RESERVED)
         record(f"cpuperf: EL2 CPPC page at {args.cppc_page:#x} for {len(vcpus)} vCPUs (desired stored only, "
                "counters = CNTPCT, no DVFS access)")
-        if args.cpu_dvfs == "el2":
-            if not hasattr(p, "hv_win_cppc_dvfs"):
-                raise SystemExit("--cpu-dvfs el2: this proxyclient has no P_HV_WIN_CPPC_DVFS")
-            try:
-                cfg, dlines = dvfs_plan(hv.adt, vcpus, args.dvfs_max, args.dvfs_interval_us * 1000)
-            except PlanError as e:
-                raise SystemExit(f"--cpu-dvfs el2: {e}")
-            buf = p.malloc(len(cfg))
-            iface.writemem(buf, cfg)
-            rc = p.hv_win_cppc_dvfs(buf, len(cfg))  # EL2 copies it, probes CMD/STATUS read-only, then enables
-            p.free(buf)
-            if rc != 0:
-                raise SystemExit(f"P_HV_WIN_CPPC_DVFS refused ({rc}): see the EL2 console (probe or config)")
-            record("cpuperf-B: EL2 DVFS ON: " + "; ".join(f"cluster {i} {b:#x} {t} p{lo}..p{hi}"
-                                                         for i, b, t, lo, hi in dlines)
-                   + f"; rate limit {args.dvfs_interval_us} us")
+
+    if args.cpu_dvfs != "off":
+        if not hasattr(p, "hv_win_cppc_dvfs"):
+            raise SystemExit(f"--cpu-dvfs {args.cpu_dvfs}: this proxyclient has no P_HV_WIN_CPPC_DVFS")
+        try:
+            cfg, dlines = dvfs_plan(hv.adt, vcpus, args.dvfs_max, args.dvfs_interval_us * 1000,
+                                    args.dvfs_fixed if args.cpu_dvfs == "fixed" else None)
+        except PlanError as e:
+            raise SystemExit(f"--cpu-dvfs {args.cpu_dvfs}: {e}")
+        buf = p.malloc(len(cfg))
+        iface.writemem(buf, cfg)
+        rc = p.hv_win_cppc_dvfs(buf, len(cfg))  # EL2 copies it, probes CMD/STATUS read-only, then enables
+        p.free(buf)
+        if rc != 0:
+            raise SystemExit(f"P_HV_WIN_CPPC_DVFS refused ({rc}): see the EL2 console (probe or config)")
+        record(f"cpuperf-B: EL2 DVFS ON ({args.cpu_dvfs}): " + "; ".join(f"cluster {i} {b:#x} {t} p{lo}..p{hi}"
+                                                                         for i, b, t, lo, hi in dlines)
+               + f"; rate limit {args.dvfs_interval_us} us")
 
     # m5w,irq-map: one P_HV_WIN_MAP_IRQ per pair, after CONFIGURE and before start (CONTRACT s9)
     for line, gsiv in args.irq_pairs:
@@ -1690,10 +1724,14 @@ def main():
             except PlanError as e:
                 raise SystemExit(f"--cpu-classes cppc: {e}")
             put("m5w,cppc", cppc_prop)
+            if args.cppc_classes == "uniform":
+                changed = uniform_cluster_types(hv.adt)   # after cppc_plan: the _CPC values keep the real types
+                record(f"cpu classes: cppc with uniform MADT classes (guest ADT cluster-type rewritten on "
+                       f"{len(changed)} CPU node(s)); Mu publishes one efficiency class")
             types = {}
             for i, name, ctype, v, dom in cppc_lines:
                 types.setdefault((ctype, v), []).append(i)
-            record("cpu classes: cppc (guest ADT cluster-type unchanged; Mu publishes M = 0, P = 1) + m5w,cppc "
+            record(f"cpu classes: cppc ({'guest ADT cluster-type unchanged; Mu publishes M = 0, P = 1' if args.cppc_classes == 'adt' else 'uniform MADT classes'}) + m5w,cppc "
                    f"{len(cppc_prop)} bytes, page {args.cppc_page:#x}, _PSD {'no' if args.no_cppc_psd else 'yes'}, "
                    f"autonomous {'yes' if args.cppc_autonomous else 'no'}: "
                    + "; ".join(f"{t} CPUs {c[0]}-{c[-1]} h/n/lnl/l {v[0]}/{v[1]}/{v[2]}/{v[3]} MHz {v[4]}-{v[5]}"

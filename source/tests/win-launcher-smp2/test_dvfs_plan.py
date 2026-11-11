@@ -57,6 +57,22 @@ check("--dvfs-max M=12 sets clamp and _CPC", a.dvfs_max == {"M": 12} and a.cppc_
       (run_windows.t6050_perf("M", 12),) * 2)
 check("--dvfs-interval-us 999 refused", parse(["--cpu-classes", "cppc", "--dvfs-interval-us", "999"]) is None)
 
+# --cpu-dvfs fixed (any --cpu-classes; no CPPC page needed)
+a = parse(["--cpu-dvfs", "fixed"])
+check("--cpu-dvfs fixed with default uniform classes accepted", a is not None and a.cpu_dvfs == "fixed" and
+      a.dvfs_fixed == {"M": 6, "P": 6})
+a = parse(["--cpu-dvfs", "fixed:M=10,P=12"])
+check("--cpu-dvfs fixed:M=10,P=12", a is not None and a.dvfs_fixed == {"M": 10, "P": 12})
+for bad in ["fixed:M=16", "fixed:P=18", "fixed:M=0", "fixed:X=3", "fixed:M=a", "fast", "fixed:M"]:
+    check(f"--cpu-dvfs {bad} refused", parse(["--cpu-dvfs", bad]) is None)
+adt, vcpus = j716s()
+cfgf, linesf = run_windows.dvfs_plan(adt, vcpus, fixed={"M": 6, "P": 6})
+check("fixed plan: every cluster pmin = pmax = 6",
+      [struct.unpack_from("<II", cfgf, 56 + 144 * i + 8) for i in range(3)] == [(6, 6)] * 3)
+cfgm, _ = run_windows.dvfs_plan(adt, vcpus, fixed={"P": 10})
+check("fixed P only: M clusters keep p1..p15", [struct.unpack_from("<II", cfgm, 56 + 144 * i + 8) for i in range(3)]
+      == [(1, 15), (1, 15), (10, 10)])
+
 # the config
 adt, vcpus = j716s()
 cfg, lines = run_windows.dvfs_plan(adt, vcpus)

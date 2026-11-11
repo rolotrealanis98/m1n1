@@ -370,6 +370,45 @@ int main(void)
     run(5, 1000000);
     CHECK(st.c[2].fail == DVFS_OK && mc[2].cur == 15 && (mc[2].cmd & 0x1f) == 17);
 
+    /* ---- fixed mode (pmin == pmax): driven without any Desired request ---- */
+    {
+        struct dvfs_cfg fc = base_cfg();
+        for (int k = 0; k < 3; k++)
+            fc.c[k].pmin = fc.c[k].pmax = 6;
+        CHECK(dvfs_check_cfg(&fc, 18) == 0);
+        mock_boot();
+        memset(desired, 0, sizeof(desired));
+        memset(seen, 0, sizeof(seen));
+        now = 1000000000UL;
+        CHECK(dvfs_probe(&st, &fc, &io) == 0);
+        run(1, 1000000);
+        CHECK(n_wr64 == 2);                                  /* mc0 is already p6: only mc1 and pc */
+        CHECK(st.c[0].writes == 0 && st.c[1].writes == 1 && st.c[2].writes == 1);
+        run(1000, 1000000);
+        CHECK(n_wr64 == 2 && mc[1].cur == 6 && mc[2].cur == 6 && bad_access == 0);
+        request(12, 957);                                    /* Desired is ignored by a fixed cluster */
+        run(10, 1000000);
+        CHECK(n_wr64 == 2 && (mc[2].cmd & 0x1f) == 6);
+        mc[1].cmd = (mc[1].cmd & ~0x1fUL) | 9;               /* another owner: latch, no fight */
+        run(5, 1000000);
+        CHECK(st.c[1].fail == DVFS_FAIL_FOREIGN && n_wr64 == 2);
+        CHECK(((last_wr_val & 0xffffffffffbffee0UL) & ~DVFS_CMD_SET) == 0);
+    }
+    {
+        /* mixed: P fixed at p10, M clusters follow Desired (none seen -> untouched) */
+        struct dvfs_cfg fc = base_cfg();
+        fc.c[2].pmin = fc.c[2].pmax = 10;
+        CHECK(dvfs_check_cfg(&fc, 18) == 0);
+        mock_boot();
+        memset(desired, 0, sizeof(desired));
+        memset(seen, 0, sizeof(seen));
+        CHECK(dvfs_probe(&st, &fc, &io) == 0);
+        run(50, 1000000);
+        CHECK(n_wr64 == 1 && last_wr_addr == 0x212e20020UL && last_wr_val == 0x240010aUL);
+        CHECK(st.c[0].writes == 0 && st.c[1].writes == 0);
+    }
+    fresh();
+
     /* ---- random soak with invariants ---- */
     fresh();
     srand(12345);

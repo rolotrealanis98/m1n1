@@ -105,6 +105,15 @@ check("--cppc-autonomous sets flag bit 1", struct.unpack_from("<I", prop3, 16)[0
 check("--cppc-autonomous parsed", parse(["--cpu-classes", "cppc", "--cppc-autonomous"]).cppc_autonomous is True)
 check("--cppc-autonomous without cppc refused", parse(["--cppc-autonomous"]) is None)
 check("--no-cppc-psd without cppc refused", parse(["--no-cppc-psd"]) is None)
+check("--cppc-classes uniform accepted with cppc", parse(["--cpu-classes", "cppc", "--cppc-classes", "uniform"]).cppc_classes == "uniform")
+check("--cppc-classes uniform without cppc refused", parse(["--cppc-classes", "uniform"]) is None)
+# order used by the launcher: cppc_plan on the real types, then the uniform rewrite
+adt_u, nodes_u, vcpus_u = j716s()
+prop_u, _ = run_windows.cppc_plan(adt_u, vcpus_u, 0xF3C000000)
+run_windows.uniform_cluster_types(adt_u)
+check("uniform after cppc_plan: P values kept, ADT now all M",
+      struct.unpack_from("<7I", prop_u, 20 + 28 * 12)[:6] == run_windows.CPPC_PERF_T6050["P"] and
+      all(n._properties["cluster-type"] == "M" for n in nodes_u))
 check("cppc mode leaves the guest ADT cluster-types alone",
       [n._properties["cluster-type"] for n in nodes] == ["M"] * 12 + ["P"] * 6)
 

@@ -82,10 +82,6 @@ int hv_win_cppc_configure(u64 base, u64 ncpus)
 
 int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
 {
-    if (!cppc.configured) {
-        printf("HV/win cpuperf-B: configure the CPPC page first\n");
-        return -1;
-    }
     if (dvfs.enabled) {
         printf("HV/win cpuperf-B: already enabled\n");
         return -1;
@@ -99,7 +95,16 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
         return -1;
     }
     memcpy(&dvfs_cfg_copy, (void *)cfg_addr, sizeof(dvfs_cfg_copy));
-    int rc = dvfs_check_cfg(&dvfs_cfg_copy, cppc.ncpus);
+    /* Without the CPPC page (no _CPC: --cpu-dvfs fixed with uniform/adt classes) only fixed clusters make sense */
+    if (!cppc.configured) {
+        for (u32 i = 0; i < dvfs_cfg_copy.nclusters && i < DVFS_MAX_CLUSTERS; i++) {
+            if (dvfs_cfg_copy.c[i].pmin != dvfs_cfg_copy.c[i].pmax) {
+                printf("HV/win cpuperf-B: cluster %d follows Desired but there is no CPPC page\n", i);
+                return -1;
+            }
+        }
+    }
+    int rc = dvfs_check_cfg(&dvfs_cfg_copy, cppc.configured ? cppc.ncpus : dvfs_cfg_copy.ncpus);
     if (rc < 0) {
         printf("HV/win cpuperf-B: config refused (%d)\n", rc);
         return -1;
@@ -118,8 +123,12 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
         printf("HV/win cpuperf-B: probe refused (%d): no DVFS write will be made\n", rc);
         return -1;
     }
-    printf("HV/win cpuperf-B: ON, rate limit %ld ns per cluster, timeout %ld ns\n",
-           dvfs.min_interval_ns, (long)DVFS_TIMEOUT_NS);
+    u32 nfixed = 0;
+    for (u32 i = 0; i < dvfs.nclusters; i++)
+        nfixed += dvfs.c[i].cfg.pmin == dvfs.c[i].cfg.pmax;
+    printf("HV/win cpuperf-B: ON, rate limit %ld ns per cluster, timeout %ld ns, %d of %d cluster(s) fixed, "
+           "CPPC page %s\n",
+           dvfs.min_interval_ns, (long)DVFS_TIMEOUT_NS, nfixed, dvfs.nclusters, cppc.configured ? "yes" : "no");
     return 0;
 }
 
@@ -132,8 +141,8 @@ void hv_win_cppc_tick(void)
     if (!dvfs.enabled)
         return;
     for (u32 i = 0; i < dvfs.ncpus; i++) {
-        desired[i] = cppc.slot[i].desired;
-        seen[i] = cppc.slot[i].desired_writes != 0;
+        desired[i] = cppc.configured ? cppc.slot[i].desired : 0;
+        seen[i] = cppc.configured && cppc.slot[i].desired_writes != 0;
     }
     dvfs_service(&dvfs, &dvfs_hw, desired, seen, mrs(CNTPCT_EL0) * 1000000000UL / mrs(CNTFRQ_EL0));
 }
@@ -141,9 +150,9 @@ void hv_win_cppc_tick(void)
 /* Printed from the SMP dump and on P_HV_WIN_CPPC_STAT: one line per CPU that saw any access. */
 int hv_win_cppc_dump(void)
 {
-    if (!cppc.configured)
+    if (!cppc.configured && !dvfs.enabled)
         return -1;
-    for (u32 i = 0; i < cppc.ncpus; i++) {
+    for (u32 i = 0; cppc.configured && i < cppc.ncpus; i++) {
         struct cppc_slot *s = &cppc.slot[i];
         if (!s->desired_writes && !s->counter_reads)
             continue;
@@ -151,7 +160,8 @@ int hv_win_cppc_dump(void)
                i, s->desired, s->desired_writes ? s->desired_min : 0, s->desired_max,
                s->desired_writes, s->counter_reads);
     }
-    printf("HV/win cpuperf: odd accesses %ld\n", cppc.odd_accesses);
+    if (cppc.configured)
+        printf("HV/win cpuperf: odd accesses %ld\n", cppc.odd_accesses);
     if (!dvfs.enabled)
         return 0;
     for (u32 i = 0; i < dvfs.nclusters; i++) {
