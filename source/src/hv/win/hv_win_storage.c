@@ -10,18 +10,40 @@
 #include "smp.h"
 #include "utils.h"
 #include "string.h"
+#include "cpu_regs.h" /* nightly-7: CNTPCT_EL0/CNTFRQ_EL0 for the SMP hold-time evidence */
 
 static struct s1_model controller;
 static struct hv_storage_mem memory;
 static bool attempted, ready, frames_reserved;
 static u64 epoch, dispatches, rejections, lease_failures;
 extern char _base[], _end[];
+#ifdef VNVME_HOST_TEST
+#define SMPS_BHL_MINE(me) ((void)(me), true) /* host harnesses: the caller is modelled as holding bhl */
+#else
+extern spinlock_t bhl; /* nightly-7: breadcrumbs (hv_win_storage_mem.c declares it the same way) */
+#define SMPS_BHL_MINE(me) (__atomic_load_n(&bhl.lock, __ATOMIC_ACQUIRE) == (me) && bhl.count > 0)
+#endif
 /* smp-storage (SMP-STORAGE-DESIGN.md): the big storage lock. Every entry into the emulated controller, the
  * lease and the backend (MMIO hooks, tick, PREP, retire, native select/quiesce, canary) holds it for the whole
  * synchronous call. Lock order: bhl (hv_exc_entry, before any hook or tick) -> storage -> vgic_lock (irq
  * callback). Recursive for its owner CPU (retire runs inside a hook). Never released inside a call. */
 static struct { s64 owner; s64 depth; } storage_lock = {-1, 0};
 static u32 storage_max_cpus = 1; /* launcher cap (P_HV_WIN_STORAGE_MAX_CPUS); 1 = the r4.14 disk path */
+/* nightly-7: bound on one data command's wait while more than one vCPU is admitted (default 1 s; launcher-set
+ * with the cap, 0.1..30 s). Cap 1 keeps the r4.14 30 s WRITE/FLUSH bounds (ans_ro.c). smp-storage review s5. */
+static u32 storage_smp_timeout_us = 1000000;
+/* nightly-7 run-time evidence for the SMP disk path (statistics only: nothing reads them back into a decision).
+ * Written by the CPU that holds the storage lock, except contention (lock-free atomics); printed in the SM
+ * status line (hv_win_status.c) when the cap is above 1. Ticks are CNTPCT_EL0. */
+#ifdef VNVME_HOST_TEST
+#define SMPS_NOW() 0UL /* host harnesses: no counter; hold times read 0 */
+#define SMPS_FREQ() 0UL
+#else
+#define SMPS_NOW() mrs(CNTPCT_EL0)
+#define SMPS_FREQ() mrs(CNTFRQ_EL0)
+#endif
+#define SMPS_CPUS 24
+static struct hv_storage_smp_stats smps;
 void hv_storage_lock_take(void)
 {
     s64 me = smp_id();
@@ -29,16 +51,25 @@ void hv_storage_lock_take(void)
         storage_lock.depth++;
         return;
     }
+    u64 spins = 0, t0 = 0;
     for (;;) {
         s64 none = -1;
         if (__atomic_compare_exchange_n(&storage_lock.owner, &none, me, false, __ATOMIC_ACQUIRE,
                                         __ATOMIC_RELAXED))
             break;
+        if (!spins++)
+            t0 = SMPS_NOW();
 #if defined(__aarch64__)
         __asm__ volatile("yield");
 #endif
     }
     storage_lock.depth = 1;
+    if (spins) { /* nightly-7: contention evidence (the review expects none: every entry is nested in bhl) */
+        u64 w = SMPS_NOW() - t0;
+        smps.contended++;
+        if (w > smps.spin_max_ticks)
+            smps.spin_max_ticks = w;
+    }
 }
 void hv_storage_lock_release(void)
 {
@@ -63,6 +94,58 @@ bool hv_win_storage_set_max_cpus(u32 n)
     storage_max_cpus = n;
     return true;
 }
+/* nightly-7: with the cap (hv_win.c), before PREP; 0.1..30 s. */
+bool hv_win_storage_set_smp_timeout(u32 us)
+{
+    if (attempted || us < 100000 || us > 30000000)
+        return false;
+    storage_smp_timeout_us = us;
+    return true;
+}
+/* ans_ro.c (through native_link.c): the data-command wait bound in us, 0 = keep the r4.14 bounds (cap 1). */
+u32 hv_win_storage_smp_cmd_timeout_us(void)
+{
+    return storage_max_cpus > 1 ? storage_smp_timeout_us : 0;
+}
+const struct hv_storage_smp_stats *hv_win_storage_smp_stats(void)
+{
+    return &smps;
+}
+/* nightly-7: breadcrumbs at every storage entry, taken with the storage lock held. An MMIO access or tick must
+ * also hold bhl on this CPU (hv_exc_entry / hv_tick); PREP and the hv_init retire run on the boot proxy before
+ * guest start without bhl, by design, and are counted under "other". */
+static void smps_enter(u32 site)
+{
+    s64 me = smp_id();
+    if (me >= 0 && me < SMPS_CPUS)
+        smps.entries[site][me]++;
+    if (!SMPS_BHL_MINE(me))
+        smps.no_bhl[site]++;
+}
+static void smps_hold(u32 site, u64 t0, u64 address)
+{
+    u64 d = SMPS_NOW() - t0;
+    if (d > smps.hold_max_ticks[site]) {
+        smps.hold_max_ticks[site] = d;
+        if (site == HV_SMPS_ACCESS)
+            smps.hold_max_addr = address;
+    }
+    if (site == HV_SMPS_ACCESS) {
+        u64 f = smps.freq ? smps.freq : (smps.freq = SMPS_FREQ());
+        if (f) { /* holds >= 1 ms, 10 ms, 100 ms, 1 s */
+            u64 ms = d * 1000 / f;
+            for (int i = 0; i < 4; i++)
+                if (ms >= (i == 0 ? 1u : i == 1 ? 10u : i == 2 ? 100u : 1000u))
+                    smps.hold_hist[i]++;
+        }
+    }
+}
+/* nightly-7: the model's callbacks (guest memory lease, IRQ line, publish) only ever run inside a locked entry */
+static void smps_op_check(void)
+{
+    if (!hv_storage_lock_held())
+        smps.ops_unlocked++;
+}
 /* The backend may be driven from this CPU on behalf of a vCPU (native_link.c s1n_storage_context): more
  * than one vCPU admitted and this CPU holds the storage lock. The lease adds the vCPU/bhl/DAIF checks. */
 bool hv_win_storage_smp_context(void)
@@ -84,6 +167,7 @@ static bool frames_empty(u64 base,u64 size)
 static void *guest_span(void *opaque,u64 address,size_t length,bool write)
 {
     if(opaque!=&memory)return NULL;
+    smps_op_check(); /* nightly-7 */
     return hv_storage_guest_span(&memory,address,length,write);
 }
 static bool logical_map(void *opaque,u64 address,size_t size)
@@ -98,6 +182,7 @@ static bool logical_unmap(void *opaque,u64 address,size_t size)
 }
 static void irq(void *opaque,bool level)
 {
+    smps_op_check(); /* nightly-7 */
     if(opaque==&memory)hv_vgic3_set_spi_level(HV_S1_GSIV,level);
 }
 static void publish(void *opaque)
@@ -111,6 +196,7 @@ static void storage_retire_locked(void);
 void hv_win_storage_retire(void)
 {
     hv_storage_lock_take(); /* smp-storage */
+    smps_enter(HV_SMPS_OTHER); /* nightly-7 */
     storage_retire_locked();
     hv_storage_lock_release();
 }
@@ -131,7 +217,10 @@ static void storage_retire_locked(void)
 void hv_win_storage_tick(void)
 {
     hv_storage_lock_take(); /* smp-storage */
+    smps_enter(HV_SMPS_TICK); /* nightly-7 */
+    u64 t0 = SMPS_NOW();
     s1_backend_poll();
+    smps_hold(HV_SMPS_TICK, t0, 0);
     hv_storage_lock_release();
 }
 bool hv_win_storage_claims_spi(u32 gsiv)
@@ -158,7 +247,10 @@ static bool access_locked(struct exc_info *ctx,u64 address,u64 *value,bool write
 static bool access(struct exc_info *ctx,u64 address,u64 *value,bool write,int width)
 {
     hv_storage_lock_take();
+    smps_enter(HV_SMPS_ACCESS); /* nightly-7 */
+    u64 t0=SMPS_NOW();
     bool ok=access_locked(ctx,address,value,write,width);
+    smps_hold(HV_SMPS_ACCESS,t0,address);
     hv_storage_lock_release();
     return ok;
 }
@@ -189,6 +281,7 @@ static s64 storage_prepare_locked(u64 data,u64 size);
 s64 hv_win_storage_prepare(u64 data,u64 size)
 {
     hv_storage_lock_take(); /* smp-storage */
+    smps_enter(HV_SMPS_OTHER); /* nightly-7 */
     s64 r=storage_prepare_locked(data,size);
     hv_storage_lock_release();
     return r;

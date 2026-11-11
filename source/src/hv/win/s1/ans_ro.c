@@ -404,6 +404,7 @@ static void clear_bounce(void)
     dma_wmb();
 }
 
+u32 s1n_smp_cmd_timeout_us(void); /* nightly-7: native_link.c */
 /* The only submission path. Returns 0 ok, -1 NVMe status error (DMA settled), -2 frozen. */
 static int exec_owned(struct ans_queue *q, const struct ans_cmd *cmd);
 static int exec(struct ans_queue *q, const struct ans_cmd *cmd)
@@ -539,6 +540,14 @@ static int exec_owned(struct ans_queue *q, const struct ans_cmd *cmd)
     u32 limit = q->admin ? NVME_TIMEOUT
               : slot->opcode == OP_FLUSH ? NVME_FLUSH_TIMEOUT
               : slot->opcode == OP_WRITE ? NVME_WRITE_TIMEOUT : NVME_TIMEOUT;
+    /* nightly-7: with more than one vCPU admitted, this wait holds bhl on its CPU, so other vCPUs that trap stall
+     * behind it; bound every data command by the launcher's SMP limit (default 1 s; 0 at cap 1 = r4.14 bounds).
+     * Expiry freezes the session exactly as the 30 s bound does (smp-storage review s5). */
+    if (!q->admin) {
+        u32 smp_limit = s1n_smp_cmd_timeout_us();
+        if (smp_limit && smp_limit < limit)
+            limit = smp_limit;
+    }
     u64 timeout = timeout_calculate(limit);
     struct ans_cpl cqe;
     for (;;) {

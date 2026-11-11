@@ -153,6 +153,9 @@ static struct {
     /* r4.12: level re-presentation hold-off for the S1 NVMe SPI (see vgic_fold_lr) */
     u64 holdoffs, holdoff_releases;
     bool holdoff_any;
+    /* nightly-7: the emulated NVMe SPI 66 per vCPU (statistics only): LR loads with PENDING, LRs the guest
+     * acknowledged (listed pending, no longer pending at the fold), hold-offs set by a fold on that vCPU */
+    u64 nvme_inj_v[MAX_CPUS], nvme_taken_v[MAX_CPUS], nvme_holdoff_v[MAX_CPUS];
 } vgic;
 
 static spinlock_t vgic_lock = SPINLOCK_INIT;
@@ -475,6 +478,8 @@ static void vgic_fold_lr(struct vgic_irq *irq, u64 lr, u8 me)
             irq->holdoff = true;
             vgic.holdoffs++;
             vgic.holdoff_any = true;
+            if (me < MAX_CPUS)
+                vgic.nvme_holdoff_v[me]++; /* nightly-7 */
         }
     }
 
@@ -549,6 +554,8 @@ static void vgic_sync(struct vgic_vcpu *vc, u8 me)
                 vc->nr_sgi_ack++;
             else if (irq->intid == GIC_PPI_CNTV || irq->intid == GIC_PPI_CNTP)
                 vc->nr_timer_ack++;
+            else if (irq->intid == VGIC_DIAG_NVME && me < MAX_CPUS)
+                vgic.nvme_taken_v[me]++; /* nightly-7 */
         }
         vgic_fold_lr(irq, old[i], me);
         vgic_update(irq);
@@ -599,6 +606,8 @@ static void vgic_sync(struct vgic_vcpu *vc, u8 me)
         struct vgic_irq *irq = best[i];
         u64 lr = vgic_make_lr(irq);
 
+        if (irq->intid == VGIC_DIAG_NVME && (lr & ICH_LR_PENDING_BIT) && me < MAX_CPUS)
+            vgic.nvme_inj_v[me]++; /* nightly-7 */
         irq->lr_vcpu = me;
         irq->lr_idx = i;
         vc->lr_intid[i] = irq->intid;
@@ -1699,6 +1708,24 @@ void hv_vgic3_tick(void)
         vgic_update(irq);
     }
     vgic_unlock();
+}
+
+/*
+ * nightly-7: the emulated NVMe SPI's delivery by vCPU, for the SM status line (lock-free reads of statistics;
+ * a torn value is harmless). Returns the current target vCPU (VGIC_NONE if not ready).
+ */
+u32 hv_vgic3_nvme_by_vcpu(u32 n, u64 *inj, u64 *taken, u64 *holdoff, u64 *holdoffs, u64 *releases)
+{
+    if (!vgic.ready)
+        return VGIC_NONE;
+    for (u32 v = 0; v < n && v < MAX_CPUS; v++) {
+        inj[v] = vgic.nvme_inj_v[v];
+        taken[v] = vgic.nvme_taken_v[v];
+        holdoff[v] = vgic.nvme_holdoff_v[v];
+    }
+    *holdoffs = vgic.holdoffs;
+    *releases = vgic.holdoff_releases;
+    return vgic_get_irq(VGIC_NONE, VGIC_DIAG_NVME)->target;
 }
 
 /* Read-only pre-start ownership check for the isolated S1 synthetic SPI. */

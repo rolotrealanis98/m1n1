@@ -8,6 +8,7 @@
 #else
 int s1n_test_cpu;
 bool s1n_test_exception;
+u32 s1n_test_smp_timeout_us; /* nightly-7: host tests set the SMP data-command bound (0 = cap 1) */
 #endif
 /* r4.8: the storage lease's guest-RAM containment query (hv_win_storage.c; host tests provide a stub). */
 bool hv_win_storage_guest_ram_contains(u64 addr, u64 size);
@@ -15,6 +16,19 @@ bool hv_win_storage_smp_context(void); /* smp-storage */
 #ifndef S1N_TEST_SMP_CONTEXT
 #define S1N_TEST_SMP_CONTEXT() false /* host tests: the stress harness defines it */
 #endif
+
+#ifndef ANS_RO_HOST_TEST
+u32 hv_win_storage_smp_cmd_timeout_us(void); /* nightly-7: hv_win_storage.c */
+#endif
+/* nightly-7: ans_ro.c's data-command wait bound while more than one vCPU is admitted (0 = none) */
+u32 s1n_smp_cmd_timeout_us(void)
+{
+#ifdef ANS_RO_HOST_TEST
+    return s1n_test_smp_timeout_us;
+#else
+    return hv_win_storage_smp_cmd_timeout_us();
+#endif
+}
 
 static bool locked, prep_used, start_used;
 static u64 refusals;

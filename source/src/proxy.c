@@ -663,7 +663,8 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             hv_storage_lock_release();
             break;
         case P_HV_WIN_STORAGE_MAX_CPUS:
-            reply->retval = hv_win_storage_max_cpus_set(request->args[0]);
+            /* nightly-7: args[1] = SMP data-command wait bound in us (0 = default 1 s) */
+            reply->retval = hv_win_storage_smp_set(request->args[0], request->args[1]);
             break;
         case P_HV_WIN_STORAGE_NATIVE_QUIESCE:
             reply->retval = hv_win_storage_native_quiesce();

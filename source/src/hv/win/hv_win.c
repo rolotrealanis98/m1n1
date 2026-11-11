@@ -248,6 +248,29 @@ s64 hv_win_storage_max_cpus_set(u64 n)
     return 0;
 }
 
+/*
+ * nightly-7: P_HV_WIN_STORAGE_MAX_CPUS(n, timeout_us). timeout_us bounds each data command's wait while more
+ * than one vCPU is admitted (0 = default 1 s; 100000..30000000). Checked before the cap is set, so a refusal
+ * leaves both unchanged; with n == 1 a timeout is refused (it would have no effect).
+ */
+s64 hv_win_storage_smp_set(u64 n, u64 timeout_us)
+{
+    if (timeout_us && (n < 2 || timeout_us < 100000 || timeout_us > 30000000)) {
+        printf("HV/win nightly-7: SMP disk wait bound %lu us REFUSED (needs a cap >= 2; 100000..30000000)\n",
+               (unsigned long)timeout_us);
+        return -1;
+    }
+    s64 r = hv_win_storage_max_cpus_set(n);
+    if (r || !timeout_us)
+        return r;
+    if (!hv_win_storage_set_smp_timeout((u32)timeout_us)) { /* unreachable: same window as the cap */
+        printf("HV/win nightly-7: SMP disk wait bound REFUSED after the cap was set\n");
+        return -1;
+    }
+    printf("HV/win nightly-7: SMP disk wait bound %lu us\n", (unsigned long)timeout_us);
+    return 0;
+}
+
 /* smp2d: EL2 is emulating the guest's WFI (HCR_EL2.TWI set in hv_win_configure) */
 bool hv_win_wfi_trapping(void)
 {

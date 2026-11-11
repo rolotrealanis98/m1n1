@@ -32,6 +32,65 @@ static void err_note(u32 status)
     err_other++;
 }
 
+/*
+ * nightly-7: the SMP disk-path evidence line, printed with every NV report and at once when a violation counter
+ * moves (hv_win_storage_watch), only when the storage cap is above 1 (cap 1 output is unchanged):
+ *   SM cap N tmo-us T | acc c<cpu>:<n>.. | tick c<cpu>:<n> | other <n> | no-bhl acc A tick T other O |
+ *      unlocked-ops U | contended C spin-max-us S | hold-max-us acc H (@0x<addr>) tick K | >=1ms a >=10ms b
+ *      >=100ms c >=1s d | nvme66 target v<t> inj v<v>:<n>.. taken v<v>:<n>.. hold v<v>:<n>.. | holdoff H rel R
+ * Expected on a healthy run: no-bhl acc 0 tick 0, unlocked-ops 0, contended 0, accesses from more than one CPU,
+ * NVMe interrupts taken on a vCPU other than 0, rel close to holdoff.
+ */
+#include "hv_win.h"
+u32 hv_vgic3_nvme_by_vcpu(u32 n, u64 *inj, u64 *taken, u64 *holdoff, u64 *holdoffs, u64 *releases);
+static u64 smps_us(u64 ticks, u64 f)
+{
+    return f ? ticks * 1000000 / f : 0;
+}
+void hv_win_storage_smp_line(const char *prefix)
+{
+    if (hv_win_storage_max_cpus() <= 1)
+        return;
+    const struct hv_storage_smp_stats *s = hv_win_storage_smp_stats();
+    u64 f = mrs(CNTFRQ_EL0);
+    printf("%s SM cap %u tmo-us %u | acc", prefix, hv_win_storage_max_cpus(), hv_win_storage_smp_cmd_timeout_us());
+    for (int c = 0; c < 24; c++)
+        if (s->entries[HV_SMPS_ACCESS][c])
+            printf(" c%d:%lu", c, (unsigned long)s->entries[HV_SMPS_ACCESS][c]);
+    printf(" | tick");
+    for (int c = 0; c < 24; c++)
+        if (s->entries[HV_SMPS_TICK][c])
+            printf(" c%d:%lu", c, (unsigned long)s->entries[HV_SMPS_TICK][c]);
+    u64 other = 0;
+    for (int c = 0; c < 24; c++)
+        other += s->entries[HV_SMPS_OTHER][c];
+    printf(" | other %lu | no-bhl acc %lu tick %lu other %lu | unlocked-ops %lu | contended %lu spin-max-us %lu | "
+           "hold-max-us acc %lu (@0x%lx) tick %lu | >=1ms %lu >=10ms %lu >=100ms %lu >=1s %lu",
+           (unsigned long)other, (unsigned long)s->no_bhl[HV_SMPS_ACCESS], (unsigned long)s->no_bhl[HV_SMPS_TICK],
+           (unsigned long)s->no_bhl[HV_SMPS_OTHER], (unsigned long)s->ops_unlocked, (unsigned long)s->contended,
+           (unsigned long)smps_us(s->spin_max_ticks, f), (unsigned long)smps_us(s->hold_max_ticks[HV_SMPS_ACCESS], f),
+           (unsigned long)s->hold_max_addr, (unsigned long)smps_us(s->hold_max_ticks[HV_SMPS_TICK], f),
+           (unsigned long)s->hold_hist[0], (unsigned long)s->hold_hist[1], (unsigned long)s->hold_hist[2],
+           (unsigned long)s->hold_hist[3]);
+    static u64 inj[24], taken[24], hold[24];
+    u64 holdoffs = 0, rel = 0;
+    u32 n = hv_win.nr_vcpus < 24 ? hv_win.nr_vcpus : 24;
+    u32 t = hv_vgic3_nvme_by_vcpu(n, inj, taken, hold, &holdoffs, &rel);
+    printf(" | nvme66 target v%u inj", t);
+    for (u32 v = 0; v < n; v++)
+        if (inj[v])
+            printf(" v%u:%lu", v, (unsigned long)inj[v]);
+    printf(" taken");
+    for (u32 v = 0; v < n; v++)
+        if (taken[v])
+            printf(" v%u:%lu", v, (unsigned long)taken[v]);
+    printf(" hold");
+    for (u32 v = 0; v < n; v++)
+        if (hold[v])
+            printf(" v%u:%lu", v, (unsigned long)hold[v]);
+    printf(" | holdoff %lu rel %lu\n", (unsigned long)holdoffs, (unsigned long)rel);
+}
+
 static const struct s1_model *model(void)
 {
     bool a, r;
@@ -129,6 +188,7 @@ void hv_win_storage_status_lines(const char *prefix)
            (unsigned long)hv_win_storage_native_stat(20), (unsigned long)hv_win_storage_native_stat(19),
            (unsigned long)hv_win_storage_native_stat(23), (unsigned long)hv_win_storage_native_stat(43),
            (unsigned long)hv_win_storage_native_stat(39), (unsigned long)hv_win_storage_native_stat(30));
+    hv_win_storage_smp_line(prefix); /* nightly-7: cap > 1 only */
 }
 
 /* Called every hypervisor tick: any new controller fatal, model refusal, backend error/refusal or
@@ -156,6 +216,18 @@ bool hv_win_storage_watch(void)
                (unsigned long)g->last_err_status, (unsigned long)(st2 >> 32), (unsigned long)(st2 & 0xffffffff),
                (unsigned long)rerr, (unsigned long)werr, (unsigned long)wref);
         printed = true; /* the caller flushes the console */
+    }
+    /* nightly-7: an SMP invariant counter moved (cap > 1): print the SM line at once */
+    if (hv_win_storage_max_cpus() > 1) {
+        static u64 last_viol;
+        const struct hv_storage_smp_stats *s = hv_win_storage_smp_stats();
+        u64 viol = s->no_bhl[HV_SMPS_ACCESS] + s->no_bhl[HV_SMPS_TICK] + s->ops_unlocked + s->contended +
+                   s->hold_hist[3];
+        if (viol != last_viol) {
+            last_viol = viol;
+            hv_win_storage_smp_line("HV/win n7 SMP EVENT:");
+            printed = true;
+        }
     }
     primed = true;
     last_fatal = g->fatal_count; last_ref = ref; last_werr = werr; last_rerr = rerr; last_wref = wref;

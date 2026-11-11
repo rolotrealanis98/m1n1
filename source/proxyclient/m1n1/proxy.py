@@ -1293,9 +1293,10 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_STORAGE_NATIVE, window_addr, size, signed=True)
     def hv_win_storage_native_stat(self, index):
         return self.request(self.P_HV_WIN_STORAGE_NATIVE_STAT, index)
-    def hv_win_storage_max_cpus(self, n):
+    def hv_win_storage_max_cpus(self, n, timeout_us=0):
         # smp-storage: vCPUs the disk path admits (default 1); once, before native select/PREP and guest start.
-        return self.request(self.P_HV_WIN_STORAGE_MAX_CPUS, n, signed=True)
+        # nightly-7: timeout_us bounds each data command's wait when n > 1 (0 = default 1 s; 100000..30000000).
+        return self.request(self.P_HV_WIN_STORAGE_MAX_CPUS, n, timeout_us, signed=True)
     def hv_win_storage_native_quiesce(self):
         # r3.1: stage-1 quiesce of the selected native backend; refused while a guest CPU runs.
         return self.request(self.P_HV_WIN_STORAGE_NATIVE_QUIESCE, signed=True)

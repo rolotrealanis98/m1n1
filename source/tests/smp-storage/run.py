@@ -73,14 +73,28 @@ L = 'hv_win_storage.c'
 Q = 's1/hv_nvme_queue.c'
 MUTANTS = [
     ('access_lock_removed', [(L, '''    hv_storage_lock_take();
+    smps_enter(HV_SMPS_ACCESS); /* nightly-7 */
+    u64 t0=SMPS_NOW();
     bool ok=access_locked(ctx,address,value,write,width);
-    hv_storage_lock_release();''', '''    bool ok=access_locked(ctx,address,value,write,width);''')], 'main'),
+    smps_hold(HV_SMPS_ACCESS,t0,address);
+    hv_storage_lock_release();''', '''    smps_enter(HV_SMPS_ACCESS); /* nightly-7 */
+    u64 t0=SMPS_NOW();
+    bool ok=access_locked(ctx,address,value,write,width);
+    smps_hold(HV_SMPS_ACCESS,t0,address);''')], 'main'),
     ('tick_lock_removed', [(L, '''    hv_storage_lock_take(); /* smp-storage */
+    smps_enter(HV_SMPS_TICK); /* nightly-7 */
+    u64 t0 = SMPS_NOW();
     s1_backend_poll();
-    hv_storage_lock_release();''', '''    s1_backend_poll();''')], 'main'),
+    smps_hold(HV_SMPS_TICK, t0, 0);
+    hv_storage_lock_release();''', '''    smps_enter(HV_SMPS_TICK); /* nightly-7 */
+    u64 t0 = SMPS_NOW();
+    s1_backend_poll();
+    smps_hold(HV_SMPS_TICK, t0, 0);''')], 'main'),  # nightly-7: retargeted past the breadcrumbs (same intent)
     ('retire_lock_removed', [(L, '''    hv_storage_lock_take(); /* smp-storage */
+    smps_enter(HV_SMPS_OTHER); /* nightly-7 */
     storage_retire_locked();
-    hv_storage_lock_release();''', '''    storage_retire_locked();''')], 'retire'),
+    hv_storage_lock_release();''', '''    smps_enter(HV_SMPS_OTHER); /* nightly-7 */
+    storage_retire_locked();''')], 'retire'),  # nightly-7: retargeted past the breadcrumbs (same intent)
     ('lock_not_exclusive', [(L, '''        if (__atomic_compare_exchange_n(&storage_lock.owner, &none, me, false, __ATOMIC_ACQUIRE,
                                         __ATOMIC_RELAXED))
             break;''', '''        __atomic_store_n(&storage_lock.owner, me, __ATOMIC_RELAXED); (void)none;
@@ -89,9 +103,21 @@ MUTANTS = [
         __atomic_store_n(&storage_lock.owner, -1, __ATOMIC_RELEASE);''', '''    --storage_lock.depth;
     __atomic_store_n(&storage_lock.owner, -1, __ATOMIC_RELEASE);''')], 'retire_nested'),
     ('access_lock_and_lease_lock_check_removed', [(L, '''    hv_storage_lock_take();
+    smps_enter(HV_SMPS_ACCESS); /* nightly-7 */
+    u64 t0=SMPS_NOW();
     bool ok=access_locked(ctx,address,value,write,width);
-    hv_storage_lock_release();''', '''    bool ok=access_locked(ctx,address,value,write,width);'''),
+    smps_hold(HV_SMPS_ACCESS,t0,address);
+    hv_storage_lock_release();''', '''    smps_enter(HV_SMPS_ACCESS); /* nightly-7 */
+    u64 t0=SMPS_NOW();
+    bool ok=access_locked(ctx,address,value,write,width);
+    smps_hold(HV_SMPS_ACCESS,t0,address);'''),
         ('hv_win_storage_mem.c', 'bhl.count > 0 && hv_storage_lock_held() &&', 'bhl.count > 0 &&')], 'main'),
+    # nightly-7: a model callback outside the storage lock must show in the ops_unlocked breadcrumb
+    ('n7_access_runs_after_release', [(L, '''    bool ok=access_locked(ctx,address,value,write,width);
+    smps_hold(HV_SMPS_ACCESS,t0,address);
+    hv_storage_lock_release();''', '''    hv_storage_lock_release();
+    bool ok=access_locked(ctx,address,value,write,width);
+    smps_hold(HV_SMPS_ACCESS,t0,address);''')], 'main'),
     ('sqe_reread_after_validation', [
         (Q, 'static u16 process_write(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd)\n{',
          'static const void *mut_live_sqe;\nstatic u16 process_write(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd)\n{'),

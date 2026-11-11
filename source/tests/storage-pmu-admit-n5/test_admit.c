@@ -58,6 +58,10 @@ struct hv_win_state hv_win;
 struct boot_args cur_boot_args;
 void hv_win_pmu_host_reset(void);
 u8 hv_win_pmu_host_frame(u64 ipa);
+/* nightly-7 (smp-storage merge): hv_win_storage_mem.c asks the storage cap and the storage lock. This
+ * harness exercises the single-vCPU admission only: cap 1 (the r4.14 path, unchanged), lock held. */
+u32 hv_win_storage_max_cpus(void) { return 1; }
+bool hv_storage_lock_held(void) { return true; }
 
 #define CHECK(x)                                                                                   \
     do {                                                                                           \

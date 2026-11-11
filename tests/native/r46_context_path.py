@@ -15,6 +15,7 @@ int cpu,boot_cpu_idx;u32 uartproxy_storage_exceptions;
 bool hv_win_storage_guest_ram_contains(u64 a,u64 n){(void)a;(void)n;return false;}
 static bool smp_ctx; /* smp-storage: hv_win_storage.c (cap > 1 and the storage lock held by this CPU) */
 bool hv_win_storage_smp_context(void){return smp_ctx;}
+u32 hv_win_storage_smp_cmd_timeout_us(void){return 0;} /* nightly-7: cap 1 (r4.14 bounds) */
 enum {START_BOOT,START_EXCEPTION,START_EXCEPTION_LOWER,START_HV};
 struct exc_info {u64 regs[46];};
 /* r4.9: r4.8 uartproxy.c brackets the session with start->info (s1n_link_exc_ctx); stub carries it */

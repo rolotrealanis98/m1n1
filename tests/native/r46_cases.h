@@ -5,6 +5,7 @@ extern u64 r46_clock_step;
 extern unsigned r46_flip_read;
 extern int s1n_test_cpu;
 extern bool s1n_test_exception;
+extern u32 s1n_test_smp_timeout_us; /* nightly-7 */
 static int nested_result;
 static void r46_nested_hook(void) { nested_result = ans_ro_test_submit(false, 2); }
 static void *r46_thread(void *unused) { (void)unused; r46_nested_hook(); return NULL; }
@@ -138,6 +139,29 @@ static void r46_timeout(int op)
     r46_clock_step = 0;
     r45_frozen();
 }
+/* nightly-7: with more than one vCPU admitted (native_link.c reports a bound), every data command's wait is bounded
+ * by it and expiry freezes exactly like the 30 s bound. op 0 FLUSH, 1 WRITE (bound 1 s), 2 READ (bound 0.5 s:
+ * below READ's own 1 s), 3 WRITE with the bound at 30 s (no change: the r4.14 bound applies). */
+static void n7_smp_timeout(int op)
+{
+    rw_up(rw_cfg(), 0);
+    if (op == 1 || op == 3) CHECK(guest_write(0, 1, 1, 0) == 0); /* finish GPT recheck */
+    s1n_test_smp_timeout_us = op == 2 ? 500000u : op == 3 ? 30000000u : 1000000u;
+    F.cfg.cqe_never = true;
+    r46_clock_step = op == 2 ? 100000 : 1000000;
+    u64 start = F.now;
+    if (op == 0) CHECK(!ans_ro_flush());
+    else if (op == 1 || op == 3) CHECK(guest_write(1, 1, 2, 0) == VNVME_SC_INTERNAL);
+    else CHECK(!ans_ro_xfer(false, W_START, 1, 0));
+    u64 elapsed = F.now - start;
+    u64 bound = op == 2 ? 500000u : op == 3 ? 30000000u : 1000000u;
+    CHECK(elapsed >= bound);
+    CHECK(elapsed < bound + 3 * r46_clock_step); /* within a few clock steps of the bound, not READ's 1 s */
+    CHECK(ans_ro_stats()->reason == ANS_RO_E_CMD_TIMEOUT);
+    r46_clock_step = 0;
+    s1n_test_smp_timeout_us = 0;
+    r45_frozen();
+}
 static void r46_split(void)
 {
     rw_up(rw_cfg(), 0);
@@ -260,6 +284,7 @@ static bool r46_dispatch(const char *s)
     else if (!strcmp(s,"r46_canary")) r46_canary(false);
     else if (!strcmp(s,"r46_canary_save")) r46_canary(true);
     else if (!strncmp(s,"r46_timeout_",12)) r46_timeout(atoi(s+12));
+    else if (!strncmp(s,"n7_smp_timeout_",15)) n7_smp_timeout(atoi(s+15));
     else if (!strncmp(s,"r46_raw_range_",14)) r46_raw_range(atoi(s+14));
     else if (!strncmp(s,"r46_admin_bad_",14)) r46_admin_bad(atoi(s+14));
     else if (!strcmp(s,"r46_ro_cap")) r46_ro_cap();

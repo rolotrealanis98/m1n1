@@ -45,6 +45,22 @@ bool hv_storage_lock_held(void);
 u32 hv_win_storage_max_cpus(void);
 bool hv_win_storage_set_max_cpus(u32 n);
 bool hv_win_storage_smp_context(void);
+/* nightly-7: SMP data-command wait bound (0 = cap 1, r4.14 bounds) and run-time evidence (SM status line) */
+bool hv_win_storage_set_smp_timeout(u32 us);
+u32 hv_win_storage_smp_cmd_timeout_us(void);
+enum { HV_SMPS_ACCESS, HV_SMPS_TICK, HV_SMPS_OTHER, HV_SMPS_SITES };
+struct hv_storage_smp_stats {
+    u64 entries[HV_SMPS_SITES][24]; /* entries by site and m1n1 CPU index */
+    u64 no_bhl[HV_SMPS_SITES];      /* entered without this CPU holding bhl: access/tick expected 0; other =
+                                     * PREP + the hv_init retire on the boot proxy before guest start (by design) */
+    u64 ops_unlocked;               /* model callbacks run without the storage lock (expected 0) */
+    u64 contended, spin_max_ticks;  /* storage lock found taken by another CPU (expected 0: nested in bhl) */
+    u64 hold_max_ticks[HV_SMPS_SITES], hold_max_addr; /* longest locked section (= bhl hold) */
+    u64 hold_hist[4];               /* MMIO accesses held >= 1 ms, 10 ms, 100 ms, 1 s */
+    u64 freq;                       /* CNTFRQ_EL0, cached */
+};
+const struct hv_storage_smp_stats *hv_win_storage_smp_stats(void);
+void hv_win_storage_smp_line(const char *prefix); /* hv_win_status.c (firmware only) */
 /* Existing-device ownership queries, no mutation. */
 bool hv_vgic3_spi_unassigned(u32 intid);
 u32 hv_win_pl011_gsiv(void);

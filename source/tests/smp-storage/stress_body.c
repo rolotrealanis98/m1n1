@@ -820,6 +820,13 @@ int main(int argc, char **argv)
         REQUIRE(controller.faulted);
         REQUIRE(!strcmp(mode, "retire") || retire_dispatches > 0);
     }
+    /* nightly-7: the run-time breadcrumbs agree with the harness: every model callback ran under the storage lock,
+     * no access/tick without "bhl", and in main mode every worker CPU entered the MMIO path */
+    const struct hv_storage_smp_stats *ss = hv_win_storage_smp_stats();
+    REQUIRE(ss->ops_unlocked == 0 && ss->no_bhl[HV_SMPS_ACCESS] == 0 && ss->no_bhl[HV_SMPS_TICK] == 0);
+    if (!strcmp(mode, "main"))
+        for (int w = 1; w <= nworkers; w++) REQUIRE(ss->entries[HV_SMPS_ACCESS][w] > 0);
+    fprintf(stderr, "smps: contended %llu\n", (unsigned long long)ss->contended);
     printf("{\"nvcpus\":%d,\"mode\":\"%s\",\"completions\":%llu,\"writes\":%llu,\"reads\":%llu,\"flushes\":%llu,"
            "\"invalid\":%llu,\"hostile_writes\":%llu,\"hostile_reads\":%llu,\"refused\":%llu,\"after_stop\":%llu,"
            "\"words_exact\":%llu,\"words_torn\":%llu,\"words_unbounded\":%llu,\"dup_src_writes\":%llu,\"src_mutated_writes\":%llu,\"backend_writes\":%llu,"

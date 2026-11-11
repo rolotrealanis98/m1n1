@@ -30,6 +30,7 @@ code=r'''
 static int exc_count,exc_guard, touched, sent, remaining, consumed;
 bool hv_win_storage_guest_ram_contains(u64 a,u64 n){(void)a;(void)n;return false;}
 bool hv_win_storage_smp_context(void){return false;} /* smp-storage: cap 1 */
+u32 hv_win_storage_smp_cmd_timeout_us(void){return 0;} /* nightly-7: cap 1 (r4.14 bounds) */
 static bool disable_data_csums, uartproxy_guest_exception;
 static u8 stream[1024];
 static ssize_t iodev_read(int device,void *b,size_t n) {

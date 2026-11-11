@@ -87,11 +87,26 @@ check('proxy.py: constant + method', 'P_HV_WIN_PERF = 0xc58' in pp and 'def hv_w
 paths = ['source/src/hv/win/s1', 'source/src/hv/win/hv_win_storage.c', 'source/src/hv/win/hv_win_storage.h',
          'source/src/hv/win/hv_win_storage_mem.c', 'source/src/hv/win/hv_win_storage_mem.h',
          'source/src/hv/win/hv_win_storage_native.c', 'source/src/hv/win/hv_win_status.c']
-r = subprocess.run(['git', '-C', str(WT), 'diff', '--quiet', PARENT, '--'] + paths)
-check('storage files identical to nightly-4b (s1/*, hv_win_storage*, native, NV status)', r.returncode == 0)
-r = subprocess.run(['git', '-C', str(WT), 'diff', '--name-only', PARENT, '--', 'source/src'], capture_output=True, text=True)
-bad = [p for p in r.stdout.split() if re.search(r'/s1/|hv_win_storage|hv_nvme|native_', p)]
-check(f'no storage-pattern file changed ({len(r.stdout.split())} source files changed)', not bad)
+# nightly-7 (replaces "storage files identical to the parent", which cannot hold once the SMP disk path is merged):
+# (a) at the merge commit, every storage-pattern file differs from the parent by exactly the reviewed smp-storage
+#     diff 7e803d6..efb8883 (the same changed lines, file by file, nothing else);
+# (b) after the merge, only the nightly-7 SMP files listed in N7_STORAGE may differ from the merge commit.
+N7_MERGE, SMP_BASE, SMP_HEAD = '78c0567', '7e803d6', 'efb8883'
+N7_STORAGE = {'source/src/hv/win/hv_win_storage.c', 'source/src/hv/win/hv_win_storage.h',
+              'source/src/hv/win/hv_win_status.c', 'source/src/hv/win/s1/ans_ro.c', 'source/src/hv/win/s1/native_link.c'}
+def changed_lines(a, b, f):
+    out = subprocess.run(['git', '-C', str(WT), 'diff', '-U0', a, b, '--', f], capture_output=True, text=True, check=True).stdout
+    return sorted(l for l in out.splitlines() if l[:1] in '+-' and not l.startswith(('+++', '---')))
+def storage_files(rev):
+    out = subprocess.run(['git', '-C', str(WT), 'ls-tree', '-r', '--name-only', rev, '--', 'source/src'],
+                         capture_output=True, text=True, check=True).stdout.split()
+    return [p for p in out if re.search(r'/s1/|hv_win_storage|hv_nvme|native_', p) or p in paths]
+files = sorted(set(storage_files(PARENT)) | set(storage_files(N7_MERGE)))
+bad = [f for f in files if changed_lines(PARENT, N7_MERGE, f) != changed_lines(SMP_BASE, SMP_HEAD, f)]
+check(f'storage files at the nightly-7 merge = parent + the smp-storage diff exactly ({len(files)} files)', not bad)
+r = subprocess.run(['git', '-C', str(WT), 'diff', '--name-only', N7_MERGE, '--', 'source/src'], capture_output=True, text=True)
+bad = [p for p in r.stdout.split() if (re.search(r'/s1/|hv_win_storage|hv_nvme|native_', p) or p in paths) and p not in N7_STORAGE]
+check(f'after the merge only the nightly-7 SMP storage files changed ({len(r.stdout.split())} source files changed)', not bad)
 # nightly-6c: the nightly-5c review's conditions for builds rebased on it (REVIEW-5c.md): these resident files unchanged
 r = subprocess.run(['git', '-C', str(WT), 'diff', '--quiet', PARENT, '--', 'source/src/heapblock.c', 'source/src/heapblock.h',
                     'source/src/usb.c', 'source/src/mtp_dma.c'])

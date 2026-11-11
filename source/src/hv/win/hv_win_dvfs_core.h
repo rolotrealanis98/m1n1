@@ -368,8 +368,11 @@ static inline void dvfs_governor(struct dvfs_state *s, const u64 *idle_ns, const
 
     u32 busy[DVFS_MAX_CLUSTERS] = {0};
     for (u32 k = 0; k < s->ncpus; k++) {
-        u64 d = idle_ns[k] - s->gov_prev_idle[k];
-        s->gov_prev_idle[k] = idle_ns[k];
+        /* nightly-7: a secondary's WFI exit can race the boot tick's idle sample (counted twice, then the next
+         * sample goes backwards); a backwards sample counts as no idle and keeps the high-water mark */
+        u64 d = idle_ns[k] > s->gov_prev_idle[k] ? idle_ns[k] - s->gov_prev_idle[k] : 0;
+        if (idle_ns[k] > s->gov_prev_idle[k])
+            s->gov_prev_idle[k] = idle_ns[k];
         if (!online[k])
             continue;
         if (d > dt)
