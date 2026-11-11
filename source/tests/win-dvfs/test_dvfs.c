@@ -436,7 +436,12 @@ int main(void)
         CHECK(dvfs_check_cfg(&b, 18) < 0);                                                         \
     } while (0)
     BAD(b.magic ^= 1);
-    BAD(b.version = 1);
+    BAD(b.version = 3);
+    BAD(b.version = 1; b.gov.enabled = 1);
+    b = base_cfg();
+    b.version = 1; /* the 632-byte cpuperf-B layout (gov block zero-filled by the glue) stays accepted */
+    CHECK(dvfs_check_cfg(&b, 18) == 0);
+    CHECK(DVFS_CFG_V1_SIZE == offsetof(struct dvfs_cfg, gov));
     BAD(b.nclusters = 0);
     BAD(b.nclusters = 5);
     BAD(b.ncpus = 0);

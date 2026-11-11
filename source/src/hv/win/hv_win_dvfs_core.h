@@ -42,6 +42,7 @@
 
 #define DVFS_CFG_MAGIC   0x53465644U /* "DVFS" */
 #define DVFS_CFG_VERSION 2 /* cpuperf-G: + struct dvfs_gov_cfg */
+#define DVFS_CFG_V1_SIZE 632 /* version 1 (no governor block) */
 #define DVFS_TEMP_UNKNOWN (-2147483647 - 1)
 
 /*
@@ -131,7 +132,10 @@ static const u64 dvfs_t6050_bases[3] = {0x210e20000UL, 0x211e20000UL, 0x212e2000
 
 static inline int dvfs_check_cfg(const struct dvfs_cfg *cfg, u32 ncpus)
 {
-    if (cfg->magic != DVFS_CFG_MAGIC || cfg->version != DVFS_CFG_VERSION)
+    /* version 1 = the 632-byte layout without the governor block (cpuperf-B launchers, e.g. the disk-boot
+     * run_windows_b.py): accepted with the governor off (the glue zero-fills the block) */
+    if (cfg->magic != DVFS_CFG_MAGIC || (cfg->version != DVFS_CFG_VERSION && cfg->version != 1) ||
+        (cfg->version == 1 && cfg->gov.enabled))
         return -1;
     if (!cfg->nclusters || cfg->nclusters > DVFS_MAX_CLUSTERS || cfg->ncpus != ncpus ||
         !ncpus || ncpus > DVFS_MAX_CPUS)

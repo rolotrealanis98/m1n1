@@ -112,11 +112,17 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
         printf("HV/win cpuperf-B: chip 0x%x is not T6050, refused\n", chip_id);
         return -1;
     }
-    if (len != sizeof(dvfs_cfg_copy) || !cfg_addr) {
-        printf("HV/win cpuperf-B: config length %ld != %ld\n", len, (long)sizeof(dvfs_cfg_copy));
+    if ((len != sizeof(dvfs_cfg_copy) && len != DVFS_CFG_V1_SIZE) || !cfg_addr) {
+        printf("HV/win cpuperf-B: config length %ld is neither %ld (v2) nor %d (v1)\n", len,
+               (long)sizeof(dvfs_cfg_copy), DVFS_CFG_V1_SIZE);
         return -1;
     }
-    memcpy(&dvfs_cfg_copy, (void *)cfg_addr, sizeof(dvfs_cfg_copy));
+    memset(&dvfs_cfg_copy, 0, sizeof(dvfs_cfg_copy));
+    memcpy(&dvfs_cfg_copy, (void *)cfg_addr, len);
+    if (len == DVFS_CFG_V1_SIZE && dvfs_cfg_copy.version != 1) {
+        printf("HV/win cpuperf-B: a %d-byte config must be version 1\n", DVFS_CFG_V1_SIZE);
+        return -1;
+    }
     /* Without the CPPC page (no _CPC: --cpu-dvfs fixed/governor with uniform/adt classes) only fixed or
      * governed clusters make sense */
     if (!cppc.configured && !dvfs_cfg_copy.gov.enabled) {
