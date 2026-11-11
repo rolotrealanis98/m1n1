@@ -168,9 +168,10 @@ static inline void n1pt_init(struct n1pt *s, const struct n1pt_ops *ops, uint64_
     }
 }
 
+/* the real functions may be touched: not refused at start, not parked, storage guard not tripped, link up */
 static inline bool n1pt_live(const struct n1pt *s)
 {
-    return !s->dead && !s->parked && s->ops->link_up(s->ops->ctx);
+    return !s->dead && !s->parked && !s->guard && s->ops->link_up(s->ops->ctx);
 }
 
 static inline uint32_t n1pt_rp_read(const struct n1pt *s, unsigned reg)

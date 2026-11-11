@@ -227,6 +227,10 @@ void write32(u64 a, u32 v)
         }
         return;
     }
+    if (a == p0 + 0x100) { /* port INTSTAT: write-1-to-clear */
+        m_set(a, m_get(a) & ~v);
+        return;
+    }
     if (a == p0 + 0x800 && !(v & 1))
         M.link = false;
     for (int p = 0; p < 4; p++)
@@ -451,3 +455,4 @@ void model_reset(void)
     for (int fn = 0; fn < 3; fn++)
         fn_reset(fn);
 }
+u64 m_now(void) { return M.now; }

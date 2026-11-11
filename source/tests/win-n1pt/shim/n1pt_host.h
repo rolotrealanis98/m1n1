@@ -15,9 +15,9 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
-typedef unsigned long u64; /* LP64 like the firmware: "%lx" matches */
+typedef uint64_t u64; /* as the firmware; host printf "%lx" is the same width on LP64 */
 typedef int32_t s32;
-typedef long s64;
+typedef int64_t s64;
 
 #define BIT(x)                 (1UL << (x))
 #define GENMASK(msb, lsb)      ((BIT((msb + 1) - (lsb)) - 1) << (lsb))
@@ -47,7 +47,7 @@ void *memalign(size_t align, size_t size);
 void free_hook(void *p);
 #define free(p) free_hook(p)
 
-int model_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int model_printf(const char *fmt, ...); /* no format check: the sources print u64 with %lx */
 #define printf(...) model_printf(__VA_ARGS__)
 
 /* ADT */

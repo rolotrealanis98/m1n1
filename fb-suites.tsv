@@ -94,3 +94,6 @@ QF	trace-1cpu	source/src/hv/win/* source/src/hv/win/s1/* tests/native/*	FB_JOBS=
 # ---- nightly-7: cable-independent session end (host stop, dead-man, uncollected guest exit)
 QF	win-session	source/src/hv/win/hv_win_session.c source/tests/win-session/*	OUT=$FB_OUT/ws sh source/tests/win-session/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 QF	win-gpu	source/src/hv/win/hv_win_gpu* source/src/hv/win/hv_win_t6050_routes.h source/src/hv/hv.c source/src/hv/win/hv_win.c source/tests/win-gpu/*	OUT=$FB_OUT/wg sh source/tests/win-gpu/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+# ---- n1pt (wireless/n1-native-20261111): N1 PCIe passthrough: ECAM/service page/IRQ logic, plat + DART + glue on the register model
+QF	win-n1pt	source/src/hv/win/hv_win_n1pt* source/src/n1pt_* source/src/pcie_t6050* source/tests/win-n1pt/*	FB_OUT=$FB_OUT sh source/tests/win-n1pt/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+M	win-n1pt-mutants	source/src/hv/win/hv_win_n1pt* source/src/n1pt_* source/src/pcie_t6050* source/tests/win-n1pt/*	N1PT_MUTANTS=1 FB_OUT=$FB_OUT sh source/tests/win-n1pt/run.sh 2>&1 | grep -E "mutants:|SURVIVED" | tail -3; test ${PIPESTATUS[0]} = 0
