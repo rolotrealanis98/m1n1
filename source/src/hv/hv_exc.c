@@ -1451,9 +1451,9 @@ bool hv_exc_sync(struct exc_info *ctx)
     hv_win_diag_note(HV_WIN_DIAG_TRAP, ctx, 0);
     bool handled = false;
     u32 ec = FIELD_GET(ESR_EC, ctx->esr);
-    /* r4.11 diagnostics (lock-free counters; 1 vCPU) */
-    hv_exits_sync++;
-    hv_trap_ec[ec]++;
+    /* r4.11 diagnostics (lock-free counters). u1: atomic, so concurrent vCPUs do not lose counts */
+    __atomic_fetch_add(&hv_exits_sync, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&hv_trap_ec[ec], 1, __ATOMIC_RELAXED);
     hv_trap_ec_pc[ec] = ctx->elr;
     hv_trap_ec_far[ec] = ctx->far;
 
@@ -1630,7 +1630,7 @@ bool hv_exc_sync(struct exc_info *ctx)
 void hv_exc_irq(struct exc_info *ctx)
 {
     hv_wdt_breadcrumb('I');
-    hv_exits_irq++;
+    __atomic_fetch_add(&hv_exits_irq, 1, __ATOMIC_RELAXED); /* u1: before bhl; atomic for > 1 vCPU */
     hv_get_context(ctx);
     hv_integ_snapshot(ctx, 1); /* smp2d: IRQ */
     hv_exc_entry();
@@ -1649,7 +1649,7 @@ void hv_exc_fiq(struct exc_info *ctx)
 {
     bool tick = false;
 
-    hv_exits_fiq++;
+    __atomic_fetch_add(&hv_exits_fiq, 1, __ATOMIC_RELAXED); /* u1: lock-free path; atomic for > 1 vCPU */
     /* smp2f: publish this CPU's interface/timer state as the FIQ found it (before maintenance) */
     if (hv_win_wfi_trapping())
         hv_win_wfi_snap(HV_SNAP_FIQ, ctx, 0);

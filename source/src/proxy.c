@@ -628,12 +628,20 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             reply->retval = hv_win_fb_stat(request->args[0]);
             break;
         case P_HV_WIN_STORAGE_PREP:
+            if (!hv_win_storage_smp_gate("storage PREP")) { /* u1 */
+                reply->retval = -1;
+                break;
+            }
             reply->retval = hv_win_storage_prepare(request->args[0], request->args[1]);
             break;
         case P_HV_WIN_STORAGE_STAT:
             reply->retval = hv_win_storage_stat(request->args[0]);
             break;
         case P_HV_WIN_STORAGE_NATIVE:
+            if (!hv_win_storage_smp_gate("native storage select")) { /* u1 */
+                reply->retval = -1;
+                break;
+            }
             reply->retval = hv_win_storage_native_select(request->args[0], request->args[1]);
             break;
         case P_HV_WIN_STORAGE_NATIVE_STAT:

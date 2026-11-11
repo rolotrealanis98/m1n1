@@ -179,6 +179,27 @@ u64 hv_win_status(void)
     return ((u64)hv_win.exit_reason << 32) | (hv_win.psci_calls & 0xffffffff);
 }
 
+/*
+ * u1: the r4.14 disk path (emulated NVMe controller, its queue/PRP planner, the storage lease and link lock,
+ * the synchronous ANS backend) is single-vCPU code; see SMP-SAFETY.md. Storage selection/preparation is
+ * refused with more than one vCPU, with one console line, and once storage has been touched a later
+ * CONFIGURE with more than one vCPU is refused too. With one vCPU (or none configured yet) this is a no-op
+ * and the storage path behaves exactly as r4.14 (which also refuses PREP for nr_vcpus != 1 on its own).
+ */
+static bool u1_storage_touched;
+
+bool hv_win_storage_smp_gate(const char *what)
+{
+    if (hv_win.nr_vcpus > 1) {
+        printf("HV/win u1: %s REFUSED: %u vCPUs configured; the disk path (emulated NVMe, ANS reads/writes) "
+               "is single-vCPU only - run storage with -C 1 (SMP-SAFETY.md)\n",
+               what, hv_win.nr_vcpus);
+        return false;
+    }
+    u1_storage_touched = true;
+    return true;
+}
+
 /* smp2d: EL2 is emulating the guest's WFI (HCR_EL2.TWI set in hv_win_configure) */
 bool hv_win_wfi_trapping(void)
 {
@@ -276,6 +297,11 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
 
     if (nr_vcpus < 1 || nr_vcpus > MAX_CPUS) {
         printf("HV/win: invalid vCPU count %ld\n", nr_vcpus);
+        return -1;
+    }
+    if (nr_vcpus > 1 && u1_storage_touched) {
+        printf("HV/win u1: CONFIGURE with %ld vCPUs REFUSED: storage was already selected/prepared and the "
+               "disk path is single-vCPU only (SMP-SAFETY.md)\n", nr_vcpus);
         return -1;
     }
 
