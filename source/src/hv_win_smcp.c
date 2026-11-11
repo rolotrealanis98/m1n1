@@ -54,6 +54,23 @@ static void update_irq(void)
 
 bool hv_win_smcp_claims_spi(u64 gsiv) { return attempted && gsiv == SMCP_GSIV; }
 
+/*
+ * cpuperf-G thermal guard input (overrides the weak default in hv/win/hv_win_cppc.c): the CPU/SoC die
+ * temperature TCMb in milli-degC, read by the SMCP slow round every 2 s (SMCP_R_TEMP0, 0.1 K). TCMb is the
+ * key Linux's macsmc_soc_die zone and its draft thermal zone use. Unknown (INT32_MIN) unless the SMCP
+ * client runs, has completed a refresh and is not stale (SMCP_ST_VALID, cleared after 10 s), so a stuck
+ * SMC read never looks cool: the governor then keeps its safe ceiling.
+ */
+int hv_win_cpu_temp_mc(void)
+{
+    if (!attempted || retired || smcp_failed(&core) || !(smcp_reg_read(&core, SMCP_R_STATUS) & SMCP_ST_VALID))
+        return -2147483647 - 1;
+    u32 dk = smcp_reg_read(&core, SMCP_R_TEMP0);
+    if (!dk)
+        return -2147483647 - 1;
+    return (int)dk * 100 - 273150;
+}
+
 /* ---- transport ---- */
 /* nightly-2 (review finding 3): one readiness check and the mailbox writes, never asc_send's 200 ms poll on the
  * guest's 1 ms tick (the storage path's timeouts share that tick). Same words as rtkit_send for a non-MTP IOP:
