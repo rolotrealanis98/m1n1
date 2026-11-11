@@ -40,8 +40,8 @@ static const struct smcp_keydef keydefs[SMCP_NKEYS] = {
     [K_CH0R] = {K4("CH0R"), 4, SET_SLOW}, /* :253 */
     [K_CHNC] = {K4("CHNC"), 8, SET_SLOW}, /* :305 */
     [K_ACi] = {K4("AC-i"), 2, SET_SLOW},  /* :272 (absent on this machine per t1b) */
-    [K_CHWA] = {K4("CHWA"), 1, SET_SLOW}, /* :291,1131 */
-    [K_CHLS] = {K4("CHLS"), 2, SET_SLOW}, /* :287,1133 (only when CHWA does not read) */
+    [K_CHWA] = {K4("CHWA"), 1, SET_SLOW}, /* :291,1128 */
+    [K_CHLS] = {K4("CHLS"), 2, SET_SLOW}, /* :287,1130 (only when CHWA does not read) */
     [K_ACSt] = {K4("ACSt"), 4, SET_SLOW}, /* :521 */
     [K_ACPW] = {K4("ACPW"), 4, SET_SLOW}, /* :836 */
     [K_TCMb] = {K4("TCMb"), 4, SET_SLOW}, /* t6050-die0.dtsi:112-113 (macsmc-hwmon) */
@@ -126,7 +126,7 @@ static uint32_t milli_c_to_dk(int32_t m)
 /* macsmc_battery_charging_status (:215-226): status_from_current is J700-only, so CHARGING. */
 static int charging_status(void) { return SMCP_CHG_CHARGING; }
 
-/* macsmc_battery_get_status (:236-327). A failed read of a key Linux treats as fundamental
+/* macsmc_battery_get_status (:234-327). A failed read of a key Linux treats as fundamental
  * (CHCE, CHCC, BSFC, CHSC) makes Linux return an error; here that is UNKNOWN. */
 int smcp_batt_status(const smcp *s)
 {
@@ -150,7 +150,7 @@ int smcp_batt_status(const smcp *s)
     if (vu8(s, K_BSFC))
         return SMCP_CHG_FULL;
 
-    bool has_chwa = s->v[K_CHWA].ever;               /* :1131-1134 */
+    bool has_chwa = s->v[K_CHWA].ever;               /* :1128-1131 */
     bool has_chls = !has_chwa && s->v[K_CHLS].ever;
     if (has_chls) {
         if (vok(s, K_CHLS) && (vu16(s, K_CHLS) & 0xff) >= CHLS_MIN_END_THRESHOLD)
