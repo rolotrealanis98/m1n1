@@ -211,6 +211,9 @@ static void t_discharging(void)
     CHECK_EQ(rd(SMCP_R_PSR), 0);
     CHECK_EQ(rd(SMCP_R_EVT_PENDING), SMCP_EV_BATT | SMCP_EV_AC);
     CHECK(smcp_irq(&S));
+    smcp_reg_write(&S, SMCP_R_EVT_ACK, SMCP_EV_BATT); /* partial ack keeps the rest */
+    CHECK_EQ(rd(SMCP_R_EVT_PENDING), SMCP_EV_AC);
+    CHECK(smcp_irq(&S));
     smcp_reg_write(&S, SMCP_R_EVT_ACK, SMCP_EV_BATT | SMCP_EV_AC);
     CHECK(!smcp_irq(&S));
     /* nothing changes: no new events */
@@ -403,8 +406,15 @@ static void t_timeouts(void)
     uint32_t seq = rd(SMCP_R_SEQ);
     mock_key *k = mock_get(&M, "B0AV");
     k->late_us = 700000;       /* reply arrives after the 500 ms timeout */
-    run_ms(2100 + 600);
+    for (int ms = 0; ms < 4000 && rd(SMCP_R_TIMEOUTS) == 0; ms++)
+        run_ms(1);
     CHECK_EQ(rd(SMCP_R_TIMEOUTS), 1);
+    /* the timeout is followed by a 1 s quiet period: nothing is sent while a late reply may land */
+    {
+        int s0 = M.sends;
+        run_ms(900);
+        CHECK_EQ(M.sends, s0);
+    }
     k->late_us = 0;
     run_ms(6000);
     CHECK(rd(SMCP_R_SEQ) >= seq + 2);
@@ -535,6 +545,7 @@ static void t_power_off(void)
     CHECK_EQ(M.pmu[0xf80f], 0x49);
     CHECK_EQ(M.pmu_writes, 2);
     CHECK_EQ(M.pmu_reads, 1);
+    CHECK_EQ(M.delayed_us, 100000); /* mdelay(100) after off1, as Linux */
     /* wire bytes: three writes after the poller's reads; MBSE gets 4 LE bytes of the fourcc */
     int w = 0;
     for (int i = nlog0; i < M.nlog; i++) {
