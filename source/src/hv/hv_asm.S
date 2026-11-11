@@ -130,13 +130,55 @@ _hv_gexit:
 
     gexit
 
+/*
+ * perf-exits: the same frame as _hv_entry without its dsb sy / isb, for the sync fast path
+ * (hv_exc_sync_fast, hv_exc.c). Used only while hv_perf_fast_sync != 0 (P_HV_WIN_PERF).
+ */
+.type _hv_entry_nb, @function
+_hv_entry_nb:
+    stp x28, x29, [sp, #-16]!
+    stp x26, x27, [sp, #-16]!
+    stp x24, x25, [sp, #-16]!
+    stp x22, x23, [sp, #-16]!
+    stp x20, x21, [sp, #-16]!
+    stp x18, x19, [sp, #-16]!
+    stp x16, x17, [sp, #-16]!
+    stp x14, x15, [sp, #-16]!
+    stp x12, x13, [sp, #-16]!
+    stp x10, x11, [sp, #-16]!
+    stp x8, x9, [sp, #-16]!
+    stp x6, x7, [sp, #-16]!
+    stp x4, x5, [sp, #-16]!
+    stp x2, x3, [sp, #-16]!
+    stp x0, x1, [sp, #-16]!
+    mov x0, sp
+    ret
+
 .globl _v_hv_sync
 .type _v_hv_sync, @function
 _v_hv_sync:
     msr pan, #0
     sub sp, sp, #(SIZEOF_EXC_INFO - 32 * 8)
     str x30, [sp, #-16]!
+    /* perf-exits: x30 is saved and about to be overwritten by bl; use it to test the option */
+    adrp x30, hv_perf_fast_sync
+    ldrb w30, [x30, :lo12:hv_perf_fast_sync]
+    cbnz w30, _v_hv_sync_fast
     bl _hv_entry
+    bl hv_exc_sync
+    cbz x0, 1f
+    b _hv_gexit
+1:
+    b _hv_return
+
+/* perf-exits: try the fast path; if it declines, run the unchanged slow path on the same frame */
+_v_hv_sync_fast:
+    bl _hv_entry_nb
+    bl hv_exc_sync_fast
+    cbnz x0, 1f
+    dsb sy
+    isb
+    mov x0, sp
     bl hv_exc_sync
     cbz x0, 1f
     b _hv_gexit

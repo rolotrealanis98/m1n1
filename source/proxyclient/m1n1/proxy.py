@@ -708,6 +708,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_CPPC_CONFIGURE = 0xc38
     P_HV_WIN_CPPC_STAT = 0xc39
     P_HV_WIN_CPPC_DVFS = 0xc3a
+    P_HV_WIN_PERF = 0xc58
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1223,6 +1224,10 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_CPPC_DVFS, addr, length, signed=True)
     def hv_win_cppc_stat(self):
         return self.request(self.P_HV_WIN_CPPC_STAT, signed=True)
+    def hv_win_perf_configure(self, flags):
+        # perf-exits: bit0 stats (PF line), bit1 fast-mdscr, bit2 mdscr-pass; returns the flags applied
+        # (fast-mdscr can be dropped) or < 0 when refused. Before the guest starts.
+        return self.request(self.P_HV_WIN_PERF, flags, signed=True)
     def hv_win_caps(self):
         return self.request(self.P_HV_WIN_CAPS)
     def hv_win_configure(self, irq_model, gicd_base, gicr_base, nr_vcpus, flags, cpus=0):

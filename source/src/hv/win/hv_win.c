@@ -14,7 +14,9 @@
 #include "aic_regs.h"
 #include "cpu_regs.h"
 #include "dart.h"
+#include "hv_win_perf.h"
 #include "hv_win_pmu_rewrite.h"
+#include "gxf.h"
 #include "hv_win_regs.h"
 #include "smp.h"
 #include "string.h"
@@ -433,6 +435,98 @@ static void hv_win_pmu_traps_init(void)
     sysop("isb");
 }
 
+/*
+ * perf-exits (hv_win_perf.h): P_HV_WIN_PERF options, set once before the guest starts. 0 (the default,
+ * never called) keeps every path as before.
+ */
+static u32 hv_win_perf;
+extern bool hv_started_cpus[MAX_CPUS];
+u64 hv_exc_mdscr_shadow(void);
+void hv_exc_perf_set(u32 flags);
+
+/* DBGBCRn_EL1 = S2_0_C0_Cn_5, DBGWCRn_EL1 = S2_0_C0_Cn_7: the encodings must be immediates */
+#define PERF_DBG_CASE(n)                                                                           \
+    case n:                                                                                        \
+        if (wcr)                                                                                   \
+            msr(sys_reg(2, 0, 0, n, 7), 0);                                                        \
+        else                                                                                       \
+            msr(sys_reg(2, 0, 0, n, 5), 0);                                                        \
+        break;
+
+static void hv_win_perf_dbg_zero(u32 n, bool wcr)
+{
+    switch (n) {
+        PERF_DBG_CASE(0) PERF_DBG_CASE(1) PERF_DBG_CASE(2) PERF_DBG_CASE(3)
+        PERF_DBG_CASE(4) PERF_DBG_CASE(5) PERF_DBG_CASE(6) PERF_DBG_CASE(7)
+        PERF_DBG_CASE(8) PERF_DBG_CASE(9) PERF_DBG_CASE(10) PERF_DBG_CASE(11)
+        PERF_DBG_CASE(12) PERF_DBG_CASE(13) PERF_DBG_CASE(14) PERF_DBG_CASE(15)
+        default:
+            break;
+    }
+}
+
+/*
+ * HV_PERF_MDSCR_PASS on this CPU: the guest owns the real MDSCR_EL1 (loaded with the EL2 shadow, which
+ * is what the guest last wrote), MDSCR accesses no longer trap; the breakpoint/watchpoint registers
+ * stay with the EL2 shadow through FGT, and their real control registers are zeroed so nothing the
+ * hypervisor left behind can fire. Debug exceptions now target the guest's EL1 (TDE clear), which is
+ * where EL2 reflected them before (BRK always, the others while the link is locked).
+ */
+static void hv_win_perf_cpu_apply(void)
+{
+    if (!(hv_win_perf & HV_PERF_MDSCR_PASS))
+        return;
+    u64 dfr0 = mrs(ID_AA64DFR0_EL1);
+    u32 brps = (dfr0 >> 12) & 0xf, wrps = (dfr0 >> 20) & 0xf; /* number - 1 */
+    msr(SYS_HDFGRTR_EL2, mrs(SYS_HDFGRTR_EL2) | HV_PERF_HDFG_DBGBW);
+    msr(SYS_HDFGWTR_EL2, mrs(SYS_HDFGWTR_EL2) | HV_PERF_HDFG_DBGBW);
+    sysop("isb");
+    for (u32 i = 0; i <= brps; i++)
+        hv_win_perf_dbg_zero(i, false);
+    for (u32 i = 0; i <= wrps; i++)
+        hv_win_perf_dbg_zero(i, true);
+    msr(MDSCR_EL1, hv_exc_mdscr_shadow());
+    msr(MDCR_EL2, hv_perf_mdcr_pass(mrs(MDCR_EL2)));
+    sysop("isb");
+}
+
+s64 hv_win_perf_configure(u64 flags)
+{
+    if (flags & ~(u64)HV_PERF_ALL) {
+        printf("HV/win perf: unknown flags 0x%lx\n", flags);
+        return -1;
+    }
+    if (!hv_win_enabled()) {
+        printf("HV/win perf: refused before P_HV_WIN_CONFIGURE\n");
+        return -1;
+    }
+    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        if (hv_started_cpus[cpu]) {
+            printf("HV/win perf: refused while a guest is running\n");
+            return -1;
+        }
+    }
+    if ((flags & HV_PERF_MDSCR_PASS) && !FIELD_GET(ID_AA64MMFR0_FGT, mrs(ID_AA64MMFR0_EL1))) {
+        printf("HV/win perf: mdscr-pass needs FEAT_FGT; refused\n");
+        return -2;
+    }
+    if ((flags & HV_PERF_FAST_MDSCR) && (hv_sptm_mode == SPTM_EMULATION || gxf_enabled())) {
+        printf("HV/win perf: fast-mdscr needs SPTM emulation off and GXF disabled; dropped\n");
+        flags &= ~(u64)HV_PERF_FAST_MDSCR;
+    }
+    u64 mdcr0 = mrs(MDCR_EL2), mdscr0 = mrs(MDSCR_EL1);
+    hv_win_perf = flags;
+    hv_exc_perf_set(flags);
+    hv_win_perf_cpu_apply();
+    printf("HV/win perf: flags 0x%lx (%s%s%s) MDCR_EL2 0x%lx -> 0x%lx, MDSCR_EL1 0x%lx -> 0x%lx, ID_AA64DFR0 "
+           "0x%lx%s\n",
+           flags, (flags & HV_PERF_STATS) ? "stats " : "", (flags & HV_PERF_FAST_MDSCR) ? "fast-mdscr " : "",
+           (flags & HV_PERF_MDSCR_PASS) ? "mdscr-pass" : "", mdcr0, mrs(MDCR_EL2), mdscr0, mrs(MDSCR_EL1),
+           mrs(ID_AA64DFR0_EL1),
+           (flags & HV_PERF_MDSCR_PASS) ? "; DBGB/W regs trapped by FGT, real control regs zeroed" : "");
+    return flags;
+}
+
 #define SYS_HFGRTR_EL2 sys_reg(3, 4, 1, 1, 4)
 #define SYS_HFGWTR_EL2 sys_reg(3, 4, 1, 1, 5)
 #define SYS_HFGITR_EL2 sys_reg(3, 4, 1, 1, 6)
@@ -499,6 +593,7 @@ void hv_win_cpu_init(void)
         return;
 
     hv_win_pmu_traps_init();
+    hv_win_perf_cpu_apply(); /* perf-exits: a no-op unless P_HV_WIN_PERF set mdscr-pass */
     if (hv_win_vgic_enabled())
         hv_vgic3_cpu_init();
     if (smp_id() != boot_cpu_idx) {

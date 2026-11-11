@@ -190,6 +190,7 @@ typedef enum {
     P_HV_WIN_CPPC_CONFIGURE = 0xc38, /* cpuperf-A: arg0 page base, arg1 vCPU count */
     P_HV_WIN_CPPC_STAT = 0xc39,      /* cpuperf-A: print the CPPC page counters */
     P_HV_WIN_CPPC_DVFS = 0xc3a,      /* cpuperf-B: arg0 config address, arg1 length; probe + enable */
+    P_HV_WIN_PERF = 0xc58,           /* perf-exits: arg0 hv_win_perf.h flags, before the guest starts */
     P_DCPW_LIVE = 0xc2a, /* dcpw-live-1: live DCP session from the proxy, no guest (stage, nflips, report, flags) */
 
     P_FB_INIT = 0xd00,

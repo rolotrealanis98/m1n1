@@ -708,6 +708,9 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WIN_CPPC_DVFS:
             reply->retval = hv_win_cppc_dvfs(request->args[0], request->args[1]);
             break;
+        case P_HV_WIN_PERF:
+            reply->retval = hv_win_perf_configure(request->args[0]);
+            break;
         case P_DCPW_LIVE:
 #if defined(DCPW_LIVE) && DCPW_LIVE
             reply->retval = dcpw_live_run(request->args[0], request->args[1], request->args[2],

@@ -172,6 +172,8 @@ static inline bool hv_win_smp_diag(void)
 
 /* Per-CPU setup, called from hv_init_secondary() and from configure on the boot CPU */
 void hv_win_cpu_init(void);
+/* perf-exits: P_HV_WIN_PERF (hv_win_perf.h flags), before the guest starts; returns the flags applied */
+s64 hv_win_perf_configure(u64 flags);
 
 /* Exception hooks (return true when handled; ELR handling as documented per hook) */
 bool hv_win_handle_hvc(struct exc_info *ctx);                    /* ELR already past the HVC */

@@ -86,3 +86,4 @@ M	storage-admit-n5-mutants	*	FB_OUT=$FB_OUT FB_JOBS=$FB_JOBS python3 -I source/t
 # ---- nightly-5c: resident C-heap extension pool (heapblock)
 QF	heapblock-pool-n5c	source/src/heapblock.* source/tests/heapblock-pool-n5c/*	make -s -C source/tests/heapblock-pool-n5c check OUT=$FB_OUT 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 M	heapblock-pool-n5c-mutants	*	FB_OUT=$FB_OUT python3 -I source/tests/heapblock-pool-n5c/mutants.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+QF	win-perf	source/src/hv/win/hv_win_perf.h source/src/hv/hv_exc.c source/src/hv/hv_asm.S source/src/hv/win/hv_win.c source/src/proxy.* source/proxyclient/m1n1/proxy.py source/tests/win-perf/*	make -s -C source/tests/win-perf clean >/dev/null 2>&1; make -s -C source/tests/win-perf check 2>&1 | grep -E "^(win-perf|FAIL|mutant)" | tr "\n" " "; test ${PIPESTATUS[0]} = 0

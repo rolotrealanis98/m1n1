@@ -22,6 +22,7 @@
 #include "win/s1/native_link.h"
 #include "win/hv_win_storage.h"
 #include "hv_sysreg_logic.h"
+#include "win/hv_win_perf.h"
 
 #define TIME_ACCOUNTING
 
@@ -113,6 +114,41 @@ static u64 hv_exits_irq, hv_exits_fiq, hv_exits_sync;
 static u64 hv_trap_ec[64], hv_trap_ec_pc[64], hv_trap_ec_far[64];
 
 struct hv_pcpu_data pcpu[MAX_CPUS];
+
+/*
+ * perf-exits (hv_win_perf.h): options selected by P_HV_WIN_PERF before the guest starts; all 0 = the
+ * old behaviour. hv_perf_fast_sync is read by the EL2 sync vector (hv_asm.S) to choose the fast entry.
+ */
+u8 hv_perf_fast_sync;
+static u32 hv_perf_flags;
+static u64 hv_perf_fast_mdscr[MAX_CPUS];               /* MDSCR_EL1 accesses done by the fast path */
+static u64 hv_perf_el2_sync, hv_perf_el2_irq, hv_perf_el2_fiq; /* CNTPCT ticks in the C exit paths */
+static struct hv_perf_sr hv_perf_sr_tab[HV_PERF_SR_N];  /* busiest trapped system registers */
+static u64 hv_perf_sr_other;
+
+void hv_exc_perf_set(u32 flags)
+{
+    hv_perf_flags = flags;
+    hv_perf_fast_sync = !!(flags & HV_PERF_FAST_MDSCR);
+    sysop("dsb ish");
+}
+
+/* The guest's MDSCR_EL1 as EL2 shadows it on this CPU (HV_PERF_MDSCR_PASS loads it into the real one) */
+u64 hv_exc_mdscr_shadow(void)
+{
+    return PERCPU(mdscr);
+}
+
+static inline u64 hv_perf_t0(void)
+{
+    return (hv_perf_flags & HV_PERF_STATS) ? mrs(CNTPCT_EL0) : 0;
+}
+
+static inline void hv_perf_t1(u64 *acc, u64 t0)
+{
+    if (t0)
+        __atomic_fetch_add(acc, mrs(CNTPCT_EL0) - t0, __ATOMIC_RELAXED);
+}
 
 /*
  * smp2f: per-CPU published snapshot of the vCPU's interface/timer state, written by the CPU itself
@@ -1497,7 +1533,7 @@ static bool hv_reflect_sync(struct exc_info *ctx, u32 ec)
     return true;
 }
 
-bool hv_exc_sync(struct exc_info *ctx)
+static bool hv_exc_sync_body(struct exc_info *ctx)
 {
     hv_wdt_breadcrumb('S');
     hv_get_context(ctx);
@@ -1680,7 +1716,7 @@ bool hv_exc_sync(struct exc_info *ctx)
     return do_gexit;
 }
 
-void hv_exc_irq(struct exc_info *ctx)
+static void hv_exc_irq_body(struct exc_info *ctx)
 {
     hv_wdt_breadcrumb('I');
     __atomic_fetch_add(&hv_exits_irq, 1, __ATOMIC_RELAXED); /* u1: before bhl; atomic for > 1 vCPU */
@@ -1698,7 +1734,7 @@ void hv_exc_irq(struct exc_info *ctx)
     hv_wdt_breadcrumb('i');
 }
 
-void hv_exc_fiq(struct exc_info *ctx)
+static void hv_exc_fiq_body(struct exc_info *ctx)
 {
     bool tick = false;
 
@@ -1782,6 +1818,67 @@ void hv_exc_fiq(struct exc_info *ctx)
     hv_wdt_breadcrumb('f');
 }
 
+/*
+ * perf-exits entry points. With no option set these only call the bodies above (the old paths). With
+ * HV_PERF_STATS they add the C time of each exit kind and note which system register a sync trap was
+ * for (an emulated guest WFI wait is idle time and is not counted as EL2 work).
+ */
+bool hv_exc_sync(struct exc_info *ctx)
+{
+    u64 t0 = hv_perf_t0();
+    u64 esr = t0 ? hv_get_esr() : 0;
+    u32 ec = FIELD_GET(ESR_EC, esr);
+    if (t0 && ec == ESR_EC_MSR)
+        hv_perf_sr_note(hv_perf_sr_tab, &hv_perf_sr_other, esr);
+    bool r = hv_exc_sync_body(ctx);
+    if (ec != ESR_EC_WFI)
+        hv_perf_t1(&hv_perf_el2_sync, t0);
+    return r;
+}
+
+void hv_exc_irq(struct exc_info *ctx)
+{
+    u64 t0 = hv_perf_t0();
+    hv_exc_irq_body(ctx);
+    hv_perf_t1(&hv_perf_el2_irq, t0);
+}
+
+void hv_exc_fiq(struct exc_info *ctx)
+{
+    u64 t0 = hv_perf_t0();
+    hv_exc_fiq_body(ctx);
+    hv_perf_t1(&hv_perf_el2_fiq, t0);
+}
+
+/*
+ * perf-exits HV_PERF_FAST_MDSCR: called from the EL2 sync vector (hv_asm.S _v_hv_sync_fast) with the
+ * guest's GPRs saved in ctx->regs and nothing else read yet. Handles only a trapped MRS/MSR MDSCR_EL1,
+ * with exactly the slow path's semantics (hv_handle_msr_unlocked SYS_MDSCR_EL1 case: the per-CPU
+ * shadow), and returns 1: ELR advanced, the vector restores the frame and ERETs. Anything else returns
+ * 0 and the vector runs the unchanged slow path (barriers, hv_exc_sync) on the same frame.
+ * Skipped on purpose for these exits: hv_get_context, the diag ring and breadcrumbs, hv_update_fiq.
+ * The access changes no timer, vGIC or IPI state, so the resync the slow path does after every handled
+ * trap has nothing to fold; pending virtual interrupts stay in the list registers as they were, and any
+ * physical FIQ/IRQ that arrived meanwhile is taken right after the ERET as before.
+ * hv_win_perf_configure only sets the option with SPTM emulation off and GXF disabled, so the shadow is
+ * PERCPU(mdscr) and ESR/ELR are the EL2 registers.
+ */
+u64 hv_exc_sync_fast(struct exc_info *ctx)
+{
+    u64 esr = mrs(ESR_EL2);
+    if (!hv_perf_mdscr_emulate(esr, ctx->regs, &PERCPU(mdscr)))
+        return 0;
+    msr(ELR_EL2, mrs(ELR_EL2) + 4);
+    hv_perf_fast_mdscr[mrs(TPIDR_EL2)]++;
+    /* keep the ST line's exit counts comparable with the slow path */
+    __atomic_fetch_add(&hv_exits_sync, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&hv_trap_ec[ESR_EC_MSR], 1, __ATOMIC_RELAXED);
+    hv_trap_ec_pc[ESR_EC_MSR] = mrs(ELR_EL2) - 4;
+    if (hv_perf_flags & HV_PERF_STATS)
+        hv_perf_sr_note(hv_perf_sr_tab, &hv_perf_sr_other, esr);
+    return 1;
+}
+
 void hv_exc_serr(struct exc_info *ctx)
 {
     hv_wdt_breadcrumb('E');
@@ -1813,6 +1910,73 @@ extern u64 hv_win_pl011_stats(void);
 static u64 st_last_t, st_n, st_t0;
 static u64 st_prev_ec[64], st_prev_irq, st_prev_fiq, st_prev_sync, st_prev_esc, st_prev_fs;
 static u64 st_prev_pmu[HV_WIN_PMU_NR_STATS];
+
+/*
+ * perf-exits PF line (only with a P_HV_WIN_PERF option set), per second over the interval since the
+ * previous PF line: exits by kind and by exception class, the C time EL2 spent in each exit kind and in
+ * the display sweep (parts per thousand of wall time; exception entry/return itself is not included, so
+ * these are lower bounds), fast-path hits, the busiest trapped system registers, and the trap config.
+ *   PF dt <ms> | rate irq <n> fiq <n> sync <n> | ec <ec>:<n> ... | el2 permille sync <p> irq <p> fiq <p>
+ *      fb <p> | fast mdscr <n> | sr <mrs|msr> s<op0>_<op1>_c<n>_c<m>_<op2> <n> ... other <n> | flags 0x<f>
+ *      mdcr 0x<v> hdfgrtr 0x<v>
+ */
+#define HV_FB_ST_FAULTS 15 /* hv_win_fb.c stat indices (0..34 keep their meaning) */
+#define HV_FB_ST_PAGES  17
+#define HV_FB_ST_BUSY   30
+static u64 pf_last_t, pf_prev_ec[64], pf_prev_irq, pf_prev_fiq, pf_prev_sync, pf_prev_fast;
+static u64 pf_prev_el2[3], pf_prev_fb_busy, pf_prev_fb_faults, pf_prev_fb_pages;
+
+static void hv_perf_report(const char *P, u64 now, u64 freq)
+{
+    u64 dt = pf_last_t ? now - pf_last_t : 0;
+    pf_last_t = now;
+    u64 fast = 0;
+    for (int i = 0; i < MAX_CPUS; i++)
+        fast += hv_perf_fast_mdscr[i];
+    u64 el2[3] = {hv_perf_el2_sync, hv_perf_el2_irq, hv_perf_el2_fiq};
+    u64 fbb = hv_win_fb_stat(HV_FB_ST_BUSY), fbf = hv_win_fb_stat(HV_FB_ST_FAULTS),
+        fbp = hv_win_fb_stat(HV_FB_ST_PAGES);
+    if (fbb == UINT64_MAX)
+        fbb = fbf = fbp = 0;
+    printf("%s PF dt %lu | rate irq %lu fiq %lu sync %lu | ec", P, (unsigned long)(dt * 1000 / (freq ? freq : 1)),
+           (unsigned long)hv_perf_rate(hv_exits_irq - pf_prev_irq, dt, freq),
+           (unsigned long)hv_perf_rate(hv_exits_fiq - pf_prev_fiq, dt, freq),
+           (unsigned long)hv_perf_rate(hv_exits_sync - pf_prev_sync, dt, freq));
+    for (int ec = 0; ec < 64; ec++) {
+        u64 d = hv_trap_ec[ec] - pf_prev_ec[ec];
+        if (d)
+            printf(" %02x:%lu", ec, (unsigned long)hv_perf_rate(d, dt, freq));
+        pf_prev_ec[ec] = hv_trap_ec[ec];
+    }
+    printf(" | el2 permille sync %lu irq %lu fiq %lu fb %lu | fb pages %lu faults %lu | fast mdscr %lu | sr",
+           (unsigned long)hv_perf_permille(el2[0] - pf_prev_el2[0], dt),
+           (unsigned long)hv_perf_permille(el2[1] - pf_prev_el2[1], dt),
+           (unsigned long)hv_perf_permille(el2[2] - pf_prev_el2[2], dt),
+           (unsigned long)hv_perf_permille(fbb - pf_prev_fb_busy, dt),
+           (unsigned long)hv_perf_rate(fbp - pf_prev_fb_pages, dt, freq),
+           (unsigned long)hv_perf_rate(fbf - pf_prev_fb_faults, dt, freq),
+           (unsigned long)hv_perf_rate(fast - pf_prev_fast, dt, freq));
+    bool taken[HV_PERF_SR_N] = {false};
+    for (int k = 0; k < 6; k++) {
+        int i = hv_perf_sr_top(hv_perf_sr_tab, taken);
+        if (i < 0)
+            break;
+        taken[i] = true;
+        u32 op0, op1, crn, crm, op2;
+        bool rd;
+        hv_perf_sr_decode(hv_perf_sr_tab[i].key, &op0, &op1, &crn, &crm, &op2, &rd);
+        printf(" %s s%u_%u_c%u_c%u_%u %lu", rd ? "mrs" : "msr", op0, op1, crn, crm, op2,
+               (unsigned long)hv_perf_rate(hv_perf_sr_tab[i].count - hv_perf_sr_tab[i].reported, dt, freq));
+    }
+    for (int i = 0; i < HV_PERF_SR_N; i++)
+        hv_perf_sr_tab[i].reported = hv_perf_sr_tab[i].count;
+    printf(" other %lu | flags 0x%x mdcr 0x%lx\n", (unsigned long)hv_perf_sr_other, hv_perf_flags,
+           mrs(MDCR_EL2));
+    pf_prev_irq = hv_exits_irq; pf_prev_fiq = hv_exits_fiq; pf_prev_sync = hv_exits_sync; pf_prev_fast = fast;
+    for (int i = 0; i < 3; i++)
+        pf_prev_el2[i] = el2[i];
+    pf_prev_fb_busy = fbb; pf_prev_fb_faults = fbf; pf_prev_fb_pages = fbp;
+}
 
 static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
 {
@@ -1894,6 +2058,8 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
         st_prev_pmu[pk[i].idx] = v;
     }
     printf(" gran %s\n", (hv_win_pmu_stat(HV_WIN_PMU_ID) & HV_WIN_PMU_ID_4K) ? "4k" : "16k");
+    if (hv_perf_flags)
+        hv_perf_report(P, now, freq);
     iodev_console_flush();
 }
 

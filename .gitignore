@@ -27,3 +27,4 @@ source/tests/*/test_*
 source/tests/win-dvfs/cross_cfg
 source/tests/win-dvfs/cfg.bin
 source/tests/win-dvfs/cfg.bin.gov
+source/tests/win-perf/mut/
