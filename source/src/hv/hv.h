@@ -66,6 +66,7 @@ int hv_map(u64 from, u64 to, u64 size, u64 incr);
 int hv_unmap(u64 from, u64 size);
 int hv_map_hw(u64 from, u64 to, u64 size);
 int hv_map_hw_nc(u64 from, u64 to, u64 size);
+int hv_map_hw_dev(u64 from, u64 to, u64 size); /* gpu-pt2: Device-nGnRnE */
 int hv_map_hw_ro(u64 from, u64 to, u64 size);
 int hv_map_sw(u64 from, u64 to, u64 size);
 int hv_map_hook(u64 from, hv_hook_t *hook, u64 size);

@@ -389,6 +389,12 @@ int hv_map_hw_nc(u64 from, u64 to, u64 size)
                   (0b0101L << 2) | PTE_VALID, size, 1);
 }
 
+/* gpu-pt2: stage-2 Device-nGnRnE (MemAttr=0000): combined with any guest stage-1 type, the access is nGnRnE */
+int hv_map_hw_dev(u64 from, u64 to, u64 size)
+{
+    return hv_map(from, to | (PTE_ATTRIBUTES & ~PTE_MEMATTR_UNCHANGED) | PTE_VALID, size, 1);
+}
+
 int hv_map_hw_ro(u64 from, u64 to, u64 size)
 {
     return hv_map(from, to | PTE_ATTRIBUTES_RO | PTE_VALID, size, 1);

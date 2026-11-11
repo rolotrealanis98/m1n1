@@ -14,6 +14,7 @@
  */
 
 #include "hv_win.h"
+#include "adt.h"
 #include "pmgr.h"
 #include "utils.h"
 #include "../hv.h"
@@ -94,13 +95,48 @@ bool hv_win_gpu_start(void)
             return false;
         }
     }
+    /*
+     * gpu-pt2: the GPU block is non-posted (Linux DT: nonposted-mmio on soc@2300000000). Windows maps device
+     * memory Device-nGnRE at stage 1, so force Device-nGnRnE at stage 2 over sgx reg[0] (sgx, PMGR group 3, both
+     * ASC wrappers and iop-vbars): the combined type is the more restrictive one. Before the PS hooks, which
+     * replace their 16 KiB page with a software mapping afterwards.
+     */
+    int path[8];
+    u64 sgx_base = 0, sgx_size = 0;
+    if (adt_path_offset_trace(adt, "/arm-io/sgx", path) < 0 ||
+        adt_get_reg(adt, path, "reg", 0, &sgx_base, &sgx_size) < 0 || !sgx_size ||
+        ((sgx_base | sgx_size) & 0x3fff)) {
+        printf("HV/win gpu: no usable /arm-io/sgx reg[0]: guest refused\n");
+        return false;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (gpu_ps_addr[i] < sgx_base || gpu_ps_addr[i] >= sgx_base + sgx_size) {
+            printf("HV/win gpu: PS %s 0x%lx outside sgx: guest refused\n", gpu_ps_names[i], gpu_ps_addr[i]);
+            return false;
+        }
+    }
+    if (hv_map_hw_dev(sgx_base, sgx_base, sgx_size) < 0) {
+        printf("HV/win gpu: stage-2 Device-nGnRnE map of sgx failed: guest refused\n");
+        return false;
+    }
+    printf("HV/win gpu: stage 2 0x%lx..0x%lx Device-nGnRnE (MemAttr 0000; sgx, PMGR group 3, GFX/GFX1 wrappers "
+           "and iop-vbars)\n",
+           sgx_base, sgx_base + sgx_size);
     for (int i = 0; i < 3; i++) {
         if (hv_map_hook(gpu_ps_addr[i], hv_win_gpu_ps_hook, sizeof(u64)) < 0) {
             printf("HV/win gpu: PS hook for %s failed: guest refused\n", gpu_ps_names[i]);
             return false;
         }
     }
+    /* stage-2 entries changed: no guest has run yet, but drop any cached walk anyway */
+    sysop("dsb ishst");
+    sysop("tlbi vmalls12e1is");
+    sysop("dsb ish");
+    sysop("isb");
     gpu_ps_armed = true;
+    printf("HV/win gpu: PS words GPX/AFR/GFX: 16 KiB page 0x%lx trapped (EL2 emulates every access, writes "
+           "filtered)\n",
+           gpu_ps_addr[0] & ~0x3fffUL);
     printf("HV/win gpu: PS guard armed: GPX 0x%lx (0x%x) AFR 0x%lx (0x%x) GFX 0x%lx (0x%x)\n", gpu_ps_addr[0],
            read32(gpu_ps_addr[0]), gpu_ps_addr[1], read32(gpu_ps_addr[1]), gpu_ps_addr[2],
            read32(gpu_ps_addr[2]));
