@@ -424,6 +424,7 @@ CPPC_PAGE_DEFAULT = 0xF_3C00_0000   # 16 KiB, clear of GICD/GICR/PL011/S1 ECAM+B
 CPPC_PAGE_SIZE = 0x4000
 CPPC_SLOT = 0x40
 CPPC_FLAG_PSD = 1
+CPPC_FLAG_AUTONOMOUS = 2   # _CPC Autonomous Selection Enable = 1 (platform-managed); Desired still published
 
 
 def parse_cppc_perf(text):
@@ -443,7 +444,7 @@ def check_cppc_perf(t, v):
                          f"<= 0xffff or 0 < lowMHz <= nomMHz <= 0xffff (Mu J716sParseCppc refuses them)")
 
 
-def cppc_plan(adt, vcpus, page, psd=True, table=None):
+def cppc_plan(adt, vcpus, page, psd=True, table=None, autonomous=False):
     """cpuperf-A: the /chosen/m5w,cppc bytes for Mu (J716sAcpiGenLib.h layout) and one line per vCPU.
     vcpus = [(cpu_id, node name, mpidr, is_boot)] in m5w,cpus order. Domain = the first vCPU of the same
     MPIDR cluster (Aff3..Aff1). Raises PlanError when a CPU has no usable cluster-type."""
@@ -452,7 +453,8 @@ def cppc_plan(adt, vcpus, page, psd=True, table=None):
         raise PlanError(f"CPPC page {page:#x} not 16 KiB aligned or too small for {len(vcpus)} vCPUs")
     nodes = {c.name: c for c in adt["/cpus"]}
     first = {}
-    out = struct.pack("<QIII", page, CPPC_SLOT, len(vcpus), CPPC_FLAG_PSD if psd else 0)
+    flags = (CPPC_FLAG_PSD if psd else 0) | (CPPC_FLAG_AUTONOMOUS if autonomous else 0)
+    out = struct.pack("<QIII", page, CPPC_SLOT, len(vcpus), flags)
     lines = []
     for i, (_, name, mpidr, _) in enumerate(vcpus):
         node = nodes.get(name)
@@ -724,6 +726,8 @@ def parse_args():
                         help="cpuperf-A: synthetic-window base of the 16 KiB EL2 CPPC page (--cpu-classes cppc)")
     parser.add_argument("--no-cppc-psd", action="store_true",
                         help="cpuperf-A: publish _CPC without _PSD (default: _PSD per cluster, HW_ALL)")
+    parser.add_argument("--cppc-autonomous", action="store_true",
+                        help="cpuperf-A: _CPC Autonomous Selection Enable = 1 (variant; default 0 = OS-directed)")
     parser.add_argument("--cppc-perf", action="append", default=[], metavar="TYPE=h,n,lnl,l,lowMHz,nomMHz",
                         help="cpuperf-A: override the T6050 _CPC values for one ADT cluster-type (repeatable)")
     parser.add_argument("--synthetic-window", type=hexint, default=SYNTH_WINDOW_BASE)
@@ -873,6 +877,8 @@ def parse_args():
         except ValueError as e:
             parser.error(str(e))
         args.cppc_table[t] = v
+    if (args.no_cppc_psd or args.cppc_autonomous) and args.cpu_classes != "cppc":
+        parser.error("--no-cppc-psd / --cppc-autonomous need --cpu-classes cppc")
     if args.cpu_classes == "cppc":
         if args.route != "gic":
             parser.error("--cpu-classes cppc needs --route gic (Mu publishes _CPC on the GIC route only)")
@@ -1383,7 +1389,8 @@ def main():
                    f"{', '.join(f'{n} {o}->{w}' for n, o, w in changed) or 'none'}); Mu publishes one efficiency class")
         elif args.cpu_classes == "cppc":
             try:
-                cppc_prop, cppc_lines = cppc_plan(hv.adt, vcpus, args.cppc_page, not args.no_cppc_psd, args.cppc_table)
+                cppc_prop, cppc_lines = cppc_plan(hv.adt, vcpus, args.cppc_page, not args.no_cppc_psd, args.cppc_table,
+                                                 args.cppc_autonomous)
             except PlanError as e:
                 raise SystemExit(f"--cpu-classes cppc: {e}")
             put("m5w,cppc", cppc_prop)
@@ -1391,7 +1398,8 @@ def main():
             for i, name, ctype, v, dom in cppc_lines:
                 types.setdefault((ctype, v), []).append(i)
             record("cpu classes: cppc (guest ADT cluster-type unchanged; Mu publishes M = 0, P = 1) + m5w,cppc "
-                   f"{len(cppc_prop)} bytes, page {args.cppc_page:#x}, _PSD {'no' if args.no_cppc_psd else 'yes'}: "
+                   f"{len(cppc_prop)} bytes, page {args.cppc_page:#x}, _PSD {'no' if args.no_cppc_psd else 'yes'}, "
+                   f"autonomous {'yes' if args.cppc_autonomous else 'no'}: "
                    + "; ".join(f"{t} CPUs {c[0]}-{c[-1]} h/n/lnl/l {v[0]}/{v[1]}/{v[2]}/{v[3]} MHz {v[4]}-{v[5]}"
                                for (t, v), c in types.items())
                    + "; domains " + ",".join(sorted({str(d) for *_, d in cppc_lines}, key=int)))

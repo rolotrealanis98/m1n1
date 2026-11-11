@@ -96,6 +96,11 @@ check("domains: 0 x6, 6 x6, 12 x6", [e[6] for e in ent] == [0] * 6 + [6] * 6 + [
 prop2, _ = run_windows.cppc_plan(adt, vcpus, 0xF3C000000, psd=False)
 check("--no-cppc-psd clears flag bit 0 only", prop2[:16] == prop[:16] and prop2[16:20] == b"\0\0\0\0"
       and prop2[20:] == prop[20:])
+prop3, _ = run_windows.cppc_plan(adt, vcpus, 0xF3C000000, autonomous=True)
+check("--cppc-autonomous sets flag bit 1", struct.unpack_from("<I", prop3, 16)[0] == 3 and prop3[20:] == prop[20:])
+check("--cppc-autonomous parsed", parse(["--cpu-classes", "cppc", "--cppc-autonomous"]).cppc_autonomous is True)
+check("--cppc-autonomous without cppc refused", parse(["--cppc-autonomous"]) is None)
+check("--no-cppc-psd without cppc refused", parse(["--no-cppc-psd"]) is None)
 check("cppc mode leaves the guest ADT cluster-types alone",
       [n._properties["cluster-type"] for n in nodes] == ["M"] * 12 + ["P"] * 6)
 
