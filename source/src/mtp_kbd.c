@@ -160,15 +160,26 @@ static void init_event(struct mtp_kbd *k, const hm_u8 *m, unsigned n)
     if (!m[20]) {
         if (!k->desc_len) { mtp_kbd_fail(k, MTP_E_DESCRIPTOR); return; }
         k->complete = 1;
+        /* The J716s keyboard descriptor ends in a vendor TLC with a 16384-bit feature
+         * field that Windows' HID stack and the HIDM driver reject (n3tp1); publish the
+         * descriptor without vendor TLCs. The raw descriptor is logged below first. */
+        LOG(k, "MTP: keyboard iface=%u raw report descriptor %u bytes\n", id, (unsigned)k->desc_len);
+        for (unsigned o = 0; o < k->desc_len; o += 32)
+            hexline(k, "rdesc", o, (unsigned)k->desc_len, k->descriptor + o,
+                    k->desc_len - o > 32 ? 32 : k->desc_len - o);
+        if (!hid_strip_vendor_tlcs(k->descriptor, k->desc_len, &k->kbd_filter) &&
+            k->kbd_filter.removed_tlcs) {
+            LOG(k, "MTP: keyboard descriptor: %u vendor TLC(s) removed for Windows, %u -> %u bytes\n",
+                (unsigned)k->kbd_filter.removed_tlcs, (unsigned)k->desc_len, (unsigned)k->kbd_filter.len);
+            k->desc_len = k->kbd_filter.len;
+            k->kbd_filtered = 1;
+        }
         k->keyboard.info.id = id; k->keyboard.info.flags = HM_PRESENT;
         k->keyboard.info.vendor = 0x05ac; k->keyboard.info.product = 0x035a;
         k->keyboard.info.version = 0x0510;
         k->keyboard.info.descriptor_length = k->desc_len;
         k->keyboard.descriptor = k->descriptor;
         LOG(k, "MTP: keyboard iface=%u report descriptor %u bytes\n", id, (unsigned)k->desc_len);
-        for (unsigned o = 0; o < k->desc_len; o += 32)
-            hexline(k, "rdesc", o, (unsigned)k->desc_len, k->descriptor + o,
-                    k->desc_len - o > 32 ? 32 : k->desc_len - o);
         /* Linux order: stm first. Sent from poll(), after any queued GPIO NACK drained. */
         k->phase = MTP_STM;
         k->stm_state = 0;
@@ -229,6 +240,10 @@ static void receive_frame(struct mtp_kbd *k)
         if (k->io.input_changed) k->io.input_changed(k->io.ctx);
     } else if (k->phase == MTP_LIVE && f[5] == k->iface) {
         if (!len || len > HM_PAYLOAD) { mtp_kbd_fail(k, MTP_E_FRAME); return; }
+        if (k->kbd_filtered && !hid_filter_keeps_input(&k->kbd_filter, m[0])) {
+            k->kbd_dropped++; /* report of a removed vendor TLC: Windows has no layout for it */
+            return;
+        }
         hm_service_push(k->service, k->iface, m, len, k->io.now_us(k->io.ctx) * 1000);
         if (k->io.input_changed) k->io.input_changed(k->io.ctx);
         k->reports++;
