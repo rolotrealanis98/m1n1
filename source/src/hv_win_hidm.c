@@ -2,6 +2,7 @@
 #include "hv_win_hidm.h"
 #include "mtp_kbd.h"
 #include "mtp_tp_resident.h"
+#include "hidm/tp/kbl.h"
 #ifndef HIDM_HOST_TEST
 #include "mtp_dma.h"
 #else
@@ -13,6 +14,7 @@ void mtp_dma_rtkit_hook(struct rtkit_dev *rtk);
 #include "hv/hv.h"
 #include "hv/win/hv_win.h"
 #include "hv/win/hv_win_storage.h"
+#include "kbl_resident.h"
 #include "smp.h"
 #include "utils.h"
 #endif
@@ -21,6 +23,12 @@ void mtp_dma_rtkit_hook(struct rtkit_dev *rtk);
 static hm_service service;
 static struct mtp_kbd keyboard;
 static bool attempted, exposed, retired, irq;
+/* fnrow / keyboard backlight (2026-11-11): the backlight follows Ctrl+F1/F2 (media mode) and
+ * input activity; display-brightness presses are counted (no DCP session while the guest runs,
+ * so the panel level is not changed here; Windows receives consumer 0x6f/0x70). */
+static struct kbl backlight;
+static hm_u32 seen_kbl_up, seen_kbl_down, seen_input, seen_disp, disp_steps;
+static hm_u64 kbl_log_next;
 static void update_irq(void)
 {
     bool level = exposed && !retired && hm_service_irq(&service);
@@ -78,6 +86,12 @@ s64 hv_win_hidm_configure(u64 version, u64 tp_fw, u64 tp_fw_len)
             keyboard.tp = NULL;
         }
     }
+#ifndef HIDM_HOST_TEST
+    if (keyboard.phase == MTP_LIVE) {
+        if (kbl_resident_start(&backlight, keyboard.io.now_us(keyboard.io.ctx)))
+            hm_zero(&backlight, sizeof(backlight)); /* not ready: every kbl call is a no-op */
+    }
+#endif
     keyboard.io.input_changed = backend_changed;
     exposed = true; /* backend failure still supplies HELLO / COUNT=0 */
     update_irq();
@@ -90,11 +104,43 @@ void hv_win_hidm_tick(void)
     if (!exposed || retired || smp_id() != boot_cpu_idx) return;
     mtp_kbd_poll(&keyboard);
     update_irq();
+    if (keyboard.phase != MTP_LIVE) return;
+    {
+        hm_u64 now = keyboard.io.now_us(keyboard.io.ctx);
+        /* counters only grow; a press and release between two ticks still counts once */
+        while (seen_kbl_up != keyboard.kbl_up) { seen_kbl_up++; kbl_step(&backlight, 1, now); }
+        while (seen_kbl_down != keyboard.kbl_down) { seen_kbl_down++; kbl_step(&backlight, -1, now); }
+        if (seen_input != keyboard.input_seen) { seen_input = keyboard.input_seen; kbl_activity(&backlight, now); }
+        if (seen_disp != keyboard.disp_up + keyboard.disp_down) {
+            seen_disp = keyboard.disp_up + keyboard.disp_down;
+            disp_steps++;
+        }
+        kbl_tick(&backlight, keyboard.fn.kbl_held, now);
+        if (now >= kbl_log_next) {
+            /* one summary line when something changed, at most every 2 s */
+            static hm_u32 last[5];
+            hm_u32 cur[5] = {backlight.steps, backlight.idle_offs, backlight.wakes, disp_steps,
+                             keyboard.fnlock_toggles};
+            unsigned i;
+            for (i = 0; i < 5 && cur[i] == last[i]; i++) {}
+            if (i < 5) {
+                for (i = 0; i < 5; i++) last[i] = cur[i];
+                printf("KBL: level %d lit %d steps %u idle-offs %u wakes %u writes %u | display keys up %u down %u"
+                       " | fn-lock %s (toggles %u) | consumer reports %u\n",
+                       backlight.level, backlight.lit, backlight.steps, backlight.idle_offs, backlight.wakes,
+                       backlight.writes, keyboard.disp_up, keyboard.disp_down,
+                       keyboard.fn.media ? "media" : "F-keys", keyboard.fnlock_toggles,
+                       keyboard.fn.consumer_reports);
+                kbl_log_next = now + 2000000;
+            }
+        }
+    }
 }
 void hv_win_hidm_retire(void)
 {
     if (!attempted) return;
     retired = true;
+    kbl_stop(&backlight); /* light off when the hypervisor hands the machine back */
     update_irq();
     /* No MTP shutdown command; descriptors and state survive until full reset. */
 }

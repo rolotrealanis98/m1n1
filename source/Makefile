@@ -222,7 +222,10 @@ OBJECTS := \
 	hidm/tp/ptp.o \
 	hidm/tp/mtp_tp.o \
 	hidm/tp/hid_filter.o \
+	hidm/tp/fnrow.o \
+	hidm/tp/kbl.o \
 	mtp_tp_resident.o \
+	kbl_resident.o \
 	mtp_dma.o \
 	sart.o \
 	sep.o \
