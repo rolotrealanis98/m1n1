@@ -47,10 +47,30 @@ oe, ne = old('src/hv/hv_exc.c'), new('src/hv/hv_exc.c')
 def fn(src, sig):
     i = src.index(sig); j = src.index('\n}\n', i)
     return src[src.index('{', i):j]
+# nightly-6d: the sync body carries exactly two later edits (the EL0 diagnostics hook and the PMU UNDEF
+# catcher's locked ESR/FAR read); each must appear once and, undone, the body must equal the old one.
+N6D_SYNC_EDITS = [
+    ('    hv_exc_entry();\n\n    hv_win_pmu_diag(ctx);\n    bool protect_elr', '    hv_exc_entry();\n\n    bool protect_elr'),
+    ("            hv_wdt_breadcrumb('M');\n"
+     "            /* nightly-6d: the PMU UNDEF catcher's ESR_EL1/FAR_EL1 reads (EC 0) need the big HV lock */\n"
+     "            handled = hv_win_handle_msr_locked(ctx, FIELD_GET(ESR_ISS, ctx->esr)) ||\n"
+     "                      hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));",
+     "            hv_wdt_breadcrumb('M');\n            handled = hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));"),
+]
+def undo_n6d(body):
+    for a, b in N6D_SYNC_EDITS:
+        if body.count(a) != 1:
+            return None
+        body = body.replace(a, b)
+    return body
 for o, n in [('bool hv_exc_sync(struct exc_info *ctx)\n{', 'static bool hv_exc_sync_body(struct exc_info *ctx)\n{'),
              ('void hv_exc_irq(struct exc_info *ctx)\n{', 'static void hv_exc_irq_body(struct exc_info *ctx)\n{'),
              ('void hv_exc_fiq(struct exc_info *ctx)\n{', 'static void hv_exc_fiq_body(struct exc_info *ctx)\n{')]:
-    check(f'hv_exc.c: {n.split("(")[0].split()[-1]} == old {o.split("(")[0].split()[-1]} byte for byte', fn(oe, o) == fn(ne, n))
+    body = fn(ne, n)
+    if 'sync' in n:
+        body = undo_n6d(body)
+        check('hv_exc.c: hv_exc_sync_body carries exactly the two nightly-6d edits', body is not None)
+    check(f'hv_exc.c: {n.split("(")[0].split()[-1]} == old {o.split("(")[0].split()[-1]} byte for byte', fn(oe, o) == body)
 check('hv_exc.c: slow-path MDSCR case unchanged (PERCPU(mdscr) shadow)',
       fn(oe, 'static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)\n{') == fn(ne, 'static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)\n{'))
 fast = fn(ne, 'u64 hv_exc_sync_fast(struct exc_info *ctx)\n{')
