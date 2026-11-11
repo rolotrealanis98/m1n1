@@ -697,6 +697,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_N1_START = 0xc4c
     P_HV_WIN_N1_CTL = 0xc4d
     P_HV_WIN_N1_PARK = 0xc4e
+    P_DCPW_LIVE = 0xc2a
     P_HV_WIN_STORAGE_PREP = 0xc20
     P_HV_WIN_STORAGE_STAT = 0xc21
     P_HV_WIN_STORAGE_NATIVE = 0xc22
@@ -1269,6 +1270,8 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_N1_PARK, signed=True)
     def hv_win_m5wn_stat(self, index):
         return self.request(self.P_HV_WIN_M5WN_STAT, index)
+    def dcpw_live(self, stage, nflips, report_pa, flags=0):
+        return self.request(self.P_DCPW_LIVE, stage, nflips, report_pa, flags, signed=True)
 
     def hv_win_storage_prepare(self, registration):
         # Exact96-byte header plus copied {base,size} range arrays; one launch only.

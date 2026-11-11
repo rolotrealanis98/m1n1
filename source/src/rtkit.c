@@ -109,6 +109,12 @@ struct rtkit_dev {
     u32 syslog_cnt, syslog_size;
 
     bool crashed;
+
+    /* dcpw-live-1: IOMMU hooks for coprocessors whose DART m1n1's dart.c cannot drive
+     * (T6050's boot-locked four-level dart-dcp); unset = unchanged behaviour */
+    u64 (*map_hook)(void *ctx, void *phys, size_t sz);
+    void *(*xlate_hook)(void *ctx, u64 dva);
+    void *hook_ctx;
 };
 
 struct syslog_log {
@@ -300,6 +306,14 @@ bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva)
 
         *dva = iova | rtk->dva_base;
         return true;
+    } else if (rtk->map_hook) {
+        u64 d = rtk->map_hook(rtk->hook_ctx, phys, sz);
+        if (!d) {
+            rtkit_printf("map hook failed (%p, 0x%lx)\n", phys, sz);
+            return false;
+        }
+        *dva = d | rtk->dva_base;
+        return true;
     } else {
         rtkit_printf("TODO: implement no IOMMU buffers\n");
         return false;
@@ -317,6 +331,8 @@ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz)
         dart_unmap(rtk->dart, dva & IOVA_MASK, sz);
         iova_free(rtk->dart_iovad, dva & IOVA_MASK, sz);
         return true;
+    } else if (rtk->map_hook) {
+        return true; /* hook mappings live as long as the coprocessor session */
     } else {
         rtkit_printf("TODO: implement no IOMMU buffers\n");
         return false;
@@ -390,7 +406,10 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
     } else if (addr) {
         bfr->dva = addr & ~rtk->dva_base;
         bfr->sz = sz;
-        bfr->bfr = dart_translate(rtk->dart, bfr->dva & IOVA_MASK);
+        if (!rtk->dart && rtk->xlate_hook)
+            bfr->bfr = rtk->xlate_hook(rtk->hook_ctx, bfr->dva);
+        else
+            bfr->bfr = dart_translate(rtk->dart, bfr->dva & IOVA_MASK);
         if (!bfr->bfr) {
             rtkit_printf("failed to translate pre-allocated buffer (ep 0x%x, buf 0x%lx)\n", msg->ep,
                          addr);
@@ -967,4 +986,12 @@ bool rtkit_sleep(rtkit_dev_t *rtk)
 
     asc_cpu_stop(rtk->asc);
     return 0;
+}
+
+void rtkit_set_hooks(rtkit_dev_t *rtk, u64 (*map)(void *, void *, size_t), void *(*xlate)(void *, u64),
+                     void *ctx)
+{
+    rtk->map_hook = map;
+    rtk->xlate_hook = xlate;
+    rtk->hook_ctx = ctx;
 }

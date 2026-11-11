@@ -206,6 +206,9 @@ OBJECTS := \
 	hv_win_smcp.o \
 	smcp/core/smcp_core.o \
 	smcp/core/smcp_power.o \
+	hv_win_dcpw.o \
+	dcpw/service/dart4.o dcpw/service/dcpw_core.o dcpw/service/dcpw_static.o \
+	dcpw/service/iomfb_codec.o dcpw/service/iomfb_session.o dcpw/service/iomfb_live.o \
 	hidm/service/hidm_service.o \
 	hv_win_m5wn.o \
 	m5wn/service/m5wn_service.o \

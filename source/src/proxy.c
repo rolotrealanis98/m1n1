@@ -36,6 +36,7 @@
 #include "hv_win_smcp.h"
 #include "hv_win_m5wn.h"
 #include "hv_win_n1.h"
+#include "hv_win_dcpw.h"
 #include "hv/win/s1/native_link.h"
 #include "hv/win/s1/ans_ro.h"
 #include "minilzlib/minlzma.h"
@@ -667,6 +668,7 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_SMCP_POWER:
             reply->retval = hv_win_smcp_power(request->args[0]);
+            break;
         case P_HV_WIN_M5WN_CONFIGURE:
             reply->retval = hv_win_m5wn_configure(request->args[0], request->args[1]);
             break;
@@ -699,6 +701,16 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_CPPC_DVFS:
             reply->retval = hv_win_cppc_dvfs(request->args[0], request->args[1]);
+            break;
+        case P_DCPW_LIVE:
+#if defined(DCPW_LIVE) && DCPW_LIVE
+            reply->retval = dcpw_live_run(request->args[0], request->args[1], request->args[2],
+                                          request->args[3]);
+#else
+            /* nightly: the live DCP session is compiled out (make DCPW_LIVE=1 to enable) */
+            printf("dcpw: live DCP session disabled in this build\n");
+            reply->retval = -1;
+#endif
             break;
         case P_HV_WIN_USB_PREP:
             reply->retval = hv_win_usb_prep(request->args[0], request->args[1], request->args[2],
