@@ -31,6 +31,7 @@ void stub_sysop(const char *s);
 void dc_civac_range(void *p, size_t n);
 size_t heapblock_remaining(void);
 void *heapblock_alloc_aligned(size_t sz, size_t al);
+void heapblock_pool_info(u64 *base, u64 *size, u64 *used); /* n5c */
 void mmu_rm_mapping(u64 va, u64 sz);
 int mmu_add_mapping(u64 va, u64 pa, u64 sz, int attr, int perm);
 int hv_map_hw_nc(u64 from, u64 to, u64 size);

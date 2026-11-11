@@ -128,6 +128,15 @@ void stub_sysop(const char *s)
 void dc_civac_range(void *p, size_t n) { (void)p; (void)n; }
 static size_t heap_left = 256UL << 20;
 size_t heapblock_remaining(void) { return heap_left; }
+/* n5c extension pool as the resident reports it; nightly-6c test "pool-overlap" points it at the shadow */
+static int pool_overlap;
+static u8 *shadow_for_pool;
+void heapblock_pool_info(u64 *base, u64 *size, u64 *used)
+{
+    *base = pool_overlap ? (u64)shadow_for_pool + 0x4000 : 0;
+    *size = pool_overlap ? 0x4000 : 0;
+    *used = 0;
+}
 static void *allocs[4];
 static int nallocs;
 void *heapblock_alloc_aligned(size_t sz, size_t al)
@@ -297,6 +306,7 @@ static int setup(u32 w, u32 h, u32 stride, u64 flags, u64 tuning)
     if (r <= 0)
         return (int)r;
     shadow = (u8 *)r;
+    shadow_for_pool = shadow;
     struct boot_args g = cur_boot_args;
     g.video.base = (u64)shadow;
     g.video.width = GW; g.video.height = GH; g.video.stride = GS;
@@ -1158,6 +1168,13 @@ int main(int argc, char **argv)
         return failures != 0;
     }
 #ifdef NEW
+    if (!strcmp(what, "reject-pool-overlap")) { /* nightly-6c: a shadow inside the n5c pool is never mapped */
+        pool_overlap = 1;
+        int r = setup(1000, 600, 4160, 2, 0);
+        CHECK(r == -100, "shadow overlapping the extension pool started (%d)", r);
+        printf("reject shadow overlapping the n5c pool: %d\n", r);
+        return failures != 0;
+    }
     if (!strcmp(what, "reject-refresh-sweep")) { /* nightly-6-perf: refresh bits without DIRTY */
         int r = setup(3456, 2234, 13824, 0, 1ULL << 44);
         CHECK(r == -4, "refresh without dirty tracking accepted (%d)", r);

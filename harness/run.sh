@@ -77,6 +77,7 @@ if [ "$what" = test ] || [ "$what" = all ]; then
   # nightly-6-perf: bits 47:44 are now the refresh period (DIRTY only); bit 44 without DIRTY must be refused,
   # and the remaining reserved bits 63:56 still are (bit 56 below, bit 63 added)
   "$B/sim_new_san" reject-refresh-sweep
+  "$B/sim_new_san" reject-pool-overlap   # nightly-6c: shadow never mapped over the n5c pool
   expect pass "nightly-6 refresh"            "$B/sim_new_san" refresh
   expect fail "mutant no-refresh refresh"    "$B/sim_mut_norefresh_san" refresh
   expect fail "mutant no-fix-count refresh"  "$B/sim_mut_nofixcount_san" refresh

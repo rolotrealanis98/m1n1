@@ -467,6 +467,18 @@ bool hv_win_fb_start(const struct boot_args *gba)
         win_fb.state = 3;
         return false;
     }
+    /* nightly-6c: the shadow and its copy come from the primary heap (PREPARE runs before the launcher adds the
+     * n5c extension pool, and checks heapblock_remaining(), which is primary-only). The pool is cut from the top
+     * of guest RAM and is never mapped to the guest; refuse to map a shadow that overlaps it. */
+    {
+        u64 pb = 0, ps = 0, pu = 0;
+        heapblock_pool_info(&pb, &ps, &pu);
+        if (ps && ((win_fb.shadow < pb + ps && pb < win_fb.shadow + win_fb.size) ||
+                   (win_fb.copy && win_fb.copy < pb + ps && pb < win_fb.copy + win_fb.size))) {
+            win_fb.state = 3;
+            return false;
+        }
+    }
     if (hv_map_hw_nc(win_fb.shadow, win_fb.shadow, win_fb.size) < 0) {
         win_fb.state = 3;
         return false;
