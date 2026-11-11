@@ -55,5 +55,8 @@ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz);
 
 bool rtkit_alloc_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr, size_t sz);
 bool rtkit_free_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr);
+/* dcpw-live-1: IOMMU hooks used when the rtkit has no dart (see rtkit.c) */
+void rtkit_set_hooks(rtkit_dev_t *rtk, u64 (*map)(void *, void *, size_t), void *(*xlate)(void *, u64),
+                     void *ctx);
 
 #endif

@@ -33,6 +33,7 @@
 #include "hv/win/hv_win.h"
 #include "hv/win/hv_win_storage.h"
 #include "hv_win_hidm.h"
+#include "hv_win_dcpw.h"
 #include "hv/win/s1/native_link.h"
 #include "hv/win/s1/ans_ro.h"
 #include "minilzlib/minlzma.h"
@@ -658,6 +659,10 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");
+            break;
+        case P_DCPW_LIVE:
+            reply->retval = dcpw_live_run(request->args[0], request->args[1], request->args[2],
+                                          request->args[3]);
             break;
         case P_HV_WIN_USB_PREP:
             reply->retval = hv_win_usb_prep(request->args[0], request->args[1], request->args[2],

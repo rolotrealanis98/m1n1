@@ -202,6 +202,9 @@ OBJECTS := \
 	mtp_kbd.o \
 	mtp_kbd_resident.o \
 	hv_win_hidm.o \
+	hv_win_dcpw.o \
+	dcpw/service/dart4.o dcpw/service/dcpw_core.o dcpw/service/dcpw_static.o \
+	dcpw/service/iomfb_codec.o dcpw/service/iomfb_session.o dcpw/service/iomfb_live.o \
 	hidm/service/hidm_service.o \
 	sart.o \
 	sep.o \
