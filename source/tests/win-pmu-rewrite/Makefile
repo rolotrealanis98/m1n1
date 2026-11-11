@@ -22,7 +22,8 @@ SAN ?= 1
 
 CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -Wundef -Wsign-compare \
 	-Wno-unused-parameter -fno-strict-aliasing \
-	-DPMU_REWRITE_HOST_TEST -iquote shim -iquote $(SRC_WIN)
+	-DPMU_REWRITE_HOST_TEST -iquote shim -iquote $(SRC_WIN) \
+	-DPMU_MAX_PINNED=256 # nightly-7: the firmware list is 2048; the test keeps 256 so 320 mock pages can fill it
 ifeq ($(SAN),1)
 CFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
 endif

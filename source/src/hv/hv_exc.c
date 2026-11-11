@@ -1412,6 +1412,12 @@ static void hv_get_context(struct exc_info *ctx)
     sysop("isb");
 }
 
+/* nightly-7: how long each CPU waited for bhl at exception entry (statistics only; each CPU writes its own slot).
+ * Printed in the SM status line (win/hv_win_status.c). smp18 run 20261111-083750: the boot tick's 5 s report
+ * took 9.7 s while a PMU flip storm held bhl, then bugcheck 0x101. */
+u64 hv_bhl_wait_max[MAX_CPUS], hv_bhl_wait_1ms[MAX_CPUS];
+static u64 hv_bhl_tick_1ms;
+
 static void hv_exc_entry(void)
 {
     // Enable SErrors in the HV, but only if not already pending
@@ -1419,9 +1425,20 @@ static void hv_exc_entry(void)
         sysop("msr daifclr, 4");
 
     __atomic_and_fetch(&hv_cpus_in_guest, ~BIT(smp_id()), __ATOMIC_ACQUIRE);
+    u64 bhl_t0 = mrs(CNTPCT_EL0);
     spin_lock(&bhl);
     hv_wdt_breadcrumb('X');
     exc_entry_time = mrs(CNTPCT_EL0);
+    {
+        int c = smp_id();
+        u64 w = exc_entry_time - bhl_t0;
+        if (!hv_bhl_tick_1ms)
+            hv_bhl_tick_1ms = mrs(CNTFRQ_EL0) / 1000;
+        if (w > hv_bhl_wait_max[c])
+            hv_bhl_wait_max[c] = w;
+        if (w >= hv_bhl_tick_1ms)
+            hv_bhl_wait_1ms[c]++;
+    }
     /* disable PMU counters in the hypervisor */
     u64 pmcr0 = mrs(SYS_IMP_APL_PMCR0);
     PERCPU(exc_entry_pmcr0_cnt) = pmcr0 & PMCR0_CNT_MASK;
@@ -2061,7 +2078,7 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
         {HV_WIN_PMU_WORDS_SKIP_EXEC, "skexec"}, {HV_WIN_PMU_WORDS_SKIP_BOUNDARY, "skbnd"},
         {HV_WIN_PMU_WORDS_SKIP_OTHER, "skother"}, {HV_WIN_PMU_MODIFIED_NEVER_EXECUTED, "MNE"},
         {HV_WIN_PMU_EXEC_FAULTS, "xflt"}, {HV_WIN_PMU_EXEC_DENIED, "xunproven"},
-        {HV_WIN_PMU_REPROTECTS, "reprot"}};
+        {HV_WIN_PMU_REPROTECTS, "reprot"}, {HV_WIN_PMU_PIN_FULL, "pinfull"}, {HV_WIN_PMU_STORMS, "storm"}};
     for (unsigned i = 0; i < sizeof(pk) / sizeof(pk[0]); i++) {
         u64 v = hv_win_pmu_stat(pk[i].idx);
         printf(" %s %lu(+%lu)", pk[i].name, (unsigned long)v, (unsigned long)(v - st_prev_pmu[pk[i].idx]));

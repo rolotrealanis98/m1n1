@@ -88,7 +88,21 @@ void hv_win_storage_smp_line(const char *prefix)
     for (u32 v = 0; v < n; v++)
         if (hold[v])
             printf(" v%u:%lu", v, (unsigned long)hold[v]);
-    printf(" | holdoff %lu rel %lu\n", (unsigned long)holdoffs, (unsigned long)rel);
+    printf(" | holdoff %lu rel %lu", (unsigned long)holdoffs, (unsigned long)rel);
+    /* nightly-7: longest bhl wait at exception entry per CPU, and waits >= 1 ms (hv_exc.c) */
+    extern u64 hv_bhl_wait_max[], hv_bhl_wait_1ms[];
+    u64 worst = 0;
+    int worst_c = 0;
+    for (int c = 0; c < 24; c++)
+        if (hv_bhl_wait_max[c] > worst) {
+            worst = hv_bhl_wait_max[c];
+            worst_c = c;
+        }
+    printf(" | bhl-wait max-us c%d:%lu >=1ms", worst_c, (unsigned long)smps_us(worst, f));
+    for (int c = 0; c < 24; c++)
+        if (hv_bhl_wait_1ms[c])
+            printf(" c%d:%lu", c, (unsigned long)hv_bhl_wait_1ms[c]);
+    printf("\n");
 }
 
 static const struct s1_model *model(void)

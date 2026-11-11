@@ -310,6 +310,7 @@ enum hv_win_pmu_stat {
     HV_WIN_PMU_EXEC_FAULTS,         /* 4 KiB: fetch faults on DIRTY or re-protected blocks */
     HV_WIN_PMU_EXEC_DENIED,         /* 4 KiB: of those, frame not proven (block opened unscanned) */
     HV_WIN_PMU_REPROTECTS,          /* 4 KiB: CODE blocks with an unscanned frame re-protected */
+    HV_WIN_PMU_STORMS,              /* nightly-7: blocks made sticky by the storm guard (write/execute ping-pong) */
     HV_WIN_PMU_NR_STATS,
 };
 #define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */

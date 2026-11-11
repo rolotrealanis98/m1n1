@@ -401,6 +401,8 @@ static struct {
 static int nev;
 static bool scan_order_ok = true;
 static char last_line[512];
+static int storm_lines; /* nightly-7: storm-guard console lines */
+#define PMU_STORM_PINS_TEST 3
 
 static void ev_add(enum ev_kind k, int page, enum hv_xt_state st)
 {
@@ -530,6 +532,8 @@ int host_printf(const char *fmt, ...)
     va_start(ap, fmt);
     int n = vsnprintf(last_line, sizeof(last_line), fmt, ap);
     va_end(ap);
+    if (strstr(last_line, "flips between write and execute"))
+        storm_lines++;
     if (verbose)
         fputs(last_line, stdout);
     return n;
@@ -902,7 +906,9 @@ static void test_pinning(void)
     CHECK(iabort(10, 100, FSC_PERM_L3, 0x1000) && words_of(10)[100] == 0xd503201f,
           "rescan after the sweep");
 
-    /* pin list full: the page keeps flipping (correct, only slower) */
+    /* pin list full. nightly-7 (changed expectation): the list's non-sticky entries are re-armed at once (as the
+     * next sweep would) and the page is pinned; before nightly-7 the page kept flipping until the next sweep, which
+     * never came soon enough on 18 vCPUs (smp18 run 20261111-083750, bugcheck 0x101). */
     for (int p = 11; p < 11 + 256; p++) {
         for (int i = 0; i < 4; i++) {
             iabort(p, 0, FSC_PERM_L3, 0x1000);
@@ -911,19 +917,119 @@ static void test_pinning(void)
     }
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_PINS) == 1 + 256, "pins %lu",
           hv_win_pmu_stat(HV_WIN_PMU_PINS));
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 3; i++) {
         iabort(300, 0, FSC_PERM_L3, 0x1000);
-        CHECK(dabort(300, ISS_WNR | FSC_PERM_L3, 0x2000), "write with the list full");
+        CHECK(dabort(300, ISS_WNR | FSC_PERM_L3, 0x2000) && m_pg[300].st == HV_XT_DIRTY,
+              "write %d with the list full", i + 1);
     }
-    CHECK(m_pg[300].st == HV_XT_DIRTY && hv_win_pmu_stat(HV_WIN_PMU_PIN_FULL) == 1 &&
-              ev_is(1, EV_TLBI_BCAST, 0, 0),
-          "list full: state %d", m_pg[300].st);
-    CHECK(m_pg[300].flips == 4, "flips %u", m_pg[300].flips);
+    iabort(300, 0, FSC_PERM_L3, 0x1000);
+    CHECK(dabort(300, ISS_WNR | FSC_PERM_L3, 0x2000), "4th write with the list full");
+    CHECK(m_pg[300].st == HV_XT_PINNED && m_pg[300].flips == 4 && hv_win_pmu_stat(HV_WIN_PMU_PIN_FULL) == 1,
+          "list full: pinned after an early re-arm (state %d, flips %u)", m_pg[300].st, m_pg[300].flips);
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_UNPINS) == 1 + 256 && hv_win_pmu_stat(HV_WIN_PMU_SWEEPS) == 2,
+          "early re-arm: unpins %lu sweeps %lu", hv_win_pmu_stat(HV_WIN_PMU_UNPINS),
+          hv_win_pmu_stat(HV_WIN_PMU_SWEEPS));
+    CHECK(m_pg[11].st == HV_XT_DIRTY && m_pg[266].st == HV_XT_DIRTY && m_pg[11].flips == 0, "all re-armed");
     for (int t = 0; t < 100; t++)
         hv_win_pmu_tick();
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_UNPINS) == 257, "unpins %lu",
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_UNPINS) == 258 && m_pg[300].st == HV_XT_DIRTY, "unpins %lu",
           hv_win_pmu_stat(HV_WIN_PMU_UNPINS));
-    CHECK(m_pg[11].st == HV_XT_DIRTY && m_pg[266].st == HV_XT_DIRTY, "all swept");
+}
+
+/*
+ * nightly-7: smp18 hardware run 20261111-083750 (bugcheck 0x101). With 4 KiB guest pages a code frame and a data
+ * frame share one 16 KiB block; one CPU executes the block while another (or the same instruction) writes it, so
+ * the block flips CODE <-> DIRTY. Two CPUs alternate write and execute on one block, then on more blocks than the
+ * pin list holds, with the 1 kHz tick running: the flips must converge (pin, then the storm guard keeps the block
+ * pinned across sweeps), never ping-pong for as long as the guest keeps doing it.
+ */
+static void test_smp_pingpong(void)
+{
+    arm_all();
+    storm_lines = 0;
+    u64 f0 = 0;
+    /* one block, two CPUs, 2000 rounds (2 s of 1 ms ticks) */
+    for (int r = 0; r < 2000; r++) {
+        host_cpu = 1;
+        dabort(20, ISS_WNR | FSC_PERM_L3, 0x7ff852934820UL);      /* CPU 1 writes the data frame */
+        host_cpu = 0;
+        iabort(20, 0x820 / 4, FSC_PERM_L3, 0x7ff852934820UL);     /* CPU 0 executes the code frame */
+        hv_win_pmu_tick();
+        if (r == 999)
+            f0 = hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS);
+    }
+    u64 flips = hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS);
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_STORMS) == 1, "storm guard engaged once (%lu)", hv_win_pmu_stat(HV_WIN_PMU_STORMS));
+    CHECK(flips <= 3 * PMU_STORM_PINS_TEST + 3, "one block: %lu write flips in 2000 rounds", flips);
+    CHECK(flips - f0 <= 3, "one block, second second: %lu more flips", flips - f0);
+    CHECK(m_pg[20].st == HV_XT_PINNED, "storm block pinned (state %d)", m_pg[20].st);
+    CHECK(storm_lines == 1, "logged once (%d lines)", storm_lines);
+    /* sticky ends: after PMU_STICKY_SWEEPS sweeps without further pins the block is re-armed */
+    for (int t = 0; t < 100 * 52; t++)
+        hv_win_pmu_tick();
+    CHECK(m_pg[20].st == HV_XT_DIRTY, "sticky expires (state %d)", m_pg[20].st);
+
+    /* a hot set of 200 blocks (fits the 256-entry list of this build) plus a cold wave of 100 more blocks that
+     * fill the list once: the list-full path makes room, the hot set converges to sticky pins */
+    arm_all();
+    for (int r = 0; r < 600; r++) {
+        for (int p = 10; p < 210; p++) {
+            host_cpu = 1 + (p & 1);
+            dabort(p, ISS_WNR | FSC_PERM_L3, 0x2000);
+            host_cpu = 0;
+            iabort(p, 0, FSC_PERM_L3, 0x1000);
+        }
+        if (r >= 20 && r < 30)
+            for (int p = 210; p < 310; p++) {
+                if (p == 7 || p == 8) continue;
+                host_cpu = 3;
+                dabort(p, ISS_WNR | FSC_PERM_L3, 0x2000);
+                iabort(p, 0, FSC_PERM_L3, 0x1000);
+            }
+        hv_win_pmu_tick();
+    }
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_PIN_FULL) >= 1, "the cold wave filled the list (%lu)",
+          hv_win_pmu_stat(HV_WIN_PMU_PIN_FULL));
+    u64 f1 = hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS);
+    for (int r = 0; r < 1000; r++) {
+        for (int p = 10; p < 210; p++) {
+            host_cpu = 1 + (p & 1);
+            dabort(p, ISS_WNR | FSC_PERM_L3, 0x2000);
+            host_cpu = 0;
+            iabort(p, 0, FSC_PERM_L3, 0x1000);
+        }
+        hv_win_pmu_tick();
+    }
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS) - f1 <= 200UL * 3,
+          "hot set converged: %lu flips in 1000 more rounds (200 blocks)", hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS) - f1);
+    for (int p = 10; p < 210; p++)
+        CHECK(m_pg[p].st == HV_XT_PINNED, "hot block %d pinned (state %d)", p, m_pg[p].st);
+
+    /* more hot blocks (290) than the list holds (256): the overflow keeps flipping, but no more than about one flip
+     * per overflow block per round (no amplification of the whole set) */
+    arm_all();
+    for (int r = 0; r < 300; r++) {
+        for (int p = 10; p < 300; p++) {
+            host_cpu = 1 + (p & 1);
+            dabort(p, ISS_WNR | FSC_PERM_L3, 0x2000);
+            host_cpu = 0;
+            iabort(p, 0, FSC_PERM_L3, 0x1000);
+        }
+        hv_win_pmu_tick();
+    }
+    f1 = hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS);
+    for (int r = 0; r < 100; r++) {
+        for (int p = 10; p < 300; p++) {
+            host_cpu = 1 + (p & 1);
+            dabort(p, ISS_WNR | FSC_PERM_L3, 0x2000);
+            host_cpu = 0;
+            iabort(p, 0, FSC_PERM_L3, 0x1000);
+        }
+        hv_win_pmu_tick();
+    }
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS) - f1 <= 100UL * (290 - 256) * 2,
+          "over the cap: %lu flips in 100 rounds", hv_win_pmu_stat(HV_WIN_PMU_WRITE_FLIPS) - f1);
+    host_cpu = 0;
 }
 
 static void test_stuck(void)
@@ -1455,6 +1561,7 @@ int main(int argc, char **argv)
         test_exec_and_write();
         test_walker();
         test_pinning();
+        test_smp_pingpong(); /* nightly-7 */
         test_stuck();
         test_log_ring();
         test_dma_refill();

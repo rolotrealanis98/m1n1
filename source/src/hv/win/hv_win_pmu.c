@@ -78,7 +78,22 @@
 #define PMU_BLOCK_FRAMES (PMU_PAGE / PMU_FRAME_SIZE)
 #define PMU_MAX_RANGES   32
 #define PMU_FLIP_CAP     4    /* write-after-execute flips before a page is pinned RWX */
-#define PMU_MAX_PINNED   256  /* pages pinned at once; past it a page keeps flipping */
+#ifndef PMU_MAX_PINNED /* host tests shrink it to reach the list-full path */
+/* nightly-7: was 256. With 18 vCPUs the list filled within one sweep and the full-list path kept the block
+ * flipping (smp18 run 20261111-083750: wflip +398k and scan +400k in 5 s, one block per instruction, the boot
+ * tick starved behind bhl, bugcheck 0x101). A full list now re-arms its non-sticky entries early (below). */
+#define PMU_MAX_PINNED   2048 /* pages pinned at once */
+#endif
+/* nightly-7 storm guard: a block pinned again within PMU_STORM_GAP hypervisor ticks of its previous pin,
+ * PMU_STORM_PINS times in a row, stays pinned (RWX, scanned before its last pin) for PMU_STICKY_SWEEPS sweeps instead
+ * of being re-armed at each one. Ticks, not sweeps, measure the gap: a full list re-arms early (extra sweeps), and a
+ * starved tick (bhl contention) then only widens the window. */
+#define PMU_STORM_SLOTS     (2 * PMU_MAX_PINNED)
+#define PMU_STORM_PROBE     8
+#define PMU_STORM_PINS      3
+#define PMU_STORM_GAP       300  /* ticks: three nominal sweep periods */
+#define PMU_STICKY_SWEEPS   50   /* ~5 s at one sweep per 100 ticks */
+#define PMU_STORM_PRINT_MAX 32
 #define PMU_SWEEP_TICKS  100  /* hv_tick() runs at 1 kHz: pinned pages re-armed after 100 ms */
 #ifndef PMU_MAX_OPEN /* host tests shrink it to reach the list-full path */
 #define PMU_MAX_OPEN 1024 /* 4 KiB: CODE blocks with an unscanned frame, re-protected ... */
@@ -121,6 +136,103 @@ static struct {
 
 static u64 stuck_elr[MAX_CPUS];
 static u32 stuck_count[MAX_CPUS];
+
+/* nightly-7 storm guard (under the big HV lock like everything here) */
+static struct pmu_storm {
+    u64 block;  /* 0 = free */
+    u64 tick;   /* storm_clock at its last pin */
+    u16 pins;   /* pins in a row, each within PMU_STORM_GAP sweeps of the previous */
+    u16 sticky; /* sweeps it still survives */
+    bool logged;
+} storm[PMU_STORM_SLOTS];
+static u32 storm_printed;
+static u64 storm_clock; /* hv_win_pmu_tick() calls */
+
+static struct pmu_storm *pmu_storm_slot(u64 block, bool insert)
+{
+    u32 h = (u32)((block >> 14) * 0x9e3779b97f4a7c15UL >> 40) % PMU_STORM_SLOTS;
+    struct pmu_storm *victim = NULL;
+    for (u32 i = 0; i < PMU_STORM_PROBE; i++) {
+        struct pmu_storm *e = &storm[(h + i) % PMU_STORM_SLOTS];
+        if (e->block == block)
+            return e;
+        /* replace: a free slot first, else the least sticky, then the oldest */
+        if (!victim || (victim->block && (!e->block || e->sticky < victim->sticky ||
+                                          (e->sticky == victim->sticky && e->tick < victim->tick))))
+            victim = e;
+    }
+    if (!insert)
+        return NULL;
+    *victim = (struct pmu_storm){.block = block, .tick = storm_clock};
+    return victim;
+}
+
+/* A block was just pinned: count it; a repeat offender becomes sticky (logged once per block) */
+static void pmu_storm_note(u64 block, u32 flips)
+{
+    struct pmu_storm *e = pmu_storm_slot(block, true);
+    e->pins = (e->pins && storm_clock - e->tick <= PMU_STORM_GAP) ? e->pins + 1 : 1;
+    e->tick = storm_clock;
+    if (e->pins < PMU_STORM_PINS || e->sticky)
+        return;
+    e->sticky = PMU_STICKY_SWEEPS;
+    pmu.stats[HV_WIN_PMU_STORMS]++;
+    if (!e->logged && storm_printed++ < PMU_STORM_PRINT_MAX)
+        printf("HV/win: PMU rewrite: block IPA 0x%lx flips between write and execute (pinned %u times in a row, "
+               "%u flips each): kept RWX for %d sweeps (logged once per block)\n",
+               block, e->pins, flips, PMU_STICKY_SWEEPS);
+    e->logged = true;
+}
+
+/* The list is full of sticky blocks: re-arm the entry with the fewest sticky sweeps left (one broadcast TLBI) */
+static void pmu_evict_one(void)
+{
+    u32 best = 0, best_left = ~0U;
+    for (u32 i = 0; i < pmu.nr_pinned; i++) {
+        struct pmu_storm *e = pmu_storm_slot(pmu.pinned[i], false);
+        u32 left = e ? e->sticky : 0;
+        if (left < best_left) {
+            best = i;
+            best_left = left;
+        }
+    }
+    u64 page = pmu.pinned[best];
+    struct pmu_storm *e = pmu_storm_slot(page, false);
+    if (e)
+        e->sticky = 0;
+    pmu.pinned[best] = pmu.pinned[--pmu.nr_pinned];
+    if (hv_xt_get(page, NULL, NULL) == HV_XT_PINNED) {
+        hv_xt_set(page, HV_XT_DIRTY, 0);
+        pmu.stats[HV_WIN_PMU_UNPINS]++;
+        hv_xt_tlbi(true);
+    }
+}
+
+/* Re-arm the pin list (PINNED -> DIRTY, flips 0), keeping sticky storm blocks; one broadcast TLBI */
+static void pmu_sweep(void)
+{
+    u32 kept = 0;
+    bool changed = false;
+    for (u32 i = 0; i < pmu.nr_pinned; i++) {
+        u64 page = pmu.pinned[i];
+        if (hv_xt_get(page, NULL, NULL) != HV_XT_PINNED)
+            continue;
+        struct pmu_storm *e = pmu_storm_slot(page, false);
+        if (e && e->sticky) {
+            e->sticky--;
+            pmu.pinned[kept++] = page;
+            continue;
+        }
+        hv_xt_set(page, HV_XT_DIRTY, 0);
+        pmu.stats[HV_WIN_PMU_UNPINS]++;
+        changed = true;
+    }
+    pmu.nr_pinned = kept;
+    pmu.ticks = 0;
+    if (changed)
+        hv_xt_tlbi(true);
+    pmu.stats[HV_WIN_PMU_SWEEPS]++;
+}
 
 #ifdef PMU_REWRITE_HOST_TEST
 /* n5c: host suites without a heap pool model: the primary heap is all there is */
@@ -634,6 +746,13 @@ static bool pmu_write_fault(struct exc_info *ctx, u64 ipa, bool walker)
 
     flips++;
     if (flips >= PMU_FLIP_CAP) {
+        if (pmu.nr_pinned >= PMU_MAX_PINNED) {
+            /* nightly-7: make room by re-arming the non-sticky entries now, as the next sweep would */
+            pmu.stats[HV_WIN_PMU_PIN_FULL]++;
+            pmu_sweep();
+            if (pmu.nr_pinned >= PMU_MAX_PINNED)
+                pmu_evict_one(); /* every entry sticky: re-arm the one closest to expiry */
+        }
         if (pmu.nr_pinned < PMU_MAX_PINNED) {
             /* Written and executed too often: leave it RWX until the next sweep */
             if (!pmu.nr_pinned)
@@ -642,6 +761,7 @@ static bool pmu_write_fault(struct exc_info *ctx, u64 ipa, bool walker)
             hv_xt_set(page, HV_XT_PINNED, flips);
             hv_xt_tlbi(false);
             pmu.stats[HV_WIN_PMU_PINS]++;
+            pmu_storm_note(page, flips); /* nightly-7 */
             pmu_productive();
             return true;
         }
@@ -778,19 +898,10 @@ void hv_win_pmu_tick(void)
     if (pmu.nr_open && ++pmu.close_ticks >= PMU_CLOSE_TICKS)
         pmu_close_open();
 
+    storm_clock++;
     if (!pmu.nr_pinned || ++pmu.ticks < PMU_SWEEP_TICKS)
         return;
-
-    for (u32 i = 0; i < pmu.nr_pinned; i++) {
-        if (hv_xt_get(pmu.pinned[i], NULL, NULL) == HV_XT_PINNED) {
-            hv_xt_set(pmu.pinned[i], HV_XT_DIRTY, 0);
-            pmu.stats[HV_WIN_PMU_UNPINS]++;
-        }
-    }
-    pmu.nr_pinned = 0;
-    pmu.ticks = 0;
-    hv_xt_tlbi(true);
-    pmu.stats[HV_WIN_PMU_SWEEPS]++;
+    pmu_sweep(); /* nightly-7: shared with the full-list path; keeps sticky storm blocks */
 }
 
 void hv_win_pmu_report(void)
@@ -839,5 +950,8 @@ void hv_win_pmu_host_reset(void)
     memset(&pmu, 0, sizeof(pmu));
     memset(stuck_elr, 0, sizeof(stuck_elr));
     memset(stuck_count, 0, sizeof(stuck_count));
+    memset(storm, 0, sizeof(storm));
+    storm_printed = 0;
+    storm_clock = 0;
 }
 #endif
