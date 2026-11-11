@@ -9,7 +9,8 @@
 #define MTP_TX_FREE (MTP_DATA + 0x14)
 #define MTP_RX32 (MTP_DATA + 0x28)
 #define MTP_RX_COUNT (MTP_DATA + 0x2c)
-enum mtp_phase { MTP_ENUM, MTP_ENABLE, MTP_LIVE, MTP_FAILED };
+/* MTP_STM: Linux order (dockchannel-hid enables "stm" first, others after its READY). */
+enum mtp_phase { MTP_ENUM, MTP_STM, MTP_ENABLE, MTP_LIVE, MTP_FAILED };
 enum mtp_error { MTP_E_NONE, MTP_E_TIMEOUT, MTP_E_FRAME, MTP_E_OVERRUN,
                  MTP_E_DESCRIPTOR, MTP_E_TOPOLOGY, MTP_E_RTKit, MTP_E_ACK, MTP_E_TX };
 /* All callbacks must be nonblocking. poll_control handles bounded RTKit work. */
@@ -20,6 +21,7 @@ struct mtp_io {
     hm_u64 (*now_us)(void *);
     int (*poll_control)(void *);
     void (*input_changed)(void *); /* recompute virtual IRQ after each push */
+    int (*log)(const char *, ...); /* optional console line; NULL = silent */
 };
 struct mtp_kbd {
     struct mtp_io io;
@@ -33,7 +35,14 @@ struct mtp_kbd {
     hm_u8 iface, seq, enable_seq;
     int found, complete, ack, ready, enable_sent;
     hm_u32 frames, reports, rejected;
+    /* stm (Linux enables it first); never multi-touch / any other interface */
+    hm_u8 stm_iface, stm_seq;
+    int stm_found, stm_complete, stm_sent, stm_ack, stm_ready, stm_state;
+    hm_u64 stm_deadline, rx_bytes;
 };
+#define MTP_STM_ANNOUNCE_US 1000000u /* wait for stm INIT after keyboard INIT */
+#define MTP_STM_READY_US 2000000u    /* wait for stm ACK + READY */
+#define MTP_LOG_REPORTS 32u          /* hex-dump only the first N input reports */
 void mtp_kbd_init(struct mtp_kbd *, const struct mtp_io *, hm_service *);
 void mtp_kbd_poll(struct mtp_kbd *);
 void mtp_kbd_fail(struct mtp_kbd *, enum mtp_error);

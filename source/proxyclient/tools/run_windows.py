@@ -1176,11 +1176,24 @@ def main():
                f"ports with a device {[i + 1 for i in range(8) if (info >> 48) & (1 << i)] or 'none seen'} "
                f"(info {info:#x})")
     if args.builtin_keyboard:
-        rc = p.hv_win_hidm_configure()
+        # MTP bring-up runs inside this one proxy call (bounded ~50 s, silent gaps up to 20 s):
+        # the default 3 s UART read timeout would abort the launch mid-call.
+        old_timeout = iface.dev.timeout
+        iface.dev.timeout = 90
+        try:
+            rc = p.hv_win_hidm_configure()
+        finally:
+            iface.dev.timeout = old_timeout
         if rc != 0:
-            raise SystemExit(f"HIDM configure refused ({rc})")
-        hv.add_tracer(irange(0xF38100000, 0x8000), "WIN-HIDM", TraceMode.RESERVED)
-        record("HIDM configured; backend failure is reported as zero interfaces")
+            # Clean failure: no /chosen/m5w,hidm, so the firmware publishes no M5WH0001 node
+            # and Windows boots without the built-in keyboard.
+            print(f"WARNING: HIDM configure refused ({rc}); continuing without the built-in keyboard",
+                  file=sys.stderr)
+            record(f"HIDM configure refused ({rc}); no m5w,hidm handoff")
+            args.builtin_keyboard = False
+        else:
+            hv.add_tracer(irange(0xF38100000, 0x8000), "WIN-HIDM", TraceMode.RESERVED)
+            record("HIDM configured; backend failure is reported as zero interfaces")
 
     text = format_plan(plan)
     for name, base, size in window_frames(args):

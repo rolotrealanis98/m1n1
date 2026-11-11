@@ -15,7 +15,7 @@
 
 #define rtkit_printf(...)                                                                          \
     do {                                                                                           \
-        if (rtk->mtp) break; /* MTP: no runtime console or key-bearing logs. */               \
+        if (rtk->mtp && !rtk->mtp_boot_log) break; /* MTP: no runtime/key-bearing logs */   \
         debug_printf("rtkit(%s): ", rtk->name);                                                    \
         debug_printf(__VA_ARGS__);                                                                 \
     } while (0)
@@ -89,7 +89,7 @@ struct rtkit_dev {
     iova_domain_t *dart_iovad;
     sart_dev_t *sart;
     bool sram;
-    bool mtp, tx_pending, oslog_buffer;
+    bool mtp, tx_pending, oslog_buffer, mtp_boot_log;
     u64 sram_base, sram_size, tx_deadline;
     struct asc_message pending_tx;
 
@@ -311,8 +311,15 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
 
     if (rtk->sram) {
         if (rtk->mtp && (!sz || addr < rtk->sram_base || sz > rtk->sram_size ||
-                         addr - rtk->sram_base > rtk->sram_size - sz))
+                         addr - rtk->sram_base > rtk->sram_size - sz)) {
+            printf("rtkit(mtp): buffer request ep 0x%x iova 0x%lx size 0x%lx not inside MTP SRAM: "
+                   "refused (decision sram-buffers; Linux would DART-map host memory for iova 0)\n",
+                   msg->ep, (unsigned long)addr, (unsigned long)sz);
             return false;
+        }
+        if (rtk->mtp)
+            rtkit_printf("buffer ep 0x%x in SRAM iova 0x%lx size 0x%lx (no reply, as Linux)\n", msg->ep,
+                         (unsigned long)addr, (unsigned long)sz);
         if (!addr) {
             rtkit_printf("SRAM buffers needs to be provided by the IOP\n");
             return false;
@@ -478,7 +485,11 @@ skip_mtp_log:;
                         if (!rtk->crashlog_bfr.bfr) {
                             ok = ok && rtkit_handle_buffer_request(rtk, msg, &rtk->crashlog_bfr);
                         } else {
-                            if (rtk->mtp) { rtk->crashed = true; return -1; }
+                            if (rtk->mtp) {
+                                printf("rtkit(mtp): coprocessor CRASHED (second crashlog message)\n");
+                                rtk->crashed = true;
+                                return -1;
+                            }
                             rtkit_crashed(rtk);
                             return -1;
                         }
@@ -574,7 +585,20 @@ static bool rtkit_power_wait_expired(u64 deadline)
     return rtkit_power_timeout && timeout_expired(deadline);
 }
 
+static bool rtkit_boot_inner(rtkit_dev_t *rtk);
 bool rtkit_boot(rtkit_dev_t *rtk)
+{
+    /* MTP: boot-time diagnostics only (preguest); runtime stays silent. */
+    rtk->mtp_boot_log = rtk->mtp;
+    bool ok = rtkit_boot_inner(rtk);
+    if (rtk->mtp)
+        printf("rtkit(mtp): boot %s (iop_power=%#x ap_power=%#x)\n", ok ? "OK" : "FAILED",
+               rtk->iop_power, rtk->ap_power);
+    rtk->mtp_boot_log = false;
+    return ok;
+}
+
+static bool rtkit_boot_inner(rtkit_dev_t *rtk)
 {
     struct asc_message msg;
 
@@ -638,7 +662,10 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     u64 mtp_boot_deadline = timeout_calculate(5000000);
     bool got_epmap = false;
     while (!got_epmap) {
-        if (rtk->mtp && timeout_expired(mtp_boot_deadline)) return false;
+        if (rtk->mtp && timeout_expired(mtp_boot_deadline)) {
+            rtkit_printf("endpoint map not complete within 5 s\n");
+            return false;
+        }
         if (!asc_recv_timeout(rtk->asc, &msg, rtk->mtp ? 1000000 : rtkit_boot_timeout)) {
             rtkit_printf("couldn't receive message while waiting for endpoint map\n");
             return false;
@@ -709,6 +736,19 @@ bool rtkit_boot(rtkit_dev_t *rtk)
         }
     }
 
+    rtkit_printf("endpoint map: crashlog=%d syslog=%d debug=%d ioreport=%d oslog=%d 0xa=%d\n",
+                 has_crashlog, has_syslog, has_debug, has_ioreport, has_oslog, has_analytics);
+    if (rtk->mtp) {
+        /* Linux rtkit.c starts system endpoints in ascending order: 1,2,3,4,8,0xa. */
+        if ((has_crashlog && !rtkit_start_ep(rtk, RTKIT_EP_CRASHLOG)) ||
+            (has_syslog && !rtkit_start_ep(rtk, RTKIT_EP_SYSLOG)) ||
+            (has_debug && !rtkit_start_ep(rtk, RTKIT_EP_DEBUG)) ||
+            (has_ioreport && !rtkit_start_ep(rtk, RTKIT_EP_IOREPORT)) ||
+            (has_oslog && !rtkit_start_ep(rtk, RTKIT_EP_OSLOG)) ||
+            (has_analytics && !rtkit_start_ep(rtk, 0xa)))
+            return false;
+        has_debug = has_crashlog = has_syslog = has_ioreport = has_oslog = has_analytics = false;
+    }
     /* start all required system endpoints */
     if (has_debug && !rtkit_start_ep(rtk, RTKIT_EP_DEBUG))
         return false;
@@ -737,6 +777,7 @@ bool rtkit_boot(rtkit_dev_t *rtk)
             return false;
     }
 
+    rtkit_printf("IOP power ON\n");
     /* this enables syslog */
     msg.msg0 =
         FIELD_PREP(MGMT_TYPE, MGMT_MSG_AP_PWR_STATE) | FIELD_PREP(MGMT_PWR_STATE, RTKIT_POWER_ON);
@@ -750,8 +791,10 @@ bool rtkit_boot(rtkit_dev_t *rtk)
         u64 ap_deadline = timeout_calculate(5000000);
         while (rtk->ap_power != RTKIT_POWER_ON) {
             struct rtkit_message received;
-            if (timeout_expired(ap_deadline) || rtkit_recv(rtk, &received) < 0)
+            if (timeout_expired(ap_deadline) || rtkit_recv(rtk, &received) < 0) {
+                rtkit_printf("AP power ON not acknowledged (timeout 5 s or receive error)\n");
                 return false;
+            }
         }
     }
     return true;

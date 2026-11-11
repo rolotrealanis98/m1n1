@@ -1,17 +1,51 @@
 /* SPDX-License-Identifier: MIT */
 /* Independent implementation from PROTOCOL.md; no Linux driver code copied. */
 #include "mtp_kbd.h"
+#define LOG(k, ...) do { if ((k)->io.log) (k)->io.log(__VA_ARGS__); } while (0)
 static hm_u32 le16(const hm_u8 *p) { return p[0] | ((hm_u32)p[1] << 8); }
-static int keyboard_name(const hm_u8 *p)
+static int name_is(const hm_u8 *p, const char *want)
 {
-    static const hm_u8 name[16] = "keyboard";
-    for (unsigned i = 0; i < sizeof(name); i++)
-        if (p[i] != name[i]) return 0;
+    /* INIT name is 16 bytes, not necessarily NUL-terminated; exact match, NUL padded. */
+    unsigned i = 0;
+    for (; want[i]; i++)
+        if (p[i] != (hm_u8)want[i]) return 0;
+    for (; i < 16; i++)
+        if (p[i]) return 0;
     return 1;
+}
+static const char *phase_name(enum mtp_phase p)
+{
+    static const char *const n[] = {"enum", "stm", "enable", "live", "failed"};
+    return (unsigned)p < 5 ? n[p] : "?";
+}
+static const char *error_name(enum mtp_error e)
+{
+    static const char *const n[] = {"none", "timeout", "frame", "overrun", "descriptor",
+                                    "topology", "rtkit", "ack", "tx"};
+    return (unsigned)e < 9 ? n[e] : "?";
+}
+/* One console line of up to 32 bytes as hex (no snprintf in this freestanding file). */
+static void hexline(struct mtp_kbd *k, const char *tag, unsigned a, unsigned b,
+                    const hm_u8 *p, unsigned n)
+{
+    static const char hx[] = "0123456789abcdef";
+    char buf[32 * 3 + 1];
+    unsigned o = 0;
+    for (unsigned i = 0; i < n && i < 32; i++) {
+        buf[o++] = hx[p[i] >> 4]; buf[o++] = hx[p[i] & 15]; buf[o++] = ' ';
+    }
+    buf[o] = 0;
+    LOG(k, "MTP: %s %u/%u: %s\n", tag, a, b, buf);
 }
 void mtp_kbd_fail(struct mtp_kbd *k, enum mtp_error e)
 {
     if (k->phase == MTP_FAILED) return;
+    LOG(k, "MTP: FAILED error=%s in phase=%s (frames=%u reports=%u rx_bytes=%u stm=%s)\n",
+        error_name(e), phase_name(k->phase), (unsigned)k->frames, (unsigned)k->reports,
+        (unsigned)k->rx_bytes, k->stm_found ? "announced" : "absent");
+    if (e == MTP_E_TIMEOUT && k->phase == MTP_ENUM && !k->rx_bytes)
+        LOG(k, "MTP: decision fifo-polled: no FIFO byte ever arrived -> polled-FIFO assumption "
+               "(or MTP never started) is the suspect\n");
     k->phase = MTP_FAILED;
     k->error = e;
     k->tx_len = 0;
@@ -52,12 +86,24 @@ static void init_event(struct mtp_kbd *k, const hm_u8 *m, unsigned n)
 {
     if (n < 22 || !m[3]) { mtp_kbd_fail(k, MTP_E_FRAME); return; }
     unsigned id = m[3];
+    char nm[17];
+    for (unsigned i = 0; i < 16; i++) nm[i] = (m[4 + i] >= 0x20 && m[4 + i] < 0x7f) ? m[4 + i] : 0;
+    nm[16] = 0;
+    LOG(k, "MTP: INIT iface=%u name=\"%s\" more_packets=%u len=%u\n", id, nm, m[20], n);
     k->seen[id / 32] |= 1u << (id % 32);
-    if (!keyboard_name(m + 4)) {
-        if (k->found && id == k->iface) mtp_kbd_fail(k, MTP_E_TOPOLOGY);
+    if (name_is(m + 4, "stm")) {
+        /* Only enabled (never configured further) to follow Linux's order. */
+        if (k->found && id == k->iface) { mtp_kbd_fail(k, MTP_E_TOPOLOGY); return; }
+        if (!k->stm_found) { k->stm_found = 1; k->stm_iface = id; }
+        if (id == k->stm_iface && !m[20]) k->stm_complete = 1;
         return;
     }
-    if ((k->found && id != k->iface) || k->complete) {
+    if (!name_is(m + 4, "keyboard")) {
+        if ((k->found && id == k->iface) || (k->stm_found && id == k->stm_iface))
+            mtp_kbd_fail(k, MTP_E_TOPOLOGY);
+        return;
+    }
+    if ((k->found && id != k->iface) || k->complete || (k->stm_found && id == k->stm_iface)) {
         mtp_kbd_fail(k, MTP_E_TOPOLOGY); return;
     }
     k->found = 1; k->iface = id;
@@ -76,6 +122,7 @@ static void init_event(struct mtp_kbd *k, const hm_u8 *m, unsigned n)
             hm_copy(k->descriptor, m + p, len); k->desc_len = len;
         }
         if (type == 1) { /* Keyboard announced a GPIO dependency we cannot satisfy. */
+            LOG(k, "MTP: keyboard INIT announces a GPIO (block type 1): unsupported\n");
             mtp_kbd_fail(k, MTP_E_DESCRIPTOR); return;
         }
         p += len;
@@ -89,9 +136,15 @@ static void init_event(struct mtp_kbd *k, const hm_u8 *m, unsigned n)
         k->keyboard.info.version = 0x0510;
         k->keyboard.info.descriptor_length = k->desc_len;
         k->keyboard.descriptor = k->descriptor;
-        /* Send in poll(), after any queued GPIO NACK has drained. */
-        k->phase = MTP_ENABLE;
-        k->deadline = k->io.now_us(k->io.ctx) + 5000000;
+        LOG(k, "MTP: keyboard iface=%u report descriptor %u bytes\n", id, (unsigned)k->desc_len);
+        for (unsigned o = 0; o < k->desc_len; o += 32)
+            hexline(k, "rdesc", o, (unsigned)k->desc_len, k->descriptor + o,
+                    k->desc_len - o > 32 ? 32 : k->desc_len - o);
+        /* Linux order: stm first. Sent from poll(), after any queued GPIO NACK drained. */
+        k->phase = MTP_STM;
+        k->stm_state = 0;
+        k->stm_deadline = k->io.now_us(k->io.ctx) + MTP_STM_ANNOUNCE_US;
+        k->deadline = k->io.now_us(k->io.ctx) + 10000000;
     }
 }
 static void receive_frame(struct mtp_kbd *k)
@@ -105,10 +158,15 @@ static void receive_frame(struct mtp_kbd *k)
     const hm_u8 *m = f + 16;
     k->frames++;
     if (f[1] == 0x11) {
-        if (k->enable_sent && f[5] == 0 && f[4] == k->enable_seq &&
-            f[8] == 0x80 && len && m[0] == 0xb4) {
-            if (hm_le32(f + 12)) mtp_kbd_fail(k, MTP_E_ACK);
+        if (f[5] != 0 || f[8] != 0x80 || !len || m[0] != 0xb4) return;
+        hm_u32 rc = hm_le32(f + 12);
+        if (k->enable_sent && f[4] == k->enable_seq) {
+            LOG(k, "MTP: keyboard enable ACK seq=%u retcode=%#x\n", f[4], rc);
+            if (rc) mtp_kbd_fail(k, MTP_E_ACK);
             else k->ack = 1;
+        } else if (k->stm_sent && f[4] == k->stm_seq) {
+            LOG(k, "MTP: stm enable ACK seq=%u retcode=%#x\n", f[4], rc);
+            k->stm_ack = rc ? -1 : 1;
         }
         return;
     }
@@ -116,10 +174,18 @@ static void receive_frame(struct mtp_kbd *k)
     if (!f[5]) {
         if (!len) { mtp_kbd_fail(k, MTP_E_FRAME); return; }
         if (m[0] == 0xf0) init_event(k, m, len);
-        else if (m[0] == 0xf1 && len >= 2 && k->enable_sent && m[1] == k->iface)
-            k->ready = 1;
-        else if (m[0] == 0xa0) {
+        else if (m[0] == 0xf1 && len >= 2) {
+            if (k->enable_sent && m[1] == k->iface) {
+                LOG(k, "MTP: keyboard READY iface=%u\n", m[1]);
+                k->ready = 1;
+            } else if (k->stm_sent && m[1] == k->stm_iface) {
+                LOG(k, "MTP: stm READY iface=%u\n", m[1]);
+                k->stm_ready = 1;
+            }
+        } else if (m[0] == 0xa0) {
             if (len != 5) { mtp_kbd_fail(k, MTP_E_FRAME); return; }
+            LOG(k, "MTP: GPIO request iface=%u gpio=%u cmd=%u -> NACK 0xe000f00d (as Linux here)\n",
+                m[1], m[2], m[4]);
             hm_u8 nack[10] = {0xa1, 0x0d, 0xf0, 0x00, 0xe0};
             hm_copy(nack + 5, m, 5); queue(k, nack, sizeof(nack));
         }
@@ -128,6 +194,10 @@ static void receive_frame(struct mtp_kbd *k)
         hm_service_push(k->service, k->iface, m, len, k->io.now_us(k->io.ctx) * 1000);
         if (k->io.input_changed) k->io.input_changed(k->io.ctx);
         k->reports++;
+        if (k->reports <= MTP_LOG_REPORTS)
+            hexline(k, "report", (unsigned)k->reports, len, m, len);
+        if (k->reports == MTP_LOG_REPORTS)
+            LOG(k, "MTP: report log limit reached; further reports are counted only\n");
     }
 }
 static void tx_poll(struct mtp_kbd *k)
@@ -141,8 +211,53 @@ static void tx_poll(struct mtp_kbd *k)
     }
     for (unsigned i = 0; i < k->tx_len; i += 4)
         k->io.write32(k->io.ctx, MTP_TX32, hm_le32(k->tx + i));
-    if (k->tx[16] == 0xb4) k->enable_sent = 1;
+    if (k->tx[16] == 0xb4) {
+        if (k->complete && k->tx[17] == k->iface) k->enable_sent = 1;
+        else k->stm_sent = 1;
+    }
     k->tx_len = 0;
+}
+/* Only the keyboard and stm interfaces can ever be enabled. */
+static void enable(struct mtp_kbd *k, hm_u8 iface, int stm)
+{
+    if (stm ? !(k->stm_found && iface == k->stm_iface && iface != k->iface)
+            : !(k->complete && iface == k->iface)) {
+        mtp_kbd_fail(k, MTP_E_TOPOLOGY); return;
+    }
+    hm_u8 msg[2] = {0xb4, iface};
+    if (stm) k->stm_seq = k->seq; else k->enable_seq = k->seq;
+    LOG(k, "MTP: enable %s iface=%u seq=%u\n", stm ? "stm" : "keyboard", iface, k->seq);
+    queue(k, msg, sizeof(msg)); tx_poll(k);
+}
+static void go_keyboard(struct mtp_kbd *k, hm_u64 now)
+{
+    k->phase = MTP_ENABLE;
+    k->deadline = now + 5000000;
+}
+static void stm_step(struct mtp_kbd *k, hm_u64 now)
+{
+    if (k->tx_len) return;
+    if (k->stm_state == 0) {
+        if (k->stm_complete) {
+            LOG(k, "MTP: decision stm-first: stm announced as iface=%u -> enabling stm first "
+                   "(Linux order)\n", k->stm_iface);
+            k->stm_state = 1;
+            k->stm_deadline = now + MTP_STM_READY_US;
+            enable(k, k->stm_iface, 1);
+        } else if (now >= k->stm_deadline) {
+            LOG(k, "MTP: decision stm-first: stm %s within %u ms -> keyboard alone (deviation)\n",
+                k->stm_found ? "INIT incomplete" : "not announced", MTP_STM_ANNOUNCE_US / 1000);
+            go_keyboard(k, now);
+        }
+    } else if (k->stm_ack && k->stm_ready) {
+        LOG(k, "MTP: decision stm-first: stm ACK %s + READY -> enabling keyboard (Linux order)\n",
+            k->stm_ack > 0 ? "ok" : "ERROR");
+        go_keyboard(k, now);
+    } else if (now >= k->stm_deadline) {
+        LOG(k, "MTP: decision stm-first: after %u ms stm ACK=%d READY=%d -> enabling keyboard "
+               "anyway (deviation)\n", MTP_STM_READY_US / 1000, k->stm_ack, k->stm_ready);
+        go_keyboard(k, now);
+    }
 }
 void mtp_kbd_poll(struct mtp_kbd *k)
 {
@@ -151,13 +266,15 @@ void mtp_kbd_poll(struct mtp_kbd *k)
     if (k->io.poll_control(k->io.ctx) < 0) { mtp_kbd_fail(k, MTP_E_RTKit); return; }
     if ((k->phase != MTP_LIVE && start >= k->deadline) ||
         (k->used && start >= k->partial_deadline)) {
+        if (k->phase == MTP_ENABLE)
+            LOG(k, "MTP: keyboard enable timeout: ACK=%d READY=%d (stm-first=%s)\n", k->ack,
+                k->ready, k->stm_sent ? "yes" : "no");
         mtp_kbd_fail(k, MTP_E_TIMEOUT); return;
     }
     tx_poll(k);
-    if (k->phase == MTP_ENABLE && !k->enable_sent && !k->tx_len) {
-        hm_u8 msg[2] = {0xb4, k->iface};
-        k->enable_seq = k->seq; queue(k, msg, sizeof(msg)); tx_poll(k);
-    }
+    if (k->phase == MTP_STM) stm_step(k, start);
+    if (k->phase == MTP_ENABLE && !k->enable_sent && !k->tx_len)
+        enable(k, k->iface, 0);
     /* 128 words / 512 bytes and 100 us per tick, no wait for any FIFO byte.
      * The deadline bounds batches, not an individual stalled MMIO transaction. */
     for (unsigned words = 0; words < 128 && k->phase != MTP_FAILED; words++) {
@@ -168,6 +285,7 @@ void mtp_kbd_poll(struct mtp_kbd *k)
         if (!k->used) k->partial_deadline = start + 500000;
         hm_put32(k->frame + k->used, k->io.read32(k->io.ctx, MTP_RX32));
         k->used += 4;
+        k->rx_bytes += 4;
         if (k->used == 8) {
             unsigned body = le16(k->frame + 2);
             if (k->frame[0] != 8 || body < 8 || (body & 3) || body > MTP_FRAME_MAX - 12) {
@@ -178,7 +296,11 @@ void mtp_kbd_poll(struct mtp_kbd *k)
         if (k->expected && k->used == k->expected) {
             receive_frame(k); k->used = k->expected = 0;
             tx_poll(k);
-            if (k->phase == MTP_ENABLE && k->ack && k->ready) k->phase = MTP_LIVE;
+            if (k->phase == MTP_ENABLE && k->ack && k->ready) {
+                k->phase = MTP_LIVE;
+                LOG(k, "MTP: keyboard LIVE (iface=%u, stm-first=%s)\n", k->iface,
+                    k->stm_sent ? "yes" : "no");
+            }
         }
     }
 }
