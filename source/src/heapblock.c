@@ -17,6 +17,7 @@
 
 static void *heap_base;
 static void *heap_limit;
+static uintptr_t pool_base, pool_cursor, pool_end;
 
 void heapblock_init(void)
 {
@@ -55,12 +56,57 @@ void *heapblock_alloc_aligned(size_t size, size_t align)
 
     uintptr_t block = (((uintptr_t)heap_base) + align - 1) & ~(align - 1);
 
-    if (heap_limit && block + size > (uintptr_t)heap_limit)
-        panic("heapblock: out of memory (%zu bytes at 0x%lx, limit %p)\n", size, block, heap_limit);
+    if (heap_limit && block + size > (uintptr_t)heap_limit) {
+        /* n5c: the extension pool (size 0 = "infinite" peeks stay on the primary heap) */
+        uintptr_t pb = (pool_cursor + align - 1) & ~(align - 1);
+        if (size && pool_end && pb >= pool_cursor && pb <= pool_end && size <= pool_end - pb) {
+            pool_cursor = pb + size;
+            return (void *)pb;
+        }
+        panic("heapblock: out of memory (%zu bytes at 0x%lx, limit %p; pool 0x%lx..0x%lx used to 0x%lx)\n",
+              size, block, heap_limit, pool_base, pool_end, pool_cursor);
+    }
 
     heap_base = (void *)(block + size);
 
     return (void *)block;
+}
+
+int heapblock_add_pool(void *base, size_t size)
+{
+    uintptr_t b = (uintptr_t)base, e = b + size;
+    uintptr_t lo = (uintptr_t)cur_boot_args.phys_base, hi = (uintptr_t)heap_limit;
+    /* once, after a limit, 16 KiB aligned, no wrap, clear of [phys_base, limit): iBoot's kernel-area data,
+     * m1n1 and the whole primary heap */
+    if (pool_end || !heap_limit || !size || ((b | size) & 0x3fff) || e < b || (b < hi && lo < e)) {
+        printf("heapblock: pool 0x%lx+0x%zx refused\n", b, size);
+        return -1;
+    }
+    pool_base = pool_cursor = b;
+    pool_end = e;
+    printf("heapblock: pool 0x%lx..0x%lx (%zu MiB) added; primary %zu MiB left\n", b, e, size >> 20,
+           heapblock_remaining() >> 20);
+    return 0;
+}
+
+size_t heapblock_total_remaining(void)
+{
+    size_t r = heapblock_remaining();
+    if (r == SIZE_MAX)
+        return r;
+    return r + (pool_end - pool_cursor);
+}
+
+bool heapblock_pool_owned(u64 pa, u64 len)
+{
+    return pool_end && len && pa >= pool_base && pa <= pool_cursor && len <= pool_cursor - pa;
+}
+
+void heapblock_pool_info(u64 *base, u64 *size, u64 *used)
+{
+    *base = pool_base;
+    *size = pool_end - pool_base;
+    *used = pool_cursor - pool_base;
 }
 
 void *heapblock_peek(void)

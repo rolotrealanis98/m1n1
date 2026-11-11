@@ -34,6 +34,8 @@ void dc_cvac_range(void *addr, size_t length);
 
 /* src/heapblock.h */
 size_t heapblock_remaining(void);
+size_t heapblock_total_remaining(void);                  /* n5c */
+void heapblock_pool_info(u64 *base, u64 *size, u64 *used); /* n5c */
 
 /* src/smp.h */
 extern int host_cpu;

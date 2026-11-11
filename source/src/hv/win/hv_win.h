@@ -316,7 +316,8 @@ enum hv_win_pmu_stat {
 #define HV_WIN_PMU_STAT_LOG_IPA 0x100 /* + slot: IPA of the word (rewrite n is in slot n % 256) */
 #define HV_WIN_PMU_STAT_LOG_OP  0x200 /* + slot: old word << 32 | new word */
 #define HV_WIN_PMU_STAT_LOG_ELR 0x300 /* + slot: guest PC whose fetch triggered the scan */
-#define HV_WIN_PMU_STAT_HEAP    0x500 /* n5b: + 0 heap bytes left (heapblock_remaining), + 1 arm margin.
+#define HV_WIN_PMU_STAT_HEAP    0x500 /* + 0 heap bytes left (n5c: primary + pool), + 1 arm margin, + 2 primary
+                                       * left, + 3/4/5 pool base/size/used (n5c).
                                        * Arm needs, per range: 16 KiB per 32 MiB block split + (4 KiB granule)
                                        * 1 byte per 16 KiB of the range, plus the margin left over. */
 

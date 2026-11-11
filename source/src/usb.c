@@ -662,6 +662,12 @@ static int usb_host_check_ranges(const struct dart_range *r, u32 count)
                    e, m1n1_lo, m1n1_hi);
             return -1;
         }
+        u64 pb, ps, pu;
+        heapblock_pool_info(&pb, &ps, &pu);
+        if (ps && b < pb + ps && pb < e) { /* n5c: the whole pool, allocated or not */
+            printf("usb: identity range 0x%lx..0x%lx overlaps the resident pool 0x%lx+0x%lx\n", b, e, pb, ps);
+            return -1;
+        }
     }
     return 0;
 }

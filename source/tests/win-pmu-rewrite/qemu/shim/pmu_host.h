@@ -38,6 +38,8 @@ void free(void *p);
 void dc_civac_range(void *addr, size_t length);
 void dc_cvac_range(void *addr, size_t length);
 size_t heapblock_remaining(void);
+size_t heapblock_total_remaining(void);                  /* n5c */
+void heapblock_pool_info(u64 *base, u64 *size, u64 *used); /* n5c */
 
 static inline int smp_id(void)
 {

@@ -123,6 +123,15 @@ static u64 stuck_elr[MAX_CPUS];
 static u32 stuck_count[MAX_CPUS];
 
 #ifdef PMU_REWRITE_HOST_TEST
+/* n5c: host suites without a heap pool model: the primary heap is all there is */
+__attribute__((weak)) size_t heapblock_total_remaining(void)
+{
+    return heapblock_remaining();
+}
+__attribute__((weak)) void heapblock_pool_info(u64 *base, u64 *size, u64 *used)
+{
+    *base = *size = *used = 0;
+}
 /* A host suite without a stage-1 model gets no proof: the 4 KiB mode then opens blocks unscanned */
 __attribute__((weak)) bool pmu_host_s1(struct pmu_s1 *s)
 {
@@ -223,11 +232,11 @@ int hv_win_pmu_arm(u64 base, u64 size)
         return -1;
     }
     u64 frame_bytes = pmu.mode16k ? 0 : size / PMU_PAGE;
-    if (tables * PMU_PAGE + PMU_HEAP_MARGIN + frame_bytes > heapblock_remaining()) {
+    if (tables * PMU_PAGE + PMU_HEAP_MARGIN + frame_bytes > heapblock_total_remaining()) {
         printf("HV/win: PMU rewrite: %lu L3 tables (%lu KiB) + %lu KiB 4 KiB-granule state + %lu KiB margin "
                "do not fit the heap (%lu KiB left)\n",
                tables, tables * PMU_PAGE >> 10, frame_bytes >> 10, PMU_HEAP_MARGIN >> 10,
-               (u64)heapblock_remaining() >> 10);
+               (u64)heapblock_total_remaining() >> 10);
         return -1;
     }
 
@@ -277,7 +286,19 @@ u64 hv_win_pmu_stat(u64 idx)
         case HV_WIN_PMU_STAT_LOG_ELR:
             return pmu.log[slot].elr;
         case HV_WIN_PMU_STAT_HEAP: /* n5b: launcher preflight (need vs available before select) */
-            return slot == 0 ? (u64)heapblock_remaining() : slot == 1 ? PMU_HEAP_MARGIN : ~0UL;
+        {
+            u64 pb, ps, pu;
+            heapblock_pool_info(&pb, &ps, &pu);
+            switch (slot) {
+                case 0: return heapblock_total_remaining(); /* n5c: primary + pool */
+                case 1: return PMU_HEAP_MARGIN;
+                case 2: return heapblock_remaining();      /* primary only */
+                case 3: return pb;
+                case 4: return ps;
+                case 5: return pu;
+                default: return ~0UL;
+            }
+        }
         default:
             return ~0UL;
     }

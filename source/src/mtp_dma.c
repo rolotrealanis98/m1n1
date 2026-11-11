@@ -65,7 +65,7 @@
 static bool mtp_dma_resident(u64 pa, u64 len)
 {
     u64 lo = (u64)_base, hi = (u64)heapblock_peek();
-    return len && pa >= lo && pa <= hi && len <= hi - pa;
+    return (len && pa >= lo && pa <= hi && len <= hi - pa) || heapblock_pool_owned(pa, len); /* n5c */
 }
 static bool mtp_dma_os_ram(u64 pa, u64 len)
 {

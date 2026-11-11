@@ -83,3 +83,6 @@ M	pmu-4k-mutants	*	FB_OUT=$FB_OUT FB_JOBS=$FB_JOBS python3 -I source/tests/win-p
 QF	pmu-qemu	source/src/hv/win/*pmu* source/src/hv/win/hv_win.h source/src/hv/hv_vm.c source/tests/win-pmu-rewrite/*	QEMU_OUT=$FB_OUT make -s -C source/tests/win-pmu-rewrite qemu 2>&1 | grep -c "XT-RESULT .* 0 failed: PASS\|failed as it must\|trapped, as documented" | grep -qx 4
 QF	storage-admit-n5	source/src/hv/win/hv_win_storage_mem.* source/src/hv/win/*pmu* source/src/hv/win/hv_win.h source/tests/storage-pmu-admit-n5/*	make -s -C source/tests/storage-pmu-admit-n5 check OUT=$FB_OUT 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 M	storage-admit-n5-mutants	*	FB_OUT=$FB_OUT FB_JOBS=$FB_JOBS python3 -I source/tests/storage-pmu-admit-n5/mutants.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+# ---- nightly-5c: resident C-heap extension pool (heapblock)
+QF	heapblock-pool-n5c	source/src/heapblock.* source/tests/heapblock-pool-n5c/*	make -s -C source/tests/heapblock-pool-n5c check OUT=$FB_OUT 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+M	heapblock-pool-n5c-mutants	*	FB_OUT=$FB_OUT python3 -I source/tests/heapblock-pool-n5c/mutants.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0

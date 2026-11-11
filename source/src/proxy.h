@@ -100,6 +100,7 @@ typedef enum {
     P_MEMALIGN,
     P_FREE,
     P_HEAPBLOCK_SET_LIMIT,
+    P_HEAPBLOCK_ADD_POOL, // n5c
 
     P_KBOOT_BOOT = 0x700, // Kernel boot ops
     P_KBOOT_SET_CHOSEN,

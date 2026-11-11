@@ -624,6 +624,7 @@ class M1N1Proxy(Reloadable):
     P_MEMALIGN = 0x602
     P_FREE = 0x603
     P_HEAPBLOCK_SET_LIMIT = 0x604
+    P_HEAPBLOCK_ADD_POOL = 0x605        # n5c
 
     P_KBOOT_BOOT = 0x700
     P_KBOOT_SET_CHOSEN = 0x701
@@ -1105,6 +1106,8 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HEAPBLOCK_ALLOC, size)
     def heapblock_set_limit(self, limit):
         return self.request(self.P_HEAPBLOCK_SET_LIMIT, limit)
+    def heapblock_add_pool(self, base, size):
+        return self.request(self.P_HEAPBLOCK_ADD_POOL, base, size, signed=True)
     def malloc(self, size):
         return self.request(self.P_MALLOC, size)
     def memalign(self, align, size):
