@@ -316,6 +316,8 @@ def window_frames(args):
         frames.append(("HIDM", 0xF38100000, 0x8000))
     if getattr(args, "smc_power", False):
         frames.append(("SMCP", 0xF38110000, 0x4000))
+    if getattr(args, "cpu_classes", None) == "cppc":
+        frames.append(("CPPC", args.cppc_page, CPPC_PAGE_SIZE))
     return frames
 
 
@@ -409,6 +411,140 @@ def uniform_cluster_types(adt):
             c._properties["cluster-type"] = want
             changed.append((c.name, old, want))
     return changed
+
+
+# cpuperf: T6050 operating points and capacities (perf/DESIGN.md, perf/WRITES.md).
+# OPP tables: the owner's Linux DT, linux-cs wt-power 0fdf38de arch/arm64/boot/dts/apple/t6050-base.dtsi
+# (opp-table-mcluster opp1-opp16, opp16 turbo-mode; opp-table-pcluster opp1-opp21); opp-level = hardware p-state.
+T6050_OPP_MHZ = {
+    "M": {1: 300, 2: 1344, 3: 1644, 4: 1992, 5: 2304, 6: 2652, 7: 2964, 8: 3240, 9: 3504, 10: 3696, 11: 3876,
+          12: 4044, 13: 4176, 14: 4284, 15: 4308, 16: 4380},
+    "P": {1: 300, 2: 1308, 3: 1620, 4: 1980, 5: 2292, 6: 2580, 7: 2880, 8: 3180, 9: 3432, 10: 3648, 11: 3828,
+          12: 3984, 13: 4104, 14: 4188, 15: 4236, 16: 4284, 17: 4308, 18: 4332, 19: 4428, 20: 4512, 21: 4608},
+}
+# Capacity per MHz: the T6050 DT has none. The same Linux tree gives the same core compatibles
+# (apple,sawtooth = the T6050 M tier, apple,everest = the P tier) capacity-dmips-mhz 851 / 1024 on T6030
+# (t6030.dtsi). That is the closest Linux-derived figure; it is NOT a T6050 measurement (t604x.dtsi:33-37
+# shows how to measure it: pinned single-core throughput at the lowest p-state).
+T6050_CAPACITY = {"M": 851, "P": 1024}
+T6050_PMIN = 1                       # soc_t6050_info.min_pstate
+T6050_PMAX = {"M": 15, "P": 17}      # default clamp: M p16 is turbo-mode (refused); P stops at its nominal 4308 MHz
+T6050_PERF_DIV = 4608                # P p21 (fastest OPP) at capacity 1024 = 1024
+
+
+def t6050_perf(ctype, pstate):
+    """CPPC perf of one operating point: round(MHz * capacity / 4608)."""
+    return (T6050_OPP_MHZ[ctype][pstate] * T6050_CAPACITY[ctype] + T6050_PERF_DIV // 2) // T6050_PERF_DIV
+
+
+def t6050_cpc(ctype, pmax=None, pmin=T6050_PMIN):
+    """_CPC tuple (highest, nominal, lowest-nonlinear, lowest, lowest MHz, nominal MHz) for the clamp
+    [pmin, pmax]: highest = nominal = pmax (no boost is ever granted), lowest-nonlinear = the next state
+    above pmin (p2: p1 300 MHz is the idle floor), lowest = pmin."""
+    pmax = T6050_PMAX[ctype] if pmax is None else pmax
+    lnl = min(pmin + 1, pmax)
+    top = t6050_perf(ctype, pmax)
+    return (top, top, t6050_perf(ctype, lnl), t6050_perf(ctype, pmin), T6050_OPP_MHZ[ctype][pmin],
+            T6050_OPP_MHZ[ctype][pmax])
+
+
+# Tuple: (highest, nominal, lowest-nonlinear, lowest, lowest MHz, nominal MHz).
+# Derived: M 796/796/248/55 MHz 300-4308, P 957/957/291/67 MHz 300-4308.
+CPPC_PERF_T6050 = {t: t6050_cpc(t) for t in ("M", "P")}
+
+# cpuperf-B: vCPU MPIDR cluster (Aff2:Aff1) -> (cluster DVFS block, expected cluster-type).
+# linux-cs wt-power t6050-dieX.dtsi:17-36 (cpufreq_mc0/mc1/pc) and t6050-max.dtsi:30-47 (CPU -> domain).
+T6050_DVFS = {0x040000: (0x210e20000, "M"), 0x040100: (0x211e20000, "M"), 0x010200: (0x212e20000, "P")}
+DVFS_CFG_MAGIC = 0x53465644
+DVFS_CFG_SIZE = 632
+
+
+def dvfs_plan(adt, vcpus, pmax=None, interval_ns=1000000):
+    """cpuperf-B: the P_HV_WIN_CPPC_DVFS config (hv_win_dvfs_core.h struct dvfs_cfg) and a summary.
+    Raises PlanError for a vCPU outside the three T6050 clusters or with the wrong cluster-type."""
+    pmax = dict(T6050_PMAX, **(pmax or {}))
+    nodes = {c.name: c for c in adt["/cpus"]}
+    order, cluster_of = [], []
+    for _, name, mpidr, _ in vcpus:
+        key = mpidr & 0xffff00
+        if key not in T6050_DVFS:
+            raise PlanError(f"{name}: MPIDR {mpidr:#x} is in no T6050 DVFS cluster")
+        base, want = T6050_DVFS[key]
+        node = nodes.get(name)
+        got = node._properties.get("cluster-type") if node is not None else None
+        if got != want:
+            raise PlanError(f"{name}: cluster-type {got!r}, the {base:#x} cluster is {want!r}")
+        if base not in order:
+            order.append(base)
+        cluster_of.append(order.index(base))
+    if len(vcpus) > 32 or interval_ns < 1000000:
+        raise PlanError("cpuperf-B: at most 32 vCPUs and a rate limit of at least 1 ms")
+    out = struct.pack("<IIIIQ", DVFS_CFG_MAGIC, 1, len(order), len(vcpus), interval_ns)
+    out += bytes(cluster_of) + bytes(32 - len(cluster_of))
+    lines = []
+    for i in range(4):
+        if i >= len(order):
+            out += bytes(144)
+            continue
+        base = order[i]
+        t = next(v[1] for v in T6050_DVFS.values() if v[0] == base)
+        hi = pmax[t]
+        if not (T6050_PMIN <= hi <= max(T6050_OPP_MHZ[t])):
+            raise PlanError(f"--dvfs-max {t}={hi}: outside p{T6050_PMIN}..p{max(T6050_OPP_MHZ[t])}")
+        perf = [t6050_perf(t, p) if p in T6050_OPP_MHZ[t] else 0 for p in range(32)]
+        out += struct.pack("<QII32I", base, T6050_PMIN, hi, *perf)
+        lines.append((i, base, t, T6050_PMIN, hi))
+    assert len(out) == DVFS_CFG_SIZE
+    return out, lines
+
+
+CPPC_PAGE_DEFAULT = 0xF_3C00_0000   # 16 KiB, clear of GICD/GICR/PL011/S1 ECAM+BAR and the ANSM REG/OP frames
+CPPC_PAGE_SIZE = 0x4000
+CPPC_SLOT = 0x40
+CPPC_FLAG_PSD = 1
+CPPC_FLAG_AUTONOMOUS = 2   # _CPC Autonomous Selection Enable = 1 (platform-managed); Desired still published
+
+
+def parse_cppc_perf(text):
+    """--cppc-perf TYPE=h,n,lnl,l,lowMHz,nomMHz -> (type, tuple). Raises ValueError."""
+    t, _, vals = text.partition("=")
+    v = tuple(int(x, 0) for x in vals.split(","))
+    if t not in ("E", "M", "P") or len(v) != 6:
+        raise ValueError(f"--cppc-perf {text!r}: want TYPE=highest,nominal,lowest-nonlinear,lowest,lowMHz,nomMHz")
+    check_cppc_perf(t, v)
+    return t, v
+
+
+def check_cppc_perf(t, v):
+    h, n, lnl, lo, lmhz, nmhz = v
+    if not (0 < lo <= lnl <= n <= h <= 0xFFFF) or not (0 < lmhz <= nmhz <= 0xFFFF):
+        raise ValueError(f"cpu type {t}: CPPC values {v} break lowest <= lowest-nonlinear <= nominal <= highest "
+                         f"<= 0xffff or 0 < lowMHz <= nomMHz <= 0xffff (Mu J716sParseCppc refuses them)")
+
+
+def cppc_plan(adt, vcpus, page, psd=True, table=None, autonomous=False):
+    """cpuperf-A: the /chosen/m5w,cppc bytes for Mu (J716sAcpiGenLib.h layout) and one line per vCPU.
+    vcpus = [(cpu_id, node name, mpidr, is_boot)] in m5w,cpus order. Domain = the first vCPU of the same
+    MPIDR cluster (Aff3..Aff1). Raises PlanError when a CPU has no usable cluster-type."""
+    table = dict(CPPC_PERF_T6050 if table is None else table)
+    if page % CPPC_PAGE_SIZE or len(vcpus) * CPPC_SLOT > CPPC_PAGE_SIZE:
+        raise PlanError(f"CPPC page {page:#x} not 16 KiB aligned or too small for {len(vcpus)} vCPUs")
+    nodes = {c.name: c for c in adt["/cpus"]}
+    first = {}
+    flags = (CPPC_FLAG_PSD if psd else 0) | (CPPC_FLAG_AUTONOMOUS if autonomous else 0)
+    out = struct.pack("<QIII", page, CPPC_SLOT, len(vcpus), flags)
+    lines = []
+    for i, (_, name, mpidr, _) in enumerate(vcpus):
+        node = nodes.get(name)
+        ctype = node._properties.get("cluster-type") if node is not None else None
+        if ctype not in table:
+            raise PlanError(f"{name}: cluster-type {ctype!r} has no CPPC values (have {sorted(table)})")
+        v = table[ctype]
+        check_cppc_perf(ctype, v)
+        dom = first.setdefault(mpidr & ~0xff, i)
+        out += struct.pack("<7I", *v, dom)
+        lines.append((i, name, ctype, v, dom))
+    return out, lines
 
 
 def parse_carveouts(adt):
@@ -665,10 +801,29 @@ def parse_args():
     parser.add_argument("--smc-power-actions", action="store_true",
                         help="smcp: guest SYSTEM_OFF/RESET power the machine off / restart it through the SMC "
                              "(Linux macsmc-reboot writes: MBSE, NTAP, PMU 0xf801/0xf80f); implies --smc-power")
-    parser.add_argument("--cpu-classes", choices=("uniform", "adt"), default="uniform",
+    parser.add_argument("--cpu-classes", choices=("uniform", "adt", "cppc"), default="uniform",
                         help="sched1: efficiency classes Mu publishes. uniform (default): the guest ADT gets the boot "
                              "CPU's cluster-type on every CPU, so the MADT has one class and Windows does not park the "
-                             "P cores; adt: the ADT's M/P types (classes 0/1, the smpN behaviour)")
+                             "P cores; adt: the ADT's M/P types (classes 0/1, the smpN behaviour); cppc (cpuperf-A): "
+                             "the ADT's classes plus /chosen/m5w,cppc so Mu publishes a per-CPU _CPC (and _PSD) backed "
+                             "by an EL2 CPPC page (needs a cpuperf-A FD and resident; no frequency changes)")
+    parser.add_argument("--cppc-page", type=hexint, default=CPPC_PAGE_DEFAULT,
+                        help="cpuperf-A: synthetic-window base of the 16 KiB EL2 CPPC page (--cpu-classes cppc)")
+    parser.add_argument("--no-cppc-psd", action="store_true",
+                        help="cpuperf-A: publish _CPC without _PSD (default: _PSD per cluster, HW_ALL)")
+    parser.add_argument("--cppc-autonomous", action="store_true",
+                        help="cpuperf-A: _CPC Autonomous Selection Enable = 1 (variant; default 0 = OS-directed)")
+    parser.add_argument("--cpu-dvfs", choices=("off", "el2"), default="off",
+                        help="cpuperf-B: el2 = EL2 maps Windows' CPPC Desired Performance to the T6050 cluster "
+                             "p-states (CMD +0x20 writes, the Linux driver's sequence, perf/WRITES.md); needs "
+                             "--cpu-classes cppc. Default off: no DVFS register is touched")
+    parser.add_argument("--dvfs-max", dest="dvfs_max_raw", action="append", default=[], metavar="TYPE=PSTATE",
+                        help="cpuperf-B: highest p-state EL2 may request for M or P (default M=15, P=17); also sets "
+                             "the _CPC highest/nominal")
+    parser.add_argument("--dvfs-interval-us", type=int, default=1000,
+                        help="cpuperf-B: minimum time between two writes to one cluster (>= 1000 us)")
+    parser.add_argument("--cppc-perf", action="append", default=[], metavar="TYPE=h,n,lnl,l,lowMHz,nomMHz",
+                        help="cpuperf-A: override the T6050 _CPC values for one ADT cluster-type (repeatable)")
     parser.add_argument("--synthetic-window", type=hexint, default=SYNTH_WINDOW_BASE)
     parser.add_argument("--synthetic-size", type=hexint, default=SYNTH_WINDOW_SIZE)
     parser.add_argument("--gicd", type=hexint, default=GICD_DEFAULT)
@@ -833,6 +988,40 @@ def parse_args():
         if any(g == args.pl011_gsiv for _, g in args.irq_pairs):
             parser.error(f"--pl011-gsiv {args.pl011_gsiv} is also in the IRQ map (Mu refuses the clash)")
 
+    args.cppc_table = dict(CPPC_PERF_T6050)
+    args.dvfs_max = {}
+    for text in args.dvfs_max_raw:
+        t, _, v = text.partition("=")
+        try:
+            n = int(v, 0)
+        except ValueError:
+            parser.error(f"--dvfs-max {text!r}: want TYPE=PSTATE")
+        if t not in T6050_PMAX or n not in T6050_OPP_MHZ[t] or n < T6050_PMIN:
+            parser.error(f"--dvfs-max {text!r}: TYPE is M or P and PSTATE an operating point of that cluster")
+        args.dvfs_max[t] = n
+        args.cppc_table[t] = t6050_cpc(t, n)
+    if args.cpu_dvfs != "off" or args.dvfs_max:
+        if args.cpu_classes != "cppc":
+            parser.error("--cpu-dvfs / --dvfs-max need --cpu-classes cppc")
+    if args.dvfs_interval_us < 1000:
+        parser.error("--dvfs-interval-us must be >= 1000")
+    for text in args.cppc_perf:
+        if args.cpu_classes != "cppc":
+            parser.error("--cppc-perf needs --cpu-classes cppc")
+        try:
+            t, v = parse_cppc_perf(text)
+        except ValueError as e:
+            parser.error(str(e))
+        args.cppc_table[t] = v
+    if (args.no_cppc_psd or args.cppc_autonomous) and args.cpu_classes != "cppc":
+        parser.error("--no-cppc-psd / --cppc-autonomous need --cpu-classes cppc")
+    if args.cpu_classes == "cppc":
+        if args.route != "gic":
+            parser.error("--cpu-classes cppc needs --route gic (Mu publishes _CPC on the GIC route only)")
+        if args.raw_guest:
+            parser.error("--cpu-classes cppc needs a Mu guest")
+        if args.cppc_page % CPPC_PAGE_SIZE:
+            parser.error("--cppc-page must be 16 KiB aligned")
     try:
         check_frames((args.synthetic_window, args.synthetic_window + args.synthetic_size), window_frames(args))
     except PlanError as e:
@@ -1162,6 +1351,33 @@ def main():
         hv.add_tracer(irange(args.pl011, PL011_FRAME), "WIN-PL011", TraceMode.RESERVED)
         record(f"PL011 emulated at {args.pl011:#x}, GSIV {args.pl011_gsiv or 0}")
 
+    if args.cpu_classes == "cppc":
+        if not hasattr(p, "hv_win_cppc_configure"):
+            raise SystemExit("--cpu-classes cppc: this proxyclient has no P_HV_WIN_CPPC_CONFIGURE")
+        rc = p.hv_win_cppc_configure(args.cppc_page, len(vcpus))
+        if rc != 0:
+            raise SystemExit(f"P_HV_WIN_CPPC_CONFIGURE({args.cppc_page:#x}, {len(vcpus)}) refused ({rc}): "
+                             "resident without cpuperf-A, or a bad page")
+        hv.add_tracer(irange(args.cppc_page, CPPC_PAGE_SIZE), "WIN-CPPC", TraceMode.RESERVED)
+        record(f"cpuperf: EL2 CPPC page at {args.cppc_page:#x} for {len(vcpus)} vCPUs (desired stored only, "
+               "counters = CNTPCT, no DVFS access)")
+        if args.cpu_dvfs == "el2":
+            if not hasattr(p, "hv_win_cppc_dvfs"):
+                raise SystemExit("--cpu-dvfs el2: this proxyclient has no P_HV_WIN_CPPC_DVFS")
+            try:
+                cfg, dlines = dvfs_plan(hv.adt, vcpus, args.dvfs_max, args.dvfs_interval_us * 1000)
+            except PlanError as e:
+                raise SystemExit(f"--cpu-dvfs el2: {e}")
+            buf = p.malloc(len(cfg))
+            iface.writemem(buf, cfg)
+            rc = p.hv_win_cppc_dvfs(buf, len(cfg))  # EL2 copies it, probes CMD/STATUS read-only, then enables
+            p.free(buf)
+            if rc != 0:
+                raise SystemExit(f"P_HV_WIN_CPPC_DVFS refused ({rc}): see the EL2 console (probe or config)")
+            record("cpuperf-B: EL2 DVFS ON: " + "; ".join(f"cluster {i} {b:#x} {t} p{lo}..p{hi}"
+                                                         for i, b, t, lo, hi in dlines)
+                   + f"; rate limit {args.dvfs_interval_us} us")
+
     # m5w,irq-map: one P_HV_WIN_MAP_IRQ per pair, after CONFIGURE and before start (CONTRACT s9)
     for line, gsiv in args.irq_pairs:
         rc = p.hv_win_map_irq(line, gsiv)
@@ -1382,6 +1598,22 @@ def main():
             changed = uniform_cluster_types(hv.adt)
             record(f"cpu classes: uniform (guest ADT cluster-type rewritten on {len(changed)} CPU node(s): "
                    f"{', '.join(f'{n} {o}->{w}' for n, o, w in changed) or 'none'}); Mu publishes one efficiency class")
+        elif args.cpu_classes == "cppc":
+            try:
+                cppc_prop, cppc_lines = cppc_plan(hv.adt, vcpus, args.cppc_page, not args.no_cppc_psd, args.cppc_table,
+                                                 args.cppc_autonomous)
+            except PlanError as e:
+                raise SystemExit(f"--cpu-classes cppc: {e}")
+            put("m5w,cppc", cppc_prop)
+            types = {}
+            for i, name, ctype, v, dom in cppc_lines:
+                types.setdefault((ctype, v), []).append(i)
+            record("cpu classes: cppc (guest ADT cluster-type unchanged; Mu publishes M = 0, P = 1) + m5w,cppc "
+                   f"{len(cppc_prop)} bytes, page {args.cppc_page:#x}, _PSD {'no' if args.no_cppc_psd else 'yes'}, "
+                   f"autonomous {'yes' if args.cppc_autonomous else 'no'}: "
+                   + "; ".join(f"{t} CPUs {c[0]}-{c[-1]} h/n/lnl/l {v[0]}/{v[1]}/{v[2]}/{v[3]} MHz {v[4]}-{v[5]}"
+                               for (t, v), c in types.items())
+                   + "; domains " + ",".join(sorted({str(d) for *_, d in cppc_lines}, key=int)))
         else:
             record("cpu classes: adt (guest ADT cluster-type unchanged; Mu publishes M = 0, P = 1)")
 

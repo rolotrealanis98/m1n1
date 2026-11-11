@@ -62,3 +62,7 @@ F	harness-card	source/src/hv/win/*fb* harness/*	mkdir -p $FB_OUT/t && cp -R harn
 QF	u1	source/src/hv/win/* source/src/proxy.* source/proxyclient/m1n1/proxy.py tests/u1/*	python3 -I tests/u1/test_u1.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 # ---- smcp (platform/power-audio-20261111)
 QF	smcp	source/src/smcp/* source/src/hv_win_smcp.* source/tests/smcp/*	source/tests/smcp/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+QF	win-cppc	source/src/hv/win/*cppc* source/tests/win-cppc/*	make -s -C source/tests/win-cppc clean >/dev/null 2>&1; make -s -C source/tests/win-cppc check 2>&1 | tail -3; test ${PIPESTATUS[0]} = 0
+QF	launcher-cppc	source/proxyclient/* source/tests/win-launcher-smp2/*	python3 -I source/tests/win-launcher-smp2/test_cppc.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+QF	win-dvfs	source/src/hv/win/*dvfs* source/tests/win-dvfs/* source/proxyclient/* source/tests/win-launcher-smp2/*	make -s -C source/tests/win-dvfs clean >/dev/null 2>&1; (make -s -C source/tests/win-dvfs check && make -s -C source/tests/win-dvfs cross) 2>&1 | tail -3; test ${PIPESTATUS[0]} = 0
+QF	launcher-dvfs	source/proxyclient/* source/tests/win-launcher-smp2/*	python3 -I source/tests/win-launcher-smp2/test_dvfs_plan.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0

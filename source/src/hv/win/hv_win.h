@@ -246,6 +246,13 @@ static inline void hv_win_fiq_entry(void)
  *                             raises RX without a guest access
  */
 int hv_win_pl011_configure(u64 base, u64 gsiv);
+
+/* cpuperf-A (hv_win_cppc.c): EL2-emulated CPPC page behind the firmware _CPC; no DVFS access */
+int hv_win_cppc_configure(u64 base, u64 ncpus);
+int hv_win_cppc_dump(void);
+/* cpuperf-B: Desired -> T6050 cluster p-state (off unless enabled; perf/WRITES.md lists every write) */
+int hv_win_cppc_dvfs(u64 cfg_addr, u64 len);
+void hv_win_cppc_tick(void);
 void hv_win_pl011_poll(void);
 bool hv_win_pl011_irq_level(void);
 void hv_win_pl011_raise(u32 gsiv);

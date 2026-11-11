@@ -715,6 +715,8 @@ void hv_tick(struct exc_info *ctx)
     hv_vgic3_tick();
     /* r4.11 diagnostics: periodic guest/trap/vGIC/NVMe status on the console */
     hv_status_tick(ctx);
+    /* cpuperf-B: Desired -> cluster p-state; no-op unless P_HV_WIN_CPPC_DVFS enabled it */
+    hv_win_cppc_tick();
 }
 
 bool hv_is_nested(void)

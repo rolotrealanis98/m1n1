@@ -24,3 +24,5 @@ source/tests/*/test_*
 !source/tests/*/test_*.py
 *.dSYM/
 /source/tests/kbd-hidm/out/
+source/tests/win-dvfs/cross_cfg
+source/tests/win-dvfs/cfg.bin
