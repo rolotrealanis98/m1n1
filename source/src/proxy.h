@@ -173,6 +173,10 @@ typedef enum {
     P_HV_WIN_HIDM_CONFIGURE = 0xc28,
     /* u1: was 0xc25 on the smp line, which clashed with the storage line's CANARY */
     P_HV_WIN_SMP_DUMP = 0xc29, /* smp2f: print the SMP/WFI/timer/vGIC dump (boot CPU; -1 elsewhere) */
+    /* smcp (platform/power-audio-20261111): far from the other lines' numbers */
+    P_HV_WIN_SMCP_CONFIGURE = 0xc40, /* (version, flags) pre-guest */
+    P_HV_WIN_SMCP_STAT = 0xc41,
+    P_HV_WIN_SMCP_POWER = 0xc42, /* (1 off | 2 restart), guest stopped */
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

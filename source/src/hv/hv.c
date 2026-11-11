@@ -18,6 +18,7 @@
 #include "win/hv_win.h"
 #include "win/hv_win_storage.h"
 #include "hv_win_hidm.h"
+#include "hv_win_smcp.h"
 
 #define HV_TICK_RATE      1000
 #define HV_SLOW_TICK_RATE 1
@@ -342,9 +343,12 @@ void hv_start(void *entry, u64 regs[4])
     }
 
     hv_win_hidm_retire();
+    hv_win_smcp_retire();
     hv_win_storage_retire();
     printf("HV: All CPUs exited\n");
     spin_unlock(&bhl);
+    /* smcp: a guest SYSTEM_OFF/RESET becomes a real power-off/restart, only with the flag */
+    hv_win_smcp_after_exit();
 }
 
 static void hv_init_secondary(struct hv_secondary_info_t *info)
@@ -706,6 +710,7 @@ void hv_tick(struct exc_info *ctx)
     /* r3: native read-only storage keeps the ANS mailbox drained; no-op otherwise */
     hv_win_storage_tick();
     hv_win_hidm_tick();
+    hv_win_smcp_tick();
     /* r4.12: re-present a declined, still-high NVMe INTx line (vGIC hold-off) */
     hv_vgic3_tick();
     /* r4.11 diagnostics: periodic guest/trap/vGIC/NVMe status on the console */

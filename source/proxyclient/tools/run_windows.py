@@ -314,6 +314,8 @@ def window_frames(args):
         frames.append(("PL011", args.pl011, PL011_FRAME))
     if getattr(args, "builtin_keyboard", False):
         frames.append(("HIDM", 0xF38100000, 0x8000))
+    if getattr(args, "smc_power", False):
+        frames.append(("SMCP", 0xF38110000, 0x4000))
     return frames
 
 
@@ -658,6 +660,11 @@ def parse_args():
                              "control; default: trapping ON when >1 vCPU). 1-vCPU never traps WFI regardless.")
     parser.add_argument("--builtin-keyboard", action="store_true",
                         help="enable resident MTP keyboard / HIDM (requires HIDM firmware)")
+    parser.add_argument("--smc-power", action="store_true",
+                        help="smcp: battery/AC/lid/power button/thermal from the SMC (reads only; needs SMCP firmware)")
+    parser.add_argument("--smc-power-actions", action="store_true",
+                        help="smcp: guest SYSTEM_OFF/RESET power the machine off / restart it through the SMC "
+                             "(Linux macsmc-reboot writes: MBSE, NTAP, PMU 0xf801/0xf80f); implies --smc-power")
     parser.add_argument("--cpu-classes", choices=("uniform", "adt"), default="uniform",
                         help="sched1: efficiency classes Mu publishes. uniform (default): the guest ADT gets the boot "
                              "CPU's cluster-type on every CPU, so the MADT has one class and Windows does not park the "
@@ -808,6 +815,13 @@ def parse_args():
             parser.error("--builtin-keyboard needs a firmware guest and --route gic")
         if args.pl011_gsiv == 68 or args.usb_gsiv == 68 or any(g == 68 for _, g in args.irq_pairs):
             parser.error("GSIV 68 is reserved for HIDM")
+    if args.smc_power_actions:
+        args.smc_power = True
+    if args.smc_power:
+        if args.route != "gic" or args.raw_guest:
+            parser.error("--smc-power needs a firmware guest and --route gic")
+        if args.pl011_gsiv == 72 or args.usb_gsiv == 72 or any(g == 72 for _, g in args.irq_pairs):
+            parser.error("GSIV 72 is reserved for SMCP")
 
     if args.pl011_gsiv is not None:
         if args.route != "gic":
@@ -1251,6 +1265,24 @@ def main():
         else:
             hv.add_tracer(irange(0xF38100000, 0x8000), "WIN-HIDM", TraceMode.RESERVED)
             record("HIDM configured; backend failure is reported as zero interfaces")
+    if args.smc_power:
+        smcp_flags = 1 if args.smc_power_actions else 0
+        old_timeout = iface.dev.timeout
+        iface.dev.timeout = 10   # SMC bring-up + first refresh, bounded ~3.5 s in the resident
+        try:
+            rc = p.hv_win_smcp_configure(smcp_flags)
+        finally:
+            iface.dev.timeout = old_timeout
+        if rc != 0:
+            # -2/-3: the hook is in place but the page reads zero/FAILED, so every SMCP device hides itself
+            print(f"WARNING: SMCP configure returned {rc}; Windows sees no battery/lid/power button",
+                  file=sys.stderr)
+            record(f"SMCP configure returned {rc}")
+            if rc == -1:
+                args.smc_power = False
+        if args.smc_power:
+            hv.add_tracer(irange(0xF38110000, 0x4000), "WIN-SMCP", TraceMode.RESERVED)
+            record(f"SMCP configured (flags {smcp_flags:#x}, rc {rc})")
 
     text = format_plan(plan)
     for name, base, size in window_frames(args):
@@ -1312,6 +1344,9 @@ def main():
         hv.adt["chosen"]._properties[name] = value
 
     hv.adt["chosen"]._properties.pop("m5w,hidm", None)
+    hv.adt["chosen"]._properties.pop("m5w,smcp", None)
+    if args.smc_power:
+        put("m5w,smcp", struct.pack("<QQII", 0xF38110000, 0x1000, 72, 1 if args.smc_power_actions else 0))
     if args.builtin_keyboard:
         put("m5w,hidm", struct.pack("<QQQQI", 0xF38100000, 0x1000, 0xF38104000, 0x1000, 68))
     put("m5w,memory", memory_prop)
