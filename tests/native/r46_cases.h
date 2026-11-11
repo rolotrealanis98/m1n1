@@ -5,7 +5,7 @@ extern u64 r46_clock_step;
 extern unsigned r46_flip_read;
 extern int s1n_test_cpu;
 extern bool s1n_test_exception;
-extern u32 s1n_test_smp_timeout_us; /* nightly-7 */
+u32 s1n_test_smp_timeout_us __attribute__((weak)); /* nightly-7: native_link.c defines it; weak so trace-1cpu can build the old tree */
 static int nested_result;
 static void r46_nested_hook(void) { nested_result = ans_ro_test_submit(false, 2); }
 static void *r46_thread(void *unused) { (void)unused; r46_nested_hook(); return NULL; }
