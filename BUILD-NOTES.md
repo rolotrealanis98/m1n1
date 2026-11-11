@@ -1,6 +1,5 @@
-# nightly-20261111
+# nightly-2
 
-= r4.15-pmu-data-guard (u1 + PMU data guard) + smcp-power + cpu-perf + m5wn-r1 + tp-ptp (incl. tp2) + dcpw-live-1 (live DCP
-compiled out). Every feature is behind its launcher flag, default off. Storage/confinement files are byte-identical to r4.14
-(tests/u1). ansm2-r4.14 is not merged, because it changes storage files.
-Notes, review guide, morning checklist and runners: /Users/rolo/Work/agents/win-el2/storage/s1-resident-nightly-20261111/
+= nightly-20261111 + its review fixes F1-F4 + cpu-perf 996da27 + dcpw-live-1 280f964 (live compiled out).
+Storage/confinement files are byte-identical to r4.14 (tests/u1). Notes, review guide, checklist and runners:
+/Users/rolo/Work/agents/win-el2/storage/s1-resident-nightly2-20261111/
