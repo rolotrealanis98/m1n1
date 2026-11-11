@@ -25,6 +25,16 @@ x=parse(['--builtin-keyboard']);frames=m.window_frames(x)
 try:m.check_frames((m.SYNTH_WINDOW_BASE,m.SYNTH_WINDOW_BASE+m.SYNTH_WINDOW_SIZE),frames,[(0xF38104000,0xF38108000)])
 except m.PlanError:check(True)
 else:check(False)
+# --builtin-trackpad (2026-11-11): HIDF v1 file required, implies --builtin-keyboard
+import os, struct, tempfile
+d=tempfile.mkdtemp(dir=os.environ.get('FB_OUT') or None)
+good=os.path.join(d,'tp.bin');open(good,'wb').write(b'HIDF'+struct.pack('<IIII',1,20,4,0)+b'\0'*4)
+bad=os.path.join(d,'bad.bin');open(bad,'wb').write(b'XXXX'+b'\0'*40)
+x=parse(['--builtin-trackpad',good]);check(x is not None and x.builtin_keyboard and x.tp_fw[:4]==b'HIDF')
+check(parse(['--builtin-trackpad',bad]) is None)
+check(parse(['--builtin-trackpad',os.path.join(d,'missing.bin')]) is None)
+check(parse(['--builtin-trackpad',good,'--route','aic']) is None)
+x=parse(['--builtin-keyboard']);check(x is not None and x.tp_fw is None)
 # Full updated Python files compile without importing the hardware libraries.
 for p in [p,pathlib.Path('../../proxyclient/m1n1/proxy.py')]:compile(p.read_text(),str(p),'exec');check(True)
 print(f'launcher: {checks} checks PASS')

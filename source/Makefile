@@ -197,6 +197,10 @@ OBJECTS := \
 	mtp_kbd_resident.o \
 	hv_win_hidm.o \
 	hidm/service/hidm_service.o \
+	hidm/tp/apple_mt.o \
+	hidm/tp/ptp.o \
+	hidm/tp/mtp_tp.o \
+	mtp_tp_resident.o \
 	sart.o \
 	sep.o \
 	sio.o \

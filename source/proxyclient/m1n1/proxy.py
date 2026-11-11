@@ -1223,8 +1223,9 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_FB_PREPARE, native_base, flags, tuning, signed=True)
     def hv_win_fb_stat(self, idx):
         return self.request(self.P_HV_WIN_FB_STAT, idx)
-    def hv_win_hidm_configure(self):
-        return self.request(self.P_HV_WIN_HIDM_CONFIGURE, 1, signed=True)
+    def hv_win_hidm_configure(self, tp_fw=0, tp_fw_len=0):
+        # tp_fw: address of the HIDF trackpad firmware already copied into m1n1 memory (0 = none)
+        return self.request(self.P_HV_WIN_HIDM_CONFIGURE, 1, tp_fw, tp_fw_len, signed=True)
 
     def hv_win_storage_prepare(self, registration):
         # Exact96-byte header plus copied {base,size} range arrays; one launch only.

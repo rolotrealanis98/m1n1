@@ -636,7 +636,7 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             reply->retval = hv_win_storage_native_quiesce();
             break;
         case P_HV_WIN_HIDM_CONFIGURE:
-            reply->retval = hv_win_hidm_configure(request->args[0]);
+            reply->retval = hv_win_hidm_configure(request->args[0], request->args[1], request->args[2]);
             break;
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");

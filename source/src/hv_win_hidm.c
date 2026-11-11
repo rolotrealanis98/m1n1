@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "hv_win_hidm.h"
 #include "mtp_kbd.h"
+#include "mtp_tp_resident.h"
 #ifdef HIDM_HOST_TEST
 #include "hidm_host.h"
 #else
@@ -46,7 +47,7 @@ static bool access_page(struct exc_info *ctx, u64 address, u64 *value, bool writ
     return true; /* all padding/invalid-width accesses are RAZ/WI */
 }
 extern bool hv_started_cpus[];
-s64 hv_win_hidm_configure(u64 version)
+s64 hv_win_hidm_configure(u64 version, u64 tp_fw, u64 tp_fw_len)
 {
     if (attempted || version != HM_VERSION) return -1;
     for (unsigned i = 0; i < MAX_CPUS; i++) if (hv_started_cpus[i]) return -1;
@@ -57,9 +58,20 @@ s64 hv_win_hidm_configure(u64 version)
     hm_zero(&service, sizeof(service)); /* valid zero-interface failure service */
     if (hv_map_hook(HM_REG_BASE, access_page, 0x4000) < 0 ||
         hv_map_hook(HM_DATA_BASE, access_page, 0x4000) < 0) return -1;
-    if (!mtp_kbd_resident_start(&keyboard, &service) &&
-        hm_service_init(&service, &keyboard.keyboard, 1, mtp_kbd_report, &keyboard) != HM_OK)
-        mtp_kbd_fail(&keyboard, MTP_E_DESCRIPTOR);
+    mtp_tp_resident_arm(tp_fw, tp_fw_len); /* 0 = keyboard only, as before */
+    if (!mtp_kbd_resident_start(&keyboard, &service)) {
+        hm_backend_interface ifs[2];
+        hm_u32 n = 0;
+        const hm_backend_interface *ptp = mtp_tp_resident_finish(&keyboard);
+        ifs[n++] = keyboard.keyboard;
+        if (ptp) ifs[n++] = *ptp;
+        if (hm_service_init(&service, ifs, n, mtp_kbd_report_all, &keyboard) != HM_OK) {
+            /* never lose the keyboard over the trackpad */
+            if (n == 1 || hm_service_init(&service, ifs, 1, mtp_kbd_report_all, &keyboard) != HM_OK)
+                mtp_kbd_fail(&keyboard, MTP_E_DESCRIPTOR);
+            keyboard.tp = NULL;
+        }
+    }
     keyboard.io.input_changed = backend_changed;
     exposed = true; /* backend failure still supplies HELLO / COUNT=0 */
     update_irq();

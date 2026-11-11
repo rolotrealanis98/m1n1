@@ -3,7 +3,9 @@
 #define HIDM_SERVICE_H
 #include "../abi/hidm_abi.h"
 typedef struct hm_backend_interface { hm_info info; const hm_u8 *descriptor; } hm_backend_interface;
-/* Nonblocking callback. GET writes at most *length bytes; SET/OUTPUT consumes
+/* Nonblocking callback. GET writes at most *length bytes (v1.1: for GET_FEATURE
+ * *length is offset+chunk <= HM_MAX_FEATURE; write min(capacity, report size) bytes
+ * from the start of the report and return that count; never more than *length); SET/OUTPUT consumes
  * a local copy. Return HM_DENIED for unsupported reports. Never retain data. */
 typedef hm_u32 (*hm_backend_report)(void *,hm_u32,hm_u32,hm_u32,hm_u8 *,hm_u32 *);
 /* Ring-full resynchronization (integration fix 2026-11-10): HID input reports
@@ -19,6 +21,7 @@ typedef struct hm_service {
     hm_u32 ids; /* bit i: interface i declares report IDs */
     hm_u32 pending;
     hm_slot pend[HM_COALESCE];
+    hm_u8 big[HM_MAX_FEATURE]; /* v1.1 GET_FEATURE scratch, private, never mapped */
     hm_backend_report report;
     void *backend;
 } hm_service;

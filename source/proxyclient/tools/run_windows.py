@@ -630,6 +630,9 @@ def parse_args():
                              "control; default: trapping ON when >1 vCPU). 1-vCPU never traps WFI regardless.")
     parser.add_argument("--builtin-keyboard", action="store_true",
                         help="enable resident MTP keyboard / HIDM (requires HIDM firmware)")
+    parser.add_argument("--builtin-trackpad", metavar="TPMTFW", default=None,
+                        help="also bring up the built-in trackpad as a Precision Touchpad: path of "
+                             "apple/tpmtfw-j716s.bin (HIDF), implies --builtin-keyboard")
     parser.add_argument("--synthetic-window", type=hexint, default=SYNTH_WINDOW_BASE)
     parser.add_argument("--synthetic-size", type=hexint, default=SYNTH_WINDOW_SIZE)
     parser.add_argument("--gicd", type=hexint, default=GICD_DEFAULT)
@@ -757,6 +760,17 @@ def parse_args():
     if args.usb_host is None and args.mu_profile in USB_PROFILES:
         print(f"note: profile {args.mu_profile} without --usb-host: no /chosen/m5w,xhci, Mu runs without USB",
               file=sys.stderr)
+    args.tp_fw = None
+    if args.builtin_trackpad:
+        args.builtin_keyboard = True
+        try:
+            with open(args.builtin_trackpad, "rb") as fh:
+                args.tp_fw = fh.read()
+        except OSError as e:
+            parser.error(f"--builtin-trackpad: {e}")
+        if (len(args.tp_fw) < 20 or args.tp_fw[:4] != b"HIDF" or
+                struct.unpack_from("<I", args.tp_fw, 4)[0] != 1 or len(args.tp_fw) > 256 * 1024):
+            parser.error("--builtin-trackpad: not a HIDF v1 firmware file (<= 256 KiB)")
     if args.builtin_keyboard:
         if args.route != "gic" or args.raw_guest:
             parser.error("--builtin-keyboard needs a firmware guest and --route gic")
@@ -1180,8 +1194,16 @@ def main():
         # the default 3 s UART read timeout would abort the launch mid-call.
         old_timeout = iface.dev.timeout
         iface.dev.timeout = 90
+        fw_addr = 0
+        if args.tp_fw:
+            # Into m1n1 heap (never guest memory); the resident copies it into its own
+            # DMA buffer during the call. Left allocated: 80 KiB, one launch.
+            fw_addr = p.memalign(0x4000, (len(args.tp_fw) + 0x3fff) & ~0x3fff)
+            iface.writemem(fw_addr, args.tp_fw)
+            record(f"trackpad firmware {len(args.tp_fw)} bytes sha256 "
+                   f"{hashlib.sha256(args.tp_fw).hexdigest()[:16]} at {fw_addr:#x}")
         try:
-            rc = p.hv_win_hidm_configure()
+            rc = p.hv_win_hidm_configure(fw_addr, len(args.tp_fw) if args.tp_fw else 0)
         finally:
             iface.dev.timeout = old_timeout
         if rc != 0:

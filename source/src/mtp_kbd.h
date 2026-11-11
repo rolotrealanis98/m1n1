@@ -2,6 +2,7 @@
 #ifndef MTP_KBD_H
 #define MTP_KBD_H
 #include "hidm/service/hidm_service.h"
+struct mtp_tp; /* trackpad layer (hidm/tp/mtp_tp.h); NULL = keyboard only, unchanged */
 #define MTP_FIFO_SIZE 2048u
 #define MTP_FRAME_MAX (HM_MAX_DESC + 512u)
 #define MTP_DATA 0x294b34000ull
@@ -27,7 +28,7 @@ struct mtp_kbd {
     struct mtp_io io;
     hm_service *service;
     hm_backend_interface keyboard;
-    hm_u8 descriptor[HM_MAX_DESC], frame[MTP_FRAME_MAX], tx[32];
+    hm_u8 descriptor[HM_MAX_DESC], frame[MTP_FRAME_MAX], tx[48];
     hm_u32 used, expected, tx_len, desc_len, seen[8];
     hm_u64 deadline, partial_deadline, tx_deadline;
     enum mtp_phase phase;
@@ -39,6 +40,9 @@ struct mtp_kbd {
     hm_u8 stm_iface, stm_seq;
     int stm_found, stm_complete, stm_sent, stm_ack, stm_ready, stm_state;
     hm_u64 stm_deadline, rx_bytes;
+    /* trackpad (2026-11-11): optional layer; tx_kind tells tx_poll what was sent */
+    struct mtp_tp *tp;
+    hm_u8 tx_kind; /* 0 other, 1 keyboard enable, 2 stm enable */
 };
 #define MTP_STM_ANNOUNCE_US 1000000u /* wait for stm INIT after keyboard INIT */
 #define MTP_STM_READY_US 2000000u    /* wait for stm ACK + READY */
@@ -47,6 +51,12 @@ void mtp_kbd_init(struct mtp_kbd *, const struct mtp_io *, hm_service *);
 void mtp_kbd_poll(struct mtp_kbd *);
 void mtp_kbd_fail(struct mtp_kbd *, enum mtp_error);
 hm_u32 mtp_kbd_report(void *, hm_u32, hm_u32, hm_u32, hm_u8 *, hm_u32 *);
+/* mtp_tp_io.send for the trackpad layer: one frame in the shared TX slot. */
+int mtp_kbd_tp_send(void *, hm_u8 iface, hm_u8 flags, hm_u8 seq, const hm_u8 *msg, unsigned len,
+                    hm_u8 *seq_used);
+/* Service callback when the trackpad is published: dispatches to it, else DENIED. */
+hm_u32 mtp_kbd_report_all(void *, hm_u32, hm_u32, hm_u32, hm_u8 *, hm_u32 *);
 /* Resident adapter: called once before guest entry, tick only thereafter. */
 int mtp_kbd_resident_start(struct mtp_kbd *, hm_service *);
+extern void (*mtp_kbd_attach_hook)(struct mtp_kbd *);
 #endif

@@ -11,6 +11,10 @@
 
 static rtkit_dev_t *mtp_rtkit;
 static bool attempted;
+/* Trackpad (2026-11-11): called after mtp_kbd_init and before the interfaces are
+ * announced, so an optional layer can attach (k->tp) and see every INIT. NULL =
+ * keyboard only, unchanged. */
+void (*mtp_kbd_attach_hook)(struct mtp_kbd *k);
 static hm_u32 mmio_read(void *ctx, hm_u64 addr) { (void)ctx; return read32(addr); }
 static void mmio_write(void *ctx, hm_u64 addr, hm_u32 value)
 { (void)ctx; write32(addr, value); }
@@ -133,6 +137,7 @@ int mtp_kbd_resident_start(struct mtp_kbd *k, hm_service *s)
     write32(MTP_CPU_CONTROL, 0x10);
     printf("MTP: stage 6/7 CPU_CONTROL=RUN; RTKit wake/HELLO/EPMAP/power (bounded ~16 s)\n");
     if (!rtkit_boot(mtp_rtkit)) { printf("MTP: stage 6 FAILED: RTKit boot\n"); goto fail; }
+    if (mtp_kbd_attach_hook) mtp_kbd_attach_hook(k);
     printf("MTP: stage 7/7 waiting for interface INIT / enable (bounded 20 s + 10 s)\n");
     k->deadline = now_us(NULL) + 20000000;
     while (k->phase != MTP_LIVE && k->phase != MTP_FAILED) {
