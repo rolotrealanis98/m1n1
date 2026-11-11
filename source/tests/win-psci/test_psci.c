@@ -350,6 +350,60 @@ static void test_single_vcpu_quiet(void)
     CHECK_EQ(hv_win.psci_calls, 4);
 }
 
+/*
+ * smpN: the full J716s spin table (cluster 0 = 0.4.0-5 boot cluster, cluster 1 = 0.4.1xx, cluster 2 =
+ * 0.1.2xx) with N = 6 (cluster 0) and N = 18 vCPUs. Windows names each core by its MADT MPIDR (bit 31
+ * clear); every vCPU must start, nothing outside the table may.
+ */
+static u64 j716s_mpidr(int cpu)
+{
+    static const u64 cl[3] = {0x80040000, 0x80040100, 0x80010200};
+    return cl[cpu / 6] | (cpu % 6);
+}
+
+static void smpn_cpu_on_all(u32 n)
+{
+    world(n);
+    for (int i = 0; i < 18; i++) {
+        mpidr_of[i] = j716s_mpidr(i);
+        alive[i] = true;
+    }
+    for (u32 v = 1; v < n; v++) {
+        u64 madt = j716s_mpidr(v) & 0xffffff;
+        CHECK_EQ(call(PSCI_AFF_INFO_64, madt, 0, 0), 1);
+        CHECK_EQ(call(PSCI_CPU_ON_64, madt, ENTRY, 0x4000c000 + v), 0);
+        CHECK_EQ(start_cpu, v);
+        CHECK_EQ(start_x0, 0x4000c000 + v);
+        CHECK_EQ(call(PSCI_AFF_INFO_64, madt, 0, 0), 0);
+        CHECK_EQ(call(PSCI_CPU_ON_64, madt | 0x80000000UL, ENTRY, 0), -4); /* ALREADY_ON */
+    }
+    CHECK_EQ(starts, (int)n - 1);
+    /* cores outside the vCPU table, and affinities that exist on no cluster */
+    for (int i = n; i < 18; i++)
+        CHECK_EQ(call(PSCI_CPU_ON_64, j716s_mpidr(i) & 0xffffff, ENTRY, 0), -2);
+    CHECK_EQ(call(PSCI_CPU_ON_64, 0x40200, ENTRY, 0), -2); /* Aff2 4 Aff1 2: cluster 2 is Aff2 1 */
+    CHECK_EQ(call(PSCI_CPU_ON_64, 0x10000, ENTRY, 0), -2);
+    CHECK_EQ(call(PSCI_CPU_ON_64, 0x40006, ENTRY, 0), -2);
+    CHECK_EQ(starts, (int)n - 1);
+    /* SYSTEM_RESET from the last vCPU: every started CPU leaves, the others are kicked */
+    host_cpu = n - 1;
+    exit_requests = ipi_mask = 0;
+    call(0x84000009UL, 0, 0, 0);
+    CHECK_EQ(exit_requests, (u32)(BIT(n) - 1));
+    CHECK_EQ(ipi_mask, (u32)(BIT(n - 1) - 1));
+    host_cpu = 0;
+}
+
+static void test_smpn_cpu_on_6(void)
+{
+    smpn_cpu_on_all(6);
+}
+
+static void test_smpn_cpu_on_18(void)
+{
+    smpn_cpu_on_all(18);
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -368,6 +422,8 @@ int main(int argc, char **argv)
     RUN(test_system_off);
     RUN(test_cpu_on_start_timeout);
     RUN(test_single_vcpu_quiet);
+    RUN(test_smpn_cpu_on_6);
+    RUN(test_smpn_cpu_on_18);
 
     printf("%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;

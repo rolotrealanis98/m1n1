@@ -122,6 +122,7 @@ GICR_DEFAULT = 0xF_1000_0000
 PL011_DEFAULT = 0xF_2000_0000
 PL011_FRAME = 0x10000
 GICD_FRAME = 0x10000
+MAX_VCPUS = 24                      # src/smp_asm.h MAX_CPUS: EL2's vCPU table and vGIC frame limit
 GICR_STRIDE = 0x20000               # RD_base + SGI_base per vCPU, GICR frame i = m5w,cpus[i]
 
 # Mu facts (docs/BUILD.md, CONTRACT.md s8). Known images by profile (BUILD.md table; all 0x1e00000 bytes,
@@ -618,8 +619,8 @@ def parse_args():
                         help="interrupt route: aic = native AIC passthrough (single CPU; m0, m1-aic); gic = emulated "
                              "GICv3 (m1-gic). Default: the --mu-profile's route")
     parser.add_argument("-C", "--cpus", type=int, default=None,
-                        help="guest vCPU count (default 1; this smp2 build accepts 1 or 2, 2 needs --route gic "
-                             "and runs without --fb-shadow)")
+                        help="guest vCPU count (default 1; more than 1 needs --route gic and runs without "
+                             "--fb-shadow; at most the usable cores, 18 on the J716s)")
     parser.add_argument("--counter-hz", type=int, default=None, help="counter frequency to advertise (default CNTFRQ_EL0)")
     parser.add_argument("--psci-smc", action="store_true", help="also accept PSCI over SMC (sets HCR_EL2.TSC)")
     parser.add_argument("--reserve-cpu", action="store_true", help="keep the top CPU in host context")
@@ -711,9 +712,10 @@ def parse_args():
     args.entry_offset = args.entry_offset or 0
     if args.route == "aic" and args.cpus != 1:
         parser.error("the aic route is single-CPU")
-    # smp2 (SMP-PLAN M4): two vCPUs are the milestone this build was made and reviewed for; more need M5.
-    if not 1 <= args.cpus <= 2:
-        parser.error("-C must be 1 or 2 in the smp2 build (SMP-PLAN M4; M5 lifts this)")
+    # smpN (SMP-PLAN M5): up to MAX_CPUS (smp_asm.h) vCPUs; the vCPU table below still refuses more than the
+    # usable cores (18 on the J716s: -C 6 = cluster 0, the boot cluster; -C 18 = all three clusters).
+    if not 1 <= args.cpus <= MAX_VCPUS:
+        parser.error(f"-C must be 1..{MAX_VCPUS} (MAX_CPUS in smp_asm.h)")
     if args.raw_guest and (args.ramdisk or args.entry_offset):
         parser.error("--raw-guest takes no RAM disk and enters at offset 0")
     if not args.raw_guest and args.mu_profile in MU_NEEDS_RAMDISK and not args.ramdisk:
@@ -783,7 +785,7 @@ def parse_args():
     # smp2: the shadow's dirty tracking and converter are single-vCPU designs (EL2 refuses FB PREPARE with
     # more than one vCPU too); with -C 2 the guest draws straight into the native framebuffer instead.
     if args.fb_shadow and (args.raw_guest or args.mu_profile != "m1a" or args.route != "gic" or args.cpus != 1):
-        parser.error("--fb-shadow requires --mu-profile m1a --route gic -C 1 (smp2: -C 2 runs without the shadow)")
+        parser.error("--fb-shadow requires --mu-profile m1a --route gic -C 1 (smp2/smpN: -C 2+ runs without the shadow)")
     return parser, args
 
 

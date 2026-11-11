@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""smp2: run_windows.py argument gates for -C (no device access; parse_args only).
+"""smp2/smpN: run_windows.py argument gates for -C (no device access; parse_args only).
    python3 -I tests/win-launcher-smp2/test_args.py"""
 import contextlib, io, pathlib, sys
 
@@ -38,8 +38,20 @@ a, e = parse(["-C", "2"])
 check("-C 2 accepted on the gic route", a is not None and a.cpus == 2, str(e))
 a, e = parse(["-C", "2", "--pmu-rewrite", "el2"])
 check("-C 2 with --pmu-rewrite el2", a is not None, str(e))
-a, e = parse(["-C", "3"])
-check("-C 3 refused (M5)", a is None and "1 or 2" in e, str(e))
+for n in (3, 6, 18, 24):
+    a, e = parse(["-C", str(n)])
+    check(f"-C {n} accepted on the gic route (smpN)", a is not None and a.cpus == n, str(e))
+a, e = parse(["-C", "25"])
+check("-C 25 refused (MAX_CPUS 24)", a is None and "1..24" in e, str(e))
+a, e = parse(["-C", "6", "--fb-shadow"])
+check("-C 6 --fb-shadow refused", a is None and "-C 1" in e, str(e))
+sys.argv = ["run_windows.py", "fd.bin", "--mu-profile", "m0", "-C", "6"]
+try:
+    with contextlib.redirect_stderr(io.StringIO()):
+        run_windows.parse_args()
+    check("aic route -C 6 refused", False)
+except SystemExit:
+    check("aic route -C 6 refused", True)
 a, e = parse(["-C", "0"])
 check("-C 0 refused", a is None, str(e))
 a, e = parse(["-C", "2", "--fb-shadow"])

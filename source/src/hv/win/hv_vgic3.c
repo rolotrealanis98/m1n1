@@ -153,12 +153,13 @@ static spinlock_t vgic_lock = SPINLOCK_INIT;
 /* --- helpers ---------------------------------------------------------------------------------- */
 
 /*
- * smp2g diagnostics (statistics only), for the first VGIC_STAT_N vCPUs: SGIs made pending ("rx") and
+ * smp2g diagnostics (statistics only), for every vCPU (smpN: was the first 4, so the dump showed
+ * "interrupts taken 0" for vCPU 4 and up whatever they took): SGIs made pending ("rx") and
  * SGIs the guest took ("taken"), by sending vCPU (3 = vCPU 3 or more) and SGI number, and the last
  * interrupt of any kind the guest took. A take is attributed to the SGI's most recent sender (the
  * model, like GICv3, keeps one pending bit per SGI, not one per sender). Written under vgic_lock.
  */
-#define VGIC_STAT_N 4
+#define VGIC_STAT_N MAX_CPUS
 static struct vgic_stat {
     u32 rx[4][16];
     u32 taken[4][16];
@@ -1623,6 +1624,15 @@ int hv_vgic3_stall_check(u64 now, u64 period)
             vc->stall_dumped = false;
             continue;
         }
+        /*
+         * smpN: with more than two vCPUs only vCPU 0 (the boot CPU, Windows' clock owner) can trigger
+         * the automatic dump. An idle secondary legitimately takes no timer tick for tens of seconds
+         * (run 20261110-165343-smp2h a8: three false stall dumps for idle vCPU 1), and with 17 of them
+         * the four dumps would all go to idle CPUs, each printing N vCPUs under bhl. The others
+         * stay tracked; the on-demand dump covers them. Two vCPUs keep the smp2g rule.
+         */
+        if (vgic.nr_vcpus > 2 && v != 0)
+            continue;
         if (!vc->stall_dumped && now - vc->stall_since >= period) {
             vc->stall_dumped = true;
             return v;

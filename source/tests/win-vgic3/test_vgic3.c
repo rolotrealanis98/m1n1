@@ -1606,6 +1606,191 @@ static void test_smp2_j716s_one_vcpu_unchanged(void)
     CHECK_EQ(log_lines, lines); /* no periodic report with one vCPU */
 }
 
+/* --- smpN: 6 and 18 vCPUs on the real J716s topology (SMP-PLAN M5a/M5b) ------------------------- */
+
+/* hv.log spin table: cluster 0 = 0.4.0-5 (boot cluster, M), cluster 1 = 0.4.1xx (M), cluster 2 = 0.1.2xx (P) */
+static u64 j716s_mpidr(int cpu)
+{
+    static const u64 cl[3] = {0x80040000, 0x80040100, 0x80010200};
+    return cl[cpu / 6] | (cpu % 6);
+}
+
+/* vCPU v = m1n1 CPU v (the launcher's ADT order, boot CPU 0 first) */
+static void bring_up_j716s_n(u32 n)
+{
+    reset_world();
+    for (int i = 0; i < MAX_CPUS; i++) {
+        hv_win.vcpu_cpu[i] = hv_win.cpu_vcpu[i] = -1;
+        mpidr_of[i] = i < 18 ? j716s_mpidr(i) : 0;
+    }
+    for (u32 v = 0; v < n; v++)
+        hv_win.vcpu_cpu[v] = hv_win.cpu_vcpu[v] = v;
+    hv_win.nr_vcpus = n;
+    host_cpu = 0;
+    CHECK_EQ(hv_vgic3_init(GICD, GICR, n), 0);
+    for (u32 v = 0; v < n; v++) {
+        host_cpu = v;
+        hv_vgic3_cpu_init();
+        hv_started_cpus[v] = true;
+    }
+    host_cpu = 0;
+    for (u32 v = 0; v < n; v++)
+        exit_on_cpu(v); /* fold the cpu_init dirty marks */
+    ipi_mask = 0;
+}
+
+static u64 sgi1r_to(u32 v, u32 sgi)
+{
+    u64 m = j716s_mpidr(v);
+    return FIELD_PREP(ICC_SGI1R_AFF2, (m >> 16) & 0xff) | FIELD_PREP(ICC_SGI1R_AFF1, (m >> 8) & 0xff) |
+           FIELD_PREP(ICC_SGI1R_TARGETLIST, BIT(m & 0xf)) | FIELD_PREP(ICC_SGI1R_INTID, sgi);
+}
+
+static void smpn_case(u32 n)
+{
+    bring_up_j716s_n(n);
+    grp1_on();
+
+    /* redistributors: one frame per vCPU with its own affinity and processor number, Last on the final one */
+    for (u32 v = 0; v < n; v++) {
+        u64 t = rd64(gicr_rd(v, GICR_TYPER));
+        CHECK_EQ(FIELD_GET(GICR_TYPER_AFFINITY, t), j716s_mpidr(v) & 0xffffff);
+        CHECK_EQ(FIELD_GET(GICR_TYPER_PROCNUM, t), v);
+        CHECK_EQ(!!(t & GICR_TYPER_LAST), v == n - 1);
+    }
+
+    /* SGIs between every ordered pair, inside and across clusters: only the target pends, only it is kicked */
+    for (u32 a = 0; a < n; a++) {
+        for (u32 b = 0; b < n; b++) {
+            if (a == b)
+                continue;
+            u32 sgi = (a + b) % 16;
+            host_cpu = a;
+            ipi_mask = 0;
+            CHECK(hv_vgic3_handle_sgi1r(sgi1r_to(b, sgi)));
+            CHECK_EQ(ipi_mask, BIT(b));
+            for (u32 v = 0; v < n; v++)
+                CHECK_EQ(rd32(gicr_sgi(v, GICR_ISPENDR0)) & BIT(sgi), v == b ? BIT(sgi) : 0);
+            exit_on_cpu(b);
+            CHECK_EQ(find_lr(b, sgi), lr_bits(sgi, 0, 1, false));
+            wr32(gicr_sgi(b, GICR_ICPENDR0), BIT(sgi));
+            exit_on_cpu(b);
+            CHECK_EQ(find_lr(b, sgi), 0);
+        }
+    }
+    host_cpu = 0;
+
+    /* one SGI1R naming several CPUs of cluster 1 (Aff1 = 1): all of them, nobody else */
+    if (n > 8) {
+        host_cpu = 0;
+        ipi_mask = 0;
+        CHECK(hv_vgic3_handle_sgi1r(FIELD_PREP(ICC_SGI1R_AFF2, 4) | FIELD_PREP(ICC_SGI1R_AFF1, 1) |
+                                    FIELD_PREP(ICC_SGI1R_TARGETLIST, BIT(0) | BIT(2) | BIT(5)) |
+                                    FIELD_PREP(ICC_SGI1R_INTID, 9)));
+        CHECK_EQ(ipi_mask, BIT(6) | BIT(8) | BIT(11));
+        for (u32 v = 0; v < n; v++) {
+            CHECK_EQ(rd32(gicr_sgi(v, GICR_ISPENDR0)) & BIT(9), (v == 6 || v == 8 || v == 11) ? BIT(9) : 0);
+            wr32(gicr_sgi(v, GICR_ICPENDR0), BIT(9));
+        }
+        /* cluster 2 is Aff2 = 1: the cluster-0 affinity with Aff1 = 2 is nobody */
+        ipi_mask = 0;
+        CHECK(hv_vgic3_handle_sgi1r(FIELD_PREP(ICC_SGI1R_AFF2, 4) | FIELD_PREP(ICC_SGI1R_AFF1, 2) |
+                                    FIELD_PREP(ICC_SGI1R_TARGETLIST, 0x3f) | FIELD_PREP(ICC_SGI1R_INTID, 9)));
+        CHECK_EQ(ipi_mask, 0);
+    }
+
+    /* broadcast (IRM) from the last vCPU: every other vCPU */
+    host_cpu = n - 1;
+    ipi_mask = 0;
+    CHECK(hv_vgic3_handle_sgi1r(ICC_SGI1R_IRM | FIELD_PREP(ICC_SGI1R_INTID, 1)));
+    CHECK_EQ(ipi_mask, (u32)(BIT(n - 1) - 1));
+    for (u32 v = 0; v < n; v++) {
+        CHECK_EQ(rd32(gicr_sgi(v, GICR_ISPENDR0)) & BIT(1), v == n - 1 ? 0 : BIT(1));
+        wr32(gicr_sgi(v, GICR_ICPENDR0), BIT(1));
+        exit_on_cpu(v);
+    }
+    host_cpu = 0;
+
+    /* timer wake on each vCPU: its own CNTV PPI lists on it and nowhere else */
+    for (u32 v = 0; v < n; v++) {
+        wr32(gicr_sgi(v, GICR_ISENABLER0), BIT(GIC_PPI_CNTV));
+        host_cpu = v;
+        hv_vgic3_set_ppi_level(v, GIC_PPI_CNTV, true);
+        exit_on_cpu(v);
+        CHECK(find_lr(v, GIC_PPI_CNTV) != 0);
+        for (u32 w = 0; w < n; w++)
+            if (w != v)
+                CHECK(lr_state(find_lr(w, GIC_PPI_CNTV)) == 0 || w < v);
+        hv_vgic3_set_ppi_level(v, GIC_PPI_CNTV, false);
+        exit_on_cpu(v);
+    }
+    host_cpu = 0;
+
+    /* an SPI routed to the last vCPU (0.1.2.5 for 18): kicked and listed there only */
+    u64 last = j716s_mpidr(n - 1) & 0xffffff;
+    wr64(GICD + GICD_IROUTER + 8 * 45, last);
+    CHECK_EQ(rd64(GICD + GICD_IROUTER + 8 * 45), last);
+    spi_prio(45, 0x60);
+    spi_enable(45);
+    ipi_mask = 0;
+    wr32(bitreg(GICD_ISPENDR, 45), BIT(45 % 32));
+    CHECK_EQ(ipi_mask, BIT(n - 1));
+    for (u32 v = 0; v < n; v++)
+        exit_on_cpu(v);
+    CHECK_EQ(find_lr(n - 1, 45), lr_bits(45, 0x60, 1, true));
+    for (u32 v = 0; v + 1 < n; v++)
+        CHECK_EQ(find_lr(v, 45), 0);
+    /* an unrouted SPI still goes to vCPU 0 (smp2 rule, unchanged for N > 2) */
+    CHECK_EQ(rd64(GICD + GICD_IROUTER + 8 * 46), 0x040000);
+
+    /* the dump: every vCPU, with its own taken statistics (vCPU 4 and up had none before smpN) */
+    host_cpu = 0;
+    CHECK(hv_vgic3_handle_sgi1r(sgi1r_to(n - 1, 7)));
+    exit_on_cpu(n - 1);
+    CHECK_EQ(guest_ack(n - 1), 7); /* SPI 45 (0x60) and SGI 7 (0) are both listed; priority 0 wins */
+    log_clear();
+    hv_vgic3_smp_dump();
+    char want[160];
+    for (u32 v = 0; v < n; v++) {
+        snprintf(want, sizeof(want), "vCPU %u CPU %u on", v, v);
+        CHECK(strstr(all_log, want) != NULL);
+    }
+    exit_on_cpu(n - 1);
+    log_clear();
+    hv_vgic3_smp_dump();
+    snprintf(want, sizeof(want), "vCPU %u interrupts taken ", n - 1);
+    char *p = strstr(all_log, want);
+    CHECK(p != NULL);
+    CHECK(p && strncmp(p + strlen(want), "0,", 2) != 0);
+    snprintf(want, sizeof(want), "vCPU %u SGI 7 from v0: rx 1", n - 1);
+    CHECK(strstr(all_log, want) != NULL);
+
+    /* periodic report: one line per vCPU */
+    int lines = log_lines;
+    hv_vgic3_smp_report(1000, 100);
+    hv_vgic3_smp_report(1100, 100);
+    CHECK_EQ(log_lines, lines + (int)n);
+
+    /* stall watch with N > 2: an idle secondary never triggers the automatic dump, vCPU 0 does */
+    const u64 P = 20000000000UL;
+    host_cpu = 0;
+    CHECK_EQ(hv_vgic3_stall_check(1000, P), -1);
+    CHECK_EQ(hv_vgic3_stall_check(1000 + P, P), 0);
+    CHECK_EQ(hv_vgic3_stall_check(1000 + 2 * P, P), -1); /* once per episode */
+    CHECK_EQ(lock_depth, 0);
+    CHECK_EQ(bad_sysreg, 0);
+}
+
+static void test_smpn_j716s_6_vcpus(void)
+{
+    smpn_case(6);
+}
+
+static void test_smpn_j716s_18_vcpus(void)
+{
+    smpn_case(18);
+}
+
 int main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -1636,6 +1821,8 @@ int main(int argc, char **argv)
     RUN(test_smp2_j716s_one_vcpu_unchanged);
     RUN(test_smp2e_wfi_pending);
     RUN(test_smp2f_vctx_and_diag);
+    RUN(test_smpn_j716s_6_vcpus);
+    RUN(test_smpn_j716s_18_vcpus);
 
     printf("%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
