@@ -681,8 +681,21 @@ def parse_args():
     parser.add_argument("--fb-bench", action="store_true",
                         help="FB shadow: time legacy vs wide conversion at PREPARE (stats 22..25; blanks native rows 0..7)")
     parser.add_argument("--fb-budget", default="0:0:0", metavar="BASE_US:MAX_US:DEFER_MS",
-                        help="FB shadow per-tick budget (default 250 us), escalated budget after 16 ms backlog "
-                             "(default 1000 us, max 4000) and blit-settle defer limit (default 8 ms); 0 = default")
+                        help="FB shadow per-tick budget (default 500 us), escalated budget once a pass is older "
+                             "than the defer limit (default 1000 us, max 4000) and blit-settle defer limit (default "
+                             "8 ms); 0 = default")
+    parser.add_argument("--fb-tlbi", choices=("sub", "all", "far"), default="sub",
+                        help="FB dirty: TLB maintenance when a fault makes a page writable: the four 4 KiB stage-1 "
+                             "pages of the 16 KiB window (sub, default), the VMID's whole stage-1 TLB (all), or the "
+                             "faulting 4 KiB page only (far, r3.2-disp behaviour)")
+    parser.add_argument("--fb-no-diff", action="store_true",
+                        help="FB shadow: no write elision (no cacheable copy; every chunk of a dirty page is written)")
+    parser.add_argument("--fb-merge", action="store_true",
+                        help="FB dirty: experimental merge-ahead: pages dirtied during a pass below the conversion "
+                             "cursor join the running pass (default off)")
+    parser.add_argument("--fb-stats-period", type=int, default=0, metavar="SECONDS",
+                        help="FB shadow: print one FBS/FBS2 counter line pair from EL2 every SECONDS (0 = off, max "
+                             "255); read from the console log, no guest pause")
     parser.add_argument("--pmu-rewrite", choices=("off", "el2"), default="off",
                         help="el2: EL2 rewrites PMUv3 accesses at the first instruction fetch of each guest RAM page "
                              "(stage-2 XN; docs/PMU-EL2-REWRITE.md)")
@@ -785,13 +798,18 @@ def parse_args():
         parser.error("--fb-dirty/--fb-scale2/--fb-bench require --fb-shadow")
     try:
         b0, b1, dl = (int(v) for v in args.fb_budget.split(":"))
-        if not (0 <= b0 <= 0xffff and 0 <= b1 <= 4000 and 0 <= dl <= 0xff and (not b0 or not b1 or b0 <= b1)):
+        if not (0 <= b0 <= 0xffff and 0 <= b1 <= 4000 and 0 <= dl <= 0xff and (b0 or 500) <= (b1 or 1000)):
             raise ValueError
     except ValueError:
         parser.error("--fb-budget must be BASE_US:MAX_US:DEFER_MS with MAX_US <= 4000, DEFER_MS <= 255")
     args.fb_flags = (int(args.fb_shadow_no_copy) | (2 if args.fb_dirty else 0) | (4 if args.fb_scale2 else 0)
                      | (8 if args.fb_bench else 0))
-    args.fb_tuning = b0 | (b1 << 16) | (dl << 32)
+    if (args.fb_tlbi != "sub" or args.fb_no_diff or args.fb_merge or args.fb_stats_period) and not args.fb_shadow:
+        parser.error("--fb-tlbi/--fb-no-diff/--fb-merge/--fb-stats-period require --fb-shadow")
+    if not 0 <= args.fb_stats_period <= 255:
+        parser.error("--fb-stats-period must be 0..255 seconds")
+    args.fb_tuning = (b0 | (b1 << 16) | (dl << 32) | ({"sub": 0, "all": 1, "far": 2}[args.fb_tlbi] << 40)
+                      | (int(args.fb_no_diff) << 42) | (int(args.fb_merge) << 43) | (args.fb_stats_period << 48))
     # smp2: the shadow's dirty tracking and converter are single-vCPU designs (EL2 refuses FB PREPARE with
     # more than one vCPU too); with -C 2 the guest draws straight into the native framebuffer instead.
     if args.fb_shadow and (args.raw_guest or args.mu_profile != "m1a" or args.route != "gic" or args.cpus != 1):
@@ -1115,6 +1133,8 @@ def main():
         shadow_base = p.hv_win_fb_prepare(ba.video.base, args.fb_flags, args.fb_tuning)
         if p.hv_win_fb_stat(13) != int(args.fb_shadow_no_copy) or p.hv_win_fb_stat(14) != args.fb_flags:
             raise SystemExit("framebuffer flags mismatch (stat13/14); reload a resident with improve-20261109 FB")
+        if p.hv_win_fb_stat(35) != 3 or p.hv_win_fb_stat(36) != args.fb_tuning:
+            raise SystemExit("framebuffer counter layout/tuning mismatch (stat35/36); reload the disp3 resident")
         fb_guest = (p.hv_win_fb_stat(26), p.hv_win_fb_stat(27), p.hv_win_fb_stat(28))
         shadow_size = p.hv_win_fb_stat(3)
         if p.hv_win_fb_stat(0) != 1 or shadow_size != align_up(fb_guest[2] * fb_guest[1]):
@@ -1130,6 +1150,9 @@ def main():
         record(f"FB guest mode {fb_guest[0]}x{fb_guest[1]} stride {fb_guest[2]}; flags {args.fb_flags:#x} "
                f"tuning {args.fb_tuning:#x}; bench legacy/wide/read/write ticks "
                f"{[p.hv_win_fb_stat(i) for i in range(22, 26)]} (8 rows)")
+        record(f"FB disp2 bench 2x/rd32/rd64/diff ticks {[p.hv_win_fb_stat(i) for i in range(70, 74)]} (8 rows); "
+               f"write elision {'on' if p.hv_win_fb_stat(74) else 'off'}; tlbi {args.fb_tlbi}; "
+               f"merge {'on' if args.fb_merge else 'off'}; stats period {args.fb_stats_period} s")
     try:
         tag = u.mrs(TAGOFFSET_EL2) & TAGOFFSET_ADDR
         tag_note = f"TagOffset_EL2 -> tag storage at {tag:#x}"
@@ -1342,10 +1365,15 @@ def main():
     hv.start()
 
     if shadow:
-        fb_stats = [p.hv_win_fb_stat(i) for i in range(35)]
+        fb_stats = [p.hv_win_fb_stat(i) for i in range(78)]
         record(f"FB shadow final state/base/native/size/stride/height/calls/lines/max_ticks/cursor/heap_before/heap_after/heap_now/no_copy: {fb_stats[:14]}")
         record("FB shadow v2 flags/faults/passes/pages/max_lat/sum_lat/max_backlog/escalated/bench x4/"
-               f"gw/gh/gs/ipa_fail/busy/start/spurious/deferred/budget: {fb_stats[14:]}")
+               f"gw/gh/gs/ipa_fail/busy/start/spurious/deferred/budget: {fb_stats[14:35]}")
+        record("FB shadow disp2 version/tuning/lat_net_max/lat_gross_max/hist x12/gap_max/gap_at/gap_faults/"
+               "gaps5/gaps50/stopped/fault_ticks/fault_max/sp_same/sp_sub/sp_alias/sp_repeat/wp_fail/chunks/"
+               "chunks_wr/rt_samples/rt_read/rt_conv/merged/bench 2x,rd32,rd64,diff/diff_on/backlog_max/tick_max: "
+               f"{fb_stats[35:77]}")
+        record(f"FB shadow disp3 print_ticks: {fb_stats[77]}")
     status = p.hv_win_status()
     stats = p.hv_win_pl011_stats() if args.pl011 else 0
     record(f"guest exit: {HV_WIN_EXIT.get(status >> 32, status >> 32)} ({status >> 32}), PSCI calls {status & 0xffffffff}, "

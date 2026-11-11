@@ -1,0 +1,17 @@
+new converter: fbec3de75ed38ac3  conv: 911e5bc7d631ffdb
+print accounting: 10 console lines at 40 us -> print 400 us, busy +400 us, tick_max 80 us, gap_max 1.000 ms, FBS print_us=320
+PASSED: 0 failure(s)
+== disp3 print: pass (expected)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:698: print accounting: 10 lines, d_print 0 d_busy 0 (want 400000), tick_max 0, gap_max 1000000, FBS print_us 18446744073709551615 (want 18446744073709471)
+print accounting: 10 console lines at 40 us -> print 0 us, busy +0 us, tick_max 0 us, gap_max 1.000 ms, FBS print_us=18446744073709551615
+child failed (status 256)
+FAILED: 1 failure(s)
+== disp2 parent print: fail (expected)
+FAIL /Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp3-20261110/harness/sim.c:698: print accounting: 10 lines, d_print 400000 d_busy 0 (want 400000), tick_max 80000, gap_max 1000000, FBS print_us 320 (want 320)
+print accounting: 10 console lines at 40 us -> print 400 us, busy +0 us, tick_max 80 us, gap_max 1.000 ms, FBS print_us=320
+child failed (status 256)
+FAILED: 1 failure(s)
+== mutant no-print print: fail (expected)
+print accounting: 10 console lines at 40 us -> print 400 us, busy +400 us, tick_max 80 us, gap_max 1.000 ms, FBS print_us=320
+PASSED: 0 failure(s)
+== mutant no-barrier print: pass (expected)

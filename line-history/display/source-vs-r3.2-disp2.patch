@@ -1,0 +1,182 @@
+--- s1-resident-r3.2-disp2-20261110/source/src/hv/win/hv_win_fb.c	2026-11-10 06:02:39
++++ s1-resident-r3.2-disp3-20261110/source/src/hv/win/hv_win_fb.c	2026-11-10 08:47:47
+@@ -60,7 +60,7 @@
+ #define FB_F_BENCH     BIT(3)
+ #define FB_F_ALL       (FB_F_NO_COPY | FB_F_DIRTY | FB_F_SCALE2 | FB_F_BENCH)
+ #define FB_SMALL_PASS  32 /* pages: per-IPA TLBI at or below, VMID-wide above */
+-#define FB_VERSION     2  /* stat 35: disp2 counter layout */
++#define FB_VERSION     3  /* stat 35: disp3 counter layout (disp2 + ST_PRINT) */
+ 
+ #define FB_T_TLBI_SHIFT  40
+ #define FB_T_NO_DIFF     BIT(42)
+@@ -103,6 +103,8 @@
+     ST_CHUNKS, ST_CHUNKS_WR, ST_RT_SAMPLES, ST_RT_READ, ST_RT_CONV, ST_MERGED,
+     ST_BENCH_2X, ST_BENCH_RD32, ST_BENCH_RD64, ST_BENCH_DIFF, ST_DIFF_ON,
+     ST_BACKLOG_MAX, ST_TICK_MAX, /* (R) */
++    /* new in disp3; 0..76 keep their meaning */
++    ST_PRINT, /* ticks spent printing FBS/FBS2 lines (also in ST_BUSY) */
+     ST_NR
+ };
+ #define FB_STAT_RESET 0x100UL
+@@ -128,7 +130,7 @@
+     u64 sp_same, sp_sub, sp_alias, sp_repeat, wp_fail;
+     u64 chunks, chunks_wr, rt_samples, rt_read, rt_conv, merged;
+     struct fb_max mx[2];
+-    u64 last_end, fault_mark, last_print;
++    u64 last_end, fault_mark, last_print, print_sum;
+     /* dirty: written by the fault path; pass: snapshot being converted by the tick;
+      * force: converted without comparing (initial frame); spur: page took a spurious fault */
+     u64 dirty[FB_WORDS], pass[FB_WORDS], force[FB_WORDS], spur[FB_WORDS];
+@@ -514,9 +516,11 @@
+     /* Adding a permission. Stage 2 by IPA first, then every stage-1 entry that may combine with
+      * the old read-only leaf: the guest maps 4 KiB pages, so a 16 KiB stage-2 page backs four
+      * stage-1 entries, and the core may already hold read-only entries for the neighbours of the
+-     * faulting one (prefetched or walked by younger stores). Local: single vCPU on this CPU. */
++     * faulting one (prefetched or walked by younger stores). Local: single vCPU on this CPU.
++     * The IPA operand names the 16 KiB stage-2 page, so its bits 13:12 are zero; the four VAs
++     * win + 0/4/8/12 KiB are exactly the stage-1 pages of that IPA page (linear guest mapping). */
+     sysop("dsb nshst");
+-    FB_TLBI("ipas2e1", (ipa >> 12) & GENMASK(35, 0));
++    FB_TLBI("ipas2e1", ((ipa & ~(FB_PAGE - 1)) >> 12) & GENMASK(35, 0));
+     sysop("dsb nsh");
+     if (win_fb.tlbi_mode == FB_TLBI_ALL) {
+         sysop("tlbi vmalle1");
+@@ -546,7 +550,12 @@
+     return true;
+ }
+ 
+-/* Write-protect the pages of mask m in word w again; TLB maintenance completed by fb_wp_done. */
++/* Write-protect the pages of mask m in word w again; TLB maintenance completed by fb_wp_done.
++ * Small passes invalidate stage 2 per IPA. The read-only leaf store must be visible to the table
++ * walker before that TLBI, or a walk between the two can refill a writable stage-2 entry that the
++ * later stage-1 flush (vmalle1is) does not remove: the page would stay writable but untracked.
++ * Same order as KVM's __kvm_tlb_flush_vmid_ipa and as upstream m1n1's stage-2 changes
++ * (dsb ishst; tlbi; dsb ish; isb). Large passes order the stores with the dsb in fb_wp_done. */
+ static void fb_wp_word(u64 w, u64 m, bool per_ipa)
+ {
+     win_fb.spur[w] &= ~m;
+@@ -554,15 +563,18 @@
+         u64 a = win_fb.shadow + ((w * 64 + __builtin_ctzll(m)) << FB_PAGE_SHIFT);
+         m &= m - 1;
+         hv_wp_set(a, false);
+-        if (per_ipa)
++        if (per_ipa) {
++            sysop("dsb ishst");
+             FB_TLBI("ipas2e1is", (a >> 12) & GENMASK(35, 0));
++        }
+     }
+ }
+ 
+ static void fb_wp_done(bool small)
+ {
+     /* Removing write permission must be complete before any shadow byte is read, so a store
+-     * racing the snapshot either landed already or faults and re-marks the page. */
++     * racing the snapshot either landed already or faults and re-marks the page. This dsb ish
++     * completes the per-IPA TLBIs (small) or orders the leaf stores before vmalls12e1is (large). */
+     sysop("dsb ish");
+     if (small)
+         sysop("tlbi vmalle1is");
+@@ -666,12 +678,12 @@
+     u64 us = win_fb.ms_ticks / 1000;
+     struct fb_max *m = &win_fb.mx[1];
+     printf("FBS t=%lx calls=%lu faults=%lu spur=%lu/%lu/%lu/%lu/%lu passes=%lu pages=%lu merged=%lu "
+-           "chunks=%lu/%lu busy_us=%lu fault_us=%lu stop_us=%lu gaps=%lu/%lu rt=%lu/%lu/%lu\n",
++           "chunks=%lu/%lu busy_us=%lu fault_us=%lu stop_us=%lu gaps=%lu/%lu rt=%lu/%lu/%lu print_us=%lu\n",
+            now, win_fb.calls, win_fb.faults, win_fb.spurious, win_fb.sp_same, win_fb.sp_sub,
+            win_fb.sp_alias, win_fb.sp_repeat, win_fb.passes, win_fb.pages_done, win_fb.merged,
+            win_fb.chunks_wr, win_fb.chunks, win_fb.busy / us, win_fb.fault_ticks / us,
+            win_fb.stopped / us, win_fb.gaps5, win_fb.gaps50, win_fb.rt_samples,
+-           win_fb.rt_read / us, win_fb.rt_conv / us);
++           win_fb.rt_read / us, win_fb.rt_conv / us, win_fb.print_sum / us);
+     printf("FBS2 t=%lx iv_lat_us=%lu/%lu iv_gap_us=%lu@%lx gapf=%lu iv_fault_us=%lu iv_tick_us=%lu "
+            "iv_backlog=%lu hist=%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+            now, m->lat_net / us, m->lat_gross / us, m->gap / us, m->gap_at, m->gap_faults,
+@@ -682,11 +694,19 @@
+     win_fb.last_print = now;
+ }
+ 
+-static void fb_tick_end(u64 now)
++/* start: when this tick began. Printing is converter time with the guest stopped: it goes into
++ * busy, the tick maxima and its own counter (print_us), and stays out of the gap accounting. */
++static void fb_tick_end(u64 now, u64 start)
+ {
+     if (win_fb.print_ticks && now - win_fb.last_print >= win_fb.print_ticks) {
+         fb_print(now);
+-        now = get_ticks();
++        u64 after = get_ticks();
++        win_fb.print_sum += after - now;
++        win_fb.busy += after - now;
++        if (after - start > win_fb.max_ticks)
++            win_fb.max_ticks = after - start;
++        fb_max_update(&win_fb.mx[0].tick, after - start);
++        now = after;
+     }
+     win_fb.last_end = now;
+     win_fb.fault_mark = win_fb.faults + win_fb.spurious;
+@@ -702,7 +722,7 @@
+     bool fault = win_fb.fault_this_tick;
+     win_fb.fault_this_tick = false;
+     if (!win_fb.pass_active && !win_fb.ndirty && (win_fb.flags & FB_F_DIRTY)) {
+-        fb_tick_end(start); /* idle: one clock read, no barrier */
++        fb_tick_end(start, start); /* idle: one clock read, no barrier */
+         return;
+     }
+ 
+@@ -716,7 +736,7 @@
+             win_fb.first_dirty_stop = win_fb.stopped;
+         } else if (fault && start - win_fb.first_dirty < win_fb.defer_ticks) {
+             win_fb.deferred++; /* guest still drawing: wait for its blit to finish */
+-            fb_tick_end(start);
++            fb_tick_end(start, start);
+             return;
+         }
+         fb_begin_pass();
+@@ -772,7 +792,7 @@
+     fb_max_update(&win_fb.mx[0].tick, elapsed);
+     win_fb.busy += elapsed;
+     win_fb.calls++;
+-    fb_tick_end(end);
++    fb_tick_end(end, start);
+ }
+ 
+ /* idx | FB_STAT_RESET returns a (R) maximum and clears it (the gap triple clears together). */
+@@ -814,7 +834,7 @@
+         [ST_MERGED] = win_fb.merged, [ST_BENCH_2X] = win_fb.bench[4],
+         [ST_BENCH_RD32] = win_fb.bench[5], [ST_BENCH_RD64] = win_fb.bench[6],
+         [ST_BENCH_DIFF] = win_fb.bench[7], [ST_DIFF_ON] = win_fb.copy != 0,
+-        [ST_BACKLOG_MAX] = r->backlog, [ST_TICK_MAX] = r->tick,
++        [ST_BACKLOG_MAX] = r->backlog, [ST_TICK_MAX] = r->tick, [ST_PRINT] = win_fb.print_sum,
+     };
+     for (unsigned int i = 0; i < FB_HIST; i++)
+         v[ST_HIST0 + i] = win_fb.hist[i];
+--- s1-resident-r3.2-disp2-20261110/source/proxyclient/tools/run_windows.py	2026-11-10 06:02:45
++++ s1-resident-r3.2-disp3-20261110/source/proxyclient/tools/run_windows.py	2026-11-10 08:47:57
+@@ -1106,8 +1106,8 @@
+         shadow_base = p.hv_win_fb_prepare(ba.video.base, args.fb_flags, args.fb_tuning)
+         if p.hv_win_fb_stat(13) != int(args.fb_shadow_no_copy) or p.hv_win_fb_stat(14) != args.fb_flags:
+             raise SystemExit("framebuffer flags mismatch (stat13/14); reload a resident with improve-20261109 FB")
+-        if p.hv_win_fb_stat(35) != 2 or p.hv_win_fb_stat(36) != args.fb_tuning:
+-            raise SystemExit("framebuffer counter layout/tuning mismatch (stat35/36); reload the disp2 resident")
++        if p.hv_win_fb_stat(35) != 3 or p.hv_win_fb_stat(36) != args.fb_tuning:
++            raise SystemExit("framebuffer counter layout/tuning mismatch (stat35/36); reload the disp3 resident")
+         fb_guest = (p.hv_win_fb_stat(26), p.hv_win_fb_stat(27), p.hv_win_fb_stat(28))
+         shadow_size = p.hv_win_fb_stat(3)
+         if p.hv_win_fb_stat(0) != 1 or shadow_size != align_up(fb_guest[2] * fb_guest[1]):
+@@ -1315,14 +1315,15 @@
+     hv.start()
+ 
+     if shadow:
+-        fb_stats = [p.hv_win_fb_stat(i) for i in range(77)]
++        fb_stats = [p.hv_win_fb_stat(i) for i in range(78)]
+         record(f"FB shadow final state/base/native/size/stride/height/calls/lines/max_ticks/cursor/heap_before/heap_after/heap_now/no_copy: {fb_stats[:14]}")
+         record("FB shadow v2 flags/faults/passes/pages/max_lat/sum_lat/max_backlog/escalated/bench x4/"
+                f"gw/gh/gs/ipa_fail/busy/start/spurious/deferred/budget: {fb_stats[14:35]}")
+         record("FB shadow disp2 version/tuning/lat_net_max/lat_gross_max/hist x12/gap_max/gap_at/gap_faults/"
+                "gaps5/gaps50/stopped/fault_ticks/fault_max/sp_same/sp_sub/sp_alias/sp_repeat/wp_fail/chunks/"
+                "chunks_wr/rt_samples/rt_read/rt_conv/merged/bench 2x,rd32,rd64,diff/diff_on/backlog_max/tick_max: "
+-               f"{fb_stats[35:]}")
++               f"{fb_stats[35:77]}")
++        record(f"FB shadow disp3 print_ticks: {fb_stats[77]}")
+     status = p.hv_win_status()
+     stats = p.hv_win_pl011_stats() if args.pl011 else 0
+     record(f"guest exit: {HV_WIN_EXIT.get(status >> 32, status >> 32)} ({status >> 32}), PSCI calls {status & 0xffffffff}, "
