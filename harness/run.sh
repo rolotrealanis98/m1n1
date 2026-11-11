@@ -17,13 +17,13 @@ B="$H/build"
 PREV_TREE=${PREV_TREE:-"$D/../s1-resident-r3.2-disp-20261109/source"}
 PARENT_TREE=${PARENT_TREE:-"$D/../s1-resident-r3.2-disp2-20261110/source"}
 ORIG_FB=${ORIG_FB:-"$D/../../display/improve-20261109/orig/src/hv/win/hv_win_fb.c"}
-V="orig prev parent new mut_nobarrier mut_noalign mut_noprint"
+V="orig prev parent new mut_nobarrier mut_noalign mut_noprint mut_norefresh mut_nofixcount"
 rm -rf "$B"
 for v in $V; do mkdir -p "$B/$v/hv/win"; cp -R "$H/stub/hv/." "$B/$v/hv/"; done
 cp "$ORIG_FB" "$B/orig/hv/win/hv_win_fb.c"
 cp "$PREV_TREE/src/hv/win/hv_win_fb.c" "$PREV_TREE/src/hv/win/hv_win_fb_conv.h" "$B/prev/hv/win/"
 cp "$PARENT_TREE/src/hv/win/hv_win_fb.c" "$PARENT_TREE/src/hv/win/hv_win_fb_conv.h" "$B/parent/hv/win/"
-for v in new mut_nobarrier mut_noalign mut_noprint; do
+for v in new mut_nobarrier mut_noalign mut_noprint mut_norefresh mut_nofixcount; do
   cp "$D/source/src/hv/win/hv_win_fb.c" "$D/source/src/hv/win/hv_win_fb_conv.h" "$B/$v/hv/win/"
 done
 chk() { test "$(shasum -a 256 "$1" | cut -d' ' -f1)" = "$2" || { echo "hash mismatch: $1"; exit 1; }; }
@@ -42,6 +42,9 @@ mut() { # variant, sed expression
 mut mut_nobarrier '/^            sysop("dsb ishst");$/d'
 mut mut_noalign 's/((ipa & ~(FB_PAGE - 1)) >> 12)/(ipa >> 12)/'
 mut mut_noprint '/^        win_fb.busy += after - now;$/d'
+# nightly-6-perf: the refresh round never starts / missed updates not counted
+mut mut_norefresh 's/        if (now - win_fb.last_refresh < win_fb.refresh_ticks)/        if (1)/'
+mut mut_nofixcount 's/            win_fb.refresh_fixes += win_fb.chunks_wr - wr0;/            (void)wr0;/'
 echo "new converter: $(shasum -a 256 "$B/new/hv/win/hv_win_fb.c" | cut -c1-16)  conv: $(shasum -a 256 "$B/new/hv/win/hv_win_fb_conv.h" | cut -c1-16)"
 CC=${CC:-cc}
 W="-std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-include-next-absolute-path"
@@ -54,7 +57,7 @@ bld sim_orig_san "-DORIG -Wno-unused" orig "$SAN"; bld sim_orig "-DORIG -Wno-unu
 bld sim_prev_san -DPREV prev "$SAN"; bld sim_prev -DPREV prev "$FAST"
 bld sim_parent_san -DPARENT parent "$SAN"
 bld sim_new_san "" new "$SAN";       bld sim_new "" new "$FAST"
-for m in mut_nobarrier mut_noalign mut_noprint; do bld "sim_${m}_san" "" "$m" "$SAN"; done
+for m in mut_nobarrier mut_noalign mut_noprint mut_norefresh mut_nofixcount; do bld "sim_${m}_san" "" "$m" "$SAN"; done
 $CC $W -O2 -mgeneral-regs-only -I"$B/new/hv/win" -o "$B/bench" "$H/bench.c" 2>/dev/null || \
   $CC $W -O2 -I"$B/new/hv/win" -o "$B/bench" "$H/bench.c"
 bad=0
@@ -71,7 +74,13 @@ if [ "$what" = test ] || [ "$what" = all ]; then
   "$B/sim_new_san" reject
   "$B/sim_new_san" reject-tuning
   "$B/sim_new_san" reject-tuning2
-  "$B/sim_new_san" reject-tuning2 0x100000000000   # bit 44 reserved
+  # nightly-6-perf: bits 47:44 are now the refresh period (DIRTY only); bit 44 without DIRTY must be refused,
+  # and the remaining reserved bits 63:56 still are (bit 56 below, bit 63 added)
+  "$B/sim_new_san" reject-refresh-sweep
+  expect pass "nightly-6 refresh"            "$B/sim_new_san" refresh
+  expect fail "mutant no-refresh refresh"    "$B/sim_mut_norefresh_san" refresh
+  expect fail "mutant no-fix-count refresh"  "$B/sim_mut_nofixcount_san" refresh
+  "$B/sim_new_san" reject-tuning2 0x8000000000000000 # bit 63 reserved
   "$B/sim_new_san" reject-tuning2 0x100000000000000 # bit 56 reserved
 fi
 if [ "$what" = strict ] || [ "$what" = all ]; then

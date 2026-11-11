@@ -1923,6 +1923,10 @@ static u64 st_prev_pmu[HV_WIN_PMU_NR_STATS];
 #define HV_FB_ST_FAULTS 15 /* hv_win_fb.c stat indices (0..34 keep their meaning) */
 #define HV_FB_ST_PAGES  17
 #define HV_FB_ST_BUSY   30
+#define HV_FB_ST_REFRESHES 78 /* nightly-6-perf (hv_win_fb.c static-asserts these) */
+#define HV_FB_ST_REFRESH_FIXES 79
+#define HV_FB_ST_WP_REFAIL 81
+#define HV_FB_ST_REFRESH_FIXPAGES 82
 static u64 pf_last_t, pf_prev_ec[64], pf_prev_irq, pf_prev_fiq, pf_prev_sync, pf_prev_fast;
 static u64 pf_prev_el2[3], pf_prev_fb_busy, pf_prev_fb_faults, pf_prev_fb_pages;
 
@@ -1970,8 +1974,14 @@ static void hv_perf_report(const char *P, u64 now, u64 freq)
     }
     for (int i = 0; i < HV_PERF_SR_N; i++)
         hv_perf_sr_tab[i].reported = hv_perf_sr_tab[i].count;
-    printf(" other %lu | flags 0x%x mdcr 0x%lx\n", (unsigned long)hv_perf_sr_other, hv_perf_flags,
-           mrs(MDCR_EL2));
+    u64 rr = hv_win_fb_stat(HV_FB_ST_REFRESHES), rx = hv_win_fb_stat(HV_FB_ST_REFRESH_FIXES),
+        rp = hv_win_fb_stat(HV_FB_ST_REFRESH_FIXPAGES), wf = hv_win_fb_stat(HV_FB_ST_WP_REFAIL);
+    printf(" other %lu | flags 0x%x mdcr 0x%lx | fb refresh %lu fixes %lu/%lu wprefail %lu\n",
+           (unsigned long)hv_perf_sr_other, hv_perf_flags, mrs(MDCR_EL2), (unsigned long)rr, (unsigned long)rx,
+           (unsigned long)rp, (unsigned long)wf);
+    /* the table restarts every interval, so registers that appear late are not lost to "other" */
+    memset(hv_perf_sr_tab, 0, sizeof(hv_perf_sr_tab));
+    hv_perf_sr_other = 0;
     pf_prev_irq = hv_exits_irq; pf_prev_fiq = hv_exits_fiq; pf_prev_sync = hv_exits_sync; pf_prev_fast = fast;
     for (int i = 0; i < 3; i++)
         pf_prev_el2[i] = el2[i];

@@ -28,6 +28,15 @@
  *   bit 42     no write elision (no cacheable copy; convert every chunk of a dirty page)
  *   bit 43     merge-ahead (off by default): pages dirtied during a pass below the conversion
  *              cursor join the running pass instead of waiting for the next one
+ *   bits 47:44 nightly-6-perf: background refresh in DIRTY mode, one full round every N x 500 ms
+ *              (0: off, the old behaviour). A refresh round walks every page round-robin, at most
+ *              FB_REFRESH_US of converter time per tick, independent of the dirty passes (which keep
+ *              their own budget and priority). Diff conversion: only chunks whose source differs
+ *              from the last converted copy are written; every 4th round is forced (every chunk
+ *              rewritten). The scanout therefore matches the shadow within one period plus one
+ *              round, whatever the dirty tracking missed. Chunks a non-forced round had to write on
+ *              a page that was neither dirty nor in a pass are counted (ST_REFRESH_FIXES): non-zero
+ *              means guest stores reached the shadow without a stage-2 fault.
  *   bits 55:48 stats print period in seconds (0: off): one FBS/FBS2 console line pair from the
  *              tick, read by the host from the log without pausing the guest
  *   all other bits must be zero.
@@ -66,7 +75,10 @@
 #define FB_T_NO_DIFF     BIT(42)
 #define FB_T_MERGE       BIT(43)
 #define FB_T_PERIOD_SHIFT 48
-#define FB_T_RESERVED    (GENMASK(47, 44) | GENMASK(63, 56))
+#define FB_T_REFRESH_SHIFT 44 /* nightly-6-perf: bits 47:44, refresh round every N x 500 ms */
+#define FB_T_RESERVED    GENMASK(63, 56)
+#define FB_REFRESH_FORCE_EVERY 4  /* every 4th refresh round rewrites every chunk */
+#define FB_REFRESH_US          60 /* converter time per tick for the refresh walk */
 enum { FB_TLBI_SUB = 0, FB_TLBI_ALL = 1, FB_TLBI_FAR = 2 };
 
 #define FB_RT_SAMPLE   128 /* one runtime read/convert split sample per this many pages */
@@ -105,8 +117,16 @@ enum {
     ST_BACKLOG_MAX, ST_TICK_MAX, /* (R) */
     /* new in disp3; 0..76 keep their meaning */
     ST_PRINT, /* ticks spent printing FBS/FBS2 lines (also in ST_BUSY) */
+    /* new in nightly-6-perf; 0..77 keep their meaning */
+    ST_REFRESHES,      /* refresh rounds completed (tuning bits 47:44) */
+    ST_REFRESH_FIXES,  /* chunks a non-forced round wrote on clean pages: missed updates */
+    ST_REFRESH_PAGES,  /* pages converted by the refresh walk */
+    ST_WP_REFAIL,      /* re-protection failures at a pass start (page left writable; refresh covers it) */
+    ST_REFRESH_FIXPAGES, /* clean pages with at least one fixed chunk */
     ST_NR
 };
+_Static_assert(ST_PRINT == 77 && ST_REFRESHES == 78 && ST_REFRESH_FIXPAGES == 82,
+               "stat indices are an interface (hv_exc.c PF line, launcher)");
 #define FB_STAT_RESET 0x100UL
 
 /* maxima kept twice: [0] reset when the host reads them with FB_STAT_RESET, [1] per print period */
@@ -131,6 +151,10 @@ static struct {
     u64 chunks, chunks_wr, rt_samples, rt_read, rt_conv, merged;
     struct fb_max mx[2];
     u64 last_end, fault_mark, last_print, print_sum;
+    /* nightly-6-perf background refresh (tuning bits 47:44) */
+    u64 refresh_ticks, refresh_slice, last_refresh, refresh_next, refreshes, refresh_fixes;
+    u64 refresh_pages, refresh_fixpages, wp_refail;
+    bool refresh_active, refresh_force;
     /* dirty: written by the fault path; pass: snapshot being converted by the tick;
      * force: converted without comparing (initial frame); spur: page took a spurious fault */
     u64 dirty[FB_WORDS], pass[FB_WORDS], force[FB_WORDS], spur[FB_WORDS];
@@ -359,9 +383,12 @@ s64 hv_win_fb_prepare(u64 expected_native, u64 flags, u64 tuning)
     u64 us = mrs(CNTFRQ_EL0) / 1000000;
     u64 b0 = tuning & 0xffff, b1 = (tuning >> 16) & 0xffff, dl = (tuning >> 32) & 0xff;
     u64 tl = (tuning >> FB_T_TLBI_SHIFT) & 3, per = (tuning >> FB_T_PERIOD_SHIFT) & 0xff;
+    u64 rf = (tuning >> FB_T_REFRESH_SHIFT) & 0xf;
     b0 = b0 ? b0 : 500;
     b1 = b1 ? b1 : 1000;
     if (!us || (tuning & FB_T_RESERVED) || tl > FB_TLBI_FAR || b1 > 4000 || b0 > b1)
+        return -4;
+    if (rf && !(flags & FB_F_DIRTY)) /* nightly-6-perf: the refresh exists for dirty tracking only */
         return -4;
     /* Preserve 32 MiB for mapping splits and later PMU page tables. */
     size_t remaining = heapblock_remaining();
@@ -419,6 +446,8 @@ s64 hv_win_fb_prepare(u64 expected_native, u64 flags, u64 tuning)
     win_fb.ms_ticks = 1000 * us;
     win_fb.print_ticks = per * 1000000 * us;
     win_fb.tlbi_mode = tl;
+    win_fb.refresh_ticks = (flags & FB_F_DIRTY) ? rf * 500 * 1000 * us : 0;
+    win_fb.refresh_slice = FB_REFRESH_US * us;
     win_fb.remaining_after = heapblock_remaining();
     if (flags & FB_F_BENCH)
         fb_bench();
@@ -460,7 +489,7 @@ bool hv_win_fb_start(const struct boot_args *gba)
     sysop("tlbi vmalls12e1is");
     sysop("dsb ish");
     sysop("isb");
-    win_fb.start = win_fb.pass_t0 = win_fb.last_print = get_ticks();
+    win_fb.start = win_fb.pass_t0 = win_fb.last_print = win_fb.last_refresh = get_ticks();
     win_fb.pass_stop0 = 0;
     win_fb.state = 2;
     return true;
@@ -562,7 +591,8 @@ static void fb_wp_word(u64 w, u64 m, bool per_ipa)
     while (m) {
         u64 a = win_fb.shadow + ((w * 64 + __builtin_ctzll(m)) << FB_PAGE_SHIFT);
         m &= m - 1;
-        hv_wp_set(a, false);
+        if (hv_wp_set(a, false) < 0)
+            win_fb.wp_refail++; /* left writable and untracked; the periodic refresh still converts it */
         if (per_ipa) {
             sysop("dsb ishst");
             FB_TLBI("ipas2e1is", (a >> 12) & GENMASK(35, 0));
@@ -712,11 +742,66 @@ static void fb_tick_end(u64 now, u64 start)
     win_fb.fault_mark = win_fb.faults + win_fb.spurious;
 }
 
+/*
+ * nightly-6-perf: the background refresh walk (DIRTY mode with tuning bits 47:44). A round starts
+ * when the period has elapsed; each tick converts pages from refresh_next on, round-robin, for at
+ * most refresh_slice ticks of converter time; a round ends after the last page. It never touches the
+ * dirty/pass sets or the protection: a page converted here that is dirty or queued in a pass is
+ * simply converted again by its pass. Returns the converter ticks used.
+ */
+static u64 fb_refresh_step(u64 now)
+{
+    if (!win_fb.refresh_active) {
+        if (now - win_fb.last_refresh < win_fb.refresh_ticks)
+            return 0;
+        win_fb.refresh_active = true;
+        win_fb.refresh_next = 0;
+        win_fb.refresh_force = win_fb.refreshes % FB_REFRESH_FORCE_EVERY == FB_REFRESH_FORCE_EVERY - 1;
+    }
+    sysop("dsb sy"); /* as fb_begin_pass: the guest's own NC stores have completed before we read */
+    u64 t0 = get_ticks();
+    while (win_fb.refresh_next < win_fb.pages) {
+        u64 page = win_fb.refresh_next++;
+        u64 w = page / 64, bit = BIT(page % 64);
+        bool clean = !((win_fb.dirty[w] | win_fb.pass[w]) & bit);
+        u64 wr0 = win_fb.chunks_wr;
+        fb_convert_page(page, win_fb.refresh_force);
+        win_fb.refresh_pages++;
+        if (clean && !win_fb.refresh_force && win_fb.chunks_wr != wr0) {
+            win_fb.refresh_fixes += win_fb.chunks_wr - wr0;
+            win_fb.refresh_fixpages++;
+        }
+        if (get_ticks() - t0 >= win_fb.refresh_slice)
+            break;
+    }
+    if (win_fb.refresh_next >= win_fb.pages) {
+        win_fb.refresh_active = false;
+        win_fb.refreshes++;
+        win_fb.last_refresh = get_ticks();
+    }
+    sysop("dsb st");
+    return get_ticks() - t0;
+}
+
 /* At the tail of hv_tick (before the storage tick). Single-vCPU only. */
+static void hv_win_fb_tick_passes(void);
+
 void hv_win_fb_tick(void)
 {
     if (win_fb.state != 2 || (win_fb.flags & FB_F_NO_COPY))
         return;
+    hv_win_fb_tick_passes();
+    if (win_fb.refresh_ticks) {
+        u64 used = fb_refresh_step(get_ticks());
+        if (used) {
+            win_fb.busy += used;
+            win_fb.last_end = get_ticks(); /* the gap accounting starts after the refresh work */
+        }
+    }
+}
+
+static void hv_win_fb_tick_passes(void)
+{
     u64 start = get_ticks();
     fb_note_gap(start);
     bool fault = win_fb.fault_this_tick;
@@ -835,6 +920,9 @@ u64 hv_win_fb_stat(u64 idx)
         [ST_BENCH_RD32] = win_fb.bench[5], [ST_BENCH_RD64] = win_fb.bench[6],
         [ST_BENCH_DIFF] = win_fb.bench[7], [ST_DIFF_ON] = win_fb.copy != 0,
         [ST_BACKLOG_MAX] = r->backlog, [ST_TICK_MAX] = r->tick, [ST_PRINT] = win_fb.print_sum,
+        [ST_REFRESHES] = win_fb.refreshes, [ST_REFRESH_FIXES] = win_fb.refresh_fixes,
+        [ST_REFRESH_PAGES] = win_fb.refresh_pages, [ST_WP_REFAIL] = win_fb.wp_refail,
+        [ST_REFRESH_FIXPAGES] = win_fb.refresh_fixpages,
     };
     for (unsigned int i = 0; i < FB_HIST; i++)
         v[ST_HIST0 + i] = win_fb.hist[i];

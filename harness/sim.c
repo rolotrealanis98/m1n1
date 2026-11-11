@@ -569,6 +569,64 @@ static void test_random_dirty(u64 flags, u64 tuning, double pf)
     teardown();
 }
 
+#ifdef NEW
+/*
+ * nightly-6-perf background refresh (tuning bits 47:44). Stores that reach the shadow WITHOUT a
+ * stage-2 fault (written straight into shadow memory, bypassing guest_store's TLB/fault model) are
+ * a missed update: with the refresh they must reach the scanout within one period plus one round
+ * and be counted in stat 79; without it (negative control) they must stay stale. A corrupted
+ * scanout (written behind the converter's back) must be repaired by the forced round (every 4th).
+ */
+static void run_for(double ns)
+{
+    double end = sim_now + ns;
+    while (sim_now < end) {
+        sim_now = next_tick;
+        do_tick();
+    }
+}
+
+static void test_refresh(u64 tuning, int refresh_on)
+{
+    int r = setup(1000, 600, 4160, 2, tuning);
+    CHECK(r == 1, "refresh setup %d", r);
+    if (r != 1) return;
+    run_until_idle(5e9);
+    for (int ev = 0; ev < 200; ev++) /* ordinary tracked drawing first */
+        guest_rect(rnd() % GW, rnd() % GH, 1 + rnd() % 100, 1 + rnd() % 50, rnd());
+    run_until_idle(10e9);
+    u64 fixes0 = hv_win_fb_stat(79);
+    for (u32 y = 0; y < 300; y++) /* the top half changes without any fault */
+        for (u32 x = 0; x < GW; x++)
+            *(u32 *)(shadow + (u64)y * GS + x * 4) = 0x00101010u ^ rnd();
+    run_for(3e9); /* period 0.5..1 s + a round */
+    u64 bad = verify_full(), fixes = hv_win_fb_stat(79) - fixes0;
+    if (refresh_on) {
+        CHECK(bad == 0, "refresh %#llx: %llu stale pixels after missed stores", (unsigned long long)tuning,
+              (unsigned long long)bad);
+        CHECK(fixes > 0 && hv_win_fb_stat(82) > 0, "refresh: missed updates counted (%llu chunks)",
+              (unsigned long long)fixes);
+        /* the scanout corrupted behind the converter's back: only a forced round repairs it */
+        for (u32 y = 400; y < 410; y++)
+            for (u32 x = 0; x < W * 4; x += 4)
+                *(u32 *)(native + (u64)y * S + x) = 0xdeadbeefu;
+        run_for(12e9); /* > 4 rounds */
+        u64 bad2 = verify_full();
+        CHECK(bad2 == 0, "refresh: %llu bad pixels after a corrupted scanout and 4+ rounds", (unsigned long long)bad2);
+        CHECK(hv_win_fb_stat(78) >= 4, "refresh rounds %llu", (unsigned long long)hv_win_fb_stat(78));
+        printf("refresh tuning=%#llx: missed-store pixels healed (fixes %llu chunks, %llu pages), rounds %llu, "
+               "scanout corruption repaired, stale %llu/%llu\n", (unsigned long long)tuning,
+               (unsigned long long)fixes, (unsigned long long)hv_win_fb_stat(82),
+               (unsigned long long)hv_win_fb_stat(78), (unsigned long long)bad, (unsigned long long)bad2);
+    } else {
+        CHECK(bad > 0 && fixes == 0 && hv_win_fb_stat(78) == 0,
+              "negative control: without refresh the missed stores must stay stale (%llu)", (unsigned long long)bad);
+        printf("refresh off (control): %llu stale pixels stay stale, as the old converter\n", (unsigned long long)bad);
+    }
+    teardown();
+}
+#endif
+
 static void test_scale2_checker(void)
 {
     int r = setup(3456, 2234, 13824, 4 | 2, 0);
@@ -1040,6 +1098,11 @@ int main(int argc, char **argv)
         CHILD(test_random_dirty(2, 1ULL << 43, 0.5));
         CHILD(test_random_dirty(0, 0, 0));                       /* sweep + elision */
         CHILD(test_stat_reset());
+        CHILD(test_refresh(1ULL << 44, 1));                       /* nightly-6-perf: refresh every 0.5 s */
+        CHILD(test_refresh(2ULL << 44, 1));                       /* every 1 s */
+        CHILD(test_refresh(0, 0));                                /* control: off = stale stays */
+        CHILD(test_random_dirty(2, 1ULL << 44, 0.5));            /* refresh during random drawing */
+        CHILD(test_random_dirty(6, (1ULL << 44) | (1ULL << 43), 0.5));
 #endif
         CHILD(test_scale2_checker());
 #endif
@@ -1060,6 +1123,14 @@ int main(int argc, char **argv)
         CHILD(test_strict_random("random, all, pf 0.5", 2, 1ULL << 40, 0.5));
         CHILD(test_strict_random("random, merge-ahead, pf 0.5", 2, 1ULL << 43, 0.5));
         CHILD(test_strict_random("random, no elision, pf 0.5", 6, 1ULL << 42, 0.5));
+        CHILD(test_strict_random("random, refresh 0.5 s, pf 0.5", 2, 1ULL << 44, 0.5)); /* nightly-6-perf */
+        printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+        return failures != 0;
+    }
+    if (!strcmp(what, "refresh")) { /* nightly-6-perf: background refresh only (run.sh mutants) */
+        rd_ns_per_b = 1.4; wr_ns_per_b = 0.1;
+        CHILD(test_refresh(1ULL << 44, 1));
+        CHILD(test_refresh(0, 0));
         printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
         return failures != 0;
     }
@@ -1087,6 +1158,12 @@ int main(int argc, char **argv)
         return failures != 0;
     }
 #ifdef NEW
+    if (!strcmp(what, "reject-refresh-sweep")) { /* nightly-6-perf: refresh bits without DIRTY */
+        int r = setup(3456, 2234, 13824, 0, 1ULL << 44);
+        CHECK(r == -4, "refresh without dirty tracking accepted (%d)", r);
+        printf("reject refresh in sweep mode: %d\n", r);
+        return failures != 0;
+    }
     if (!strcmp(what, "reject-tuning2")) { /* reserved tuning bits and tlbi mode 3 */
         int r = setup(3456, 2234, 13824, 2, argc > 2 ? strtoull(argv[2], NULL, 0) : (3ULL << 40));
         CHECK(r == -4, "bad tuning accepted (%d)", r);
