@@ -25,6 +25,7 @@ pre=r'''
 struct exc_info {int unused;};
 static struct {unsigned nr_vcpus;int vcpu_cpu[1];} hv_win={1,{0}};
 static int boot_cpu_idx;
+static int smp_id(void){return 0;} /* smp-storage: storage lock owner */
 static bool gic=true,spi_free=true;
 static u32 uart_irq=64;
 static unsigned checks,hook_calls,begin_calls,end_calls,span_calls;

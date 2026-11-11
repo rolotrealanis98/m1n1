@@ -652,7 +652,12 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             reply->retval = hv_win_storage_native_stat(request->args[0]);
             break;
         case P_HV_WIN_STORAGE_NATIVE_CANARY:
+            hv_storage_lock_take(); /* smp-storage */
             reply->retval = ans_ro_run_canary() ? 0 : (u64)-1;
+            hv_storage_lock_release();
+            break;
+        case P_HV_WIN_STORAGE_MAX_CPUS:
+            reply->retval = hv_win_storage_max_cpus_set(request->args[0]);
             break;
         case P_HV_WIN_STORAGE_NATIVE_QUIESCE:
             reply->retval = hv_win_storage_native_quiesce();

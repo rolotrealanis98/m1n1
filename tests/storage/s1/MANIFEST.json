@@ -35,8 +35,8 @@
     "upstream/hv_pci.c": "9ab55c0505a07957e6f87fc4d6a91998eb39d66bc2cd85ecc577152acb7bf58f"
   },
   "s0_dependencies": {
-    "MANIFEST.json": "e78bf547a06cbebae15e581a91041e659eedf2debc1b7bb47aa1932fb9be0df3",
-    "src/hv_nvme_queue.c": "3302c4a6978d3a36824d0b9d204ffe2442cb683de095d54c9894246163515fd0",
+    "MANIFEST.json": "6bc6be6093d983ba00d7c1d2a75affbe7dada88d0a923487063845bda5201a42",
+    "src/hv_nvme_queue.c": "8cd9dbd97a96f7f0a671f438133aaf18196886690e3484bf4a3492fe59c2e55a",
     "src/hv_nvme_queue.h": "ad540114c7df5664e53633d9fc05c0d57525910fc08cc397cb4a15d962846534",
     "src/ram_disk.c": "b2e96d255d4691d7e27407d6f9f48a4ad3e5ac5b5c6f136288f09f023ad60078",
     "src/ram_disk.h": "d42a06974a23e6f680ed99e612983f7f8daa53953596078d2a512d896578b66e",

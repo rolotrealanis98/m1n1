@@ -11,16 +11,21 @@ bool s1n_test_exception;
 #endif
 /* r4.8: the storage lease's guest-RAM containment query (hv_win_storage.c; host tests provide a stub). */
 bool hv_win_storage_guest_ram_contains(u64 addr, u64 size);
+bool hv_win_storage_smp_context(void); /* smp-storage */
+#ifndef S1N_TEST_SMP_CONTEXT
+#define S1N_TEST_SMP_CONTEXT() false /* host tests: the stress harness defines it */
+#endif
 
 static bool locked, prep_used, start_used;
 static u64 refusals;
 static u64 exc_ctx_addr, exc_ctx_size;
 bool s1n_storage_context(void)
 {
+/* smp-storage: or any CPU holding the storage lock when more than one vCPU is admitted (hv_win_storage.c) */
 #ifdef ANS_RO_HOST_TEST
-    return s1n_test_cpu == 0 && !s1n_test_exception;
+    return (s1n_test_cpu == 0 || S1N_TEST_SMP_CONTEXT()) && !s1n_test_exception;
 #else
-    return smp_id() == boot_cpu_idx &&
+    return (smp_id() == boot_cpu_idx || hv_win_storage_smp_context()) &&
            !__atomic_load_n(&uartproxy_storage_exceptions, __ATOMIC_ACQUIRE);
 #endif
 }

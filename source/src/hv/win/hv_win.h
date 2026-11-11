@@ -183,6 +183,7 @@ void hv_win_update_virq(bool ptimer_firing, bool vtimer_firing); /* vGIC model, 
 /* smp2d: guest-WFI emulation (hv_exc.c). Trapping is enabled by hv_win_configure when >1 vCPU. */
 bool hv_win_wfi(struct exc_info *ctx);  /* emulate one trapped guest WFI on this vCPU */
 bool hv_win_storage_smp_gate(const char *what);
+s64 hv_win_storage_max_cpus_set(u64 n); /* smp-storage: P_HV_WIN_STORAGE_MAX_CPUS */
 bool hv_win_disk_path_used(void); /* nightly-2: a disk path was admitted or tried this session */ /* u1: false (and a console line) with > 1 vCPU */
 bool hv_win_wfi_trapping(void);         /* true if EL2 is emulating guest WFI */
 void hv_win_wfi_report(void);           /* per-CPU WFI/debug/integrity counters, on guest exit */

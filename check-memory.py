@@ -28,7 +28,7 @@ shim=r'''
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-typedef uint64_t u64; typedef int64_t s64;
+typedef uint64_t u64; typedef int64_t s64; typedef uint32_t u32;
 #define BIT(n) (1UL<<(n))
 #define MASK(n) (BIT(n)-1)
 #define GENMASK(h,l) ((BIT((h)+1-(l))-1)<<(l))
@@ -41,7 +41,12 @@ u64 hv_cpus_in_guest;
 bool hv_started_cpus[MAX_CPUS];
 int boot_cpu_idx=0, fake_cpu;
 u64 fake_daif;
-struct {int nr_vcpus, vcpu_cpu[MAX_CPUS]; bool vgic;} hv_win;
+struct {int nr_vcpus, vcpu_cpu[MAX_CPUS], cpu_vcpu[MAX_CPUS]; bool vgic;} hv_win;
+/* smp-storage: the launcher cap and the storage lock (hv_win_storage.c), faked */
+static u32 fake_cap=1; static bool fake_slock=true;
+static u32 hv_win_storage_max_cpus(void){return fake_cap;}
+static bool hv_win_storage_lock_held_fake(void){return fake_slock;}
+#define hv_storage_lock_held hv_win_storage_lock_held_fake
 static int smp_id(void){return fake_cpu;}
 static bool hv_win_vgic_enabled(void){return hv_win.vgic;}
 #define mrs(x) fake_daif
@@ -70,6 +75,7 @@ static void setup(void){
  memset(&mem,0,sizeof(mem));memset(hv_started_cpus,0,sizeof(hv_started_cpus));
  hv_cpus_in_guest=0;fake_cpu=boot_cpu_idx=0;fake_daif=0xc0;
  hv_win.nr_vcpus=1;hv_win.vcpu_cpu[0]=0;hv_win.vgic=true;bhl=(spinlock_t){0,1};
+ for(int i=0;i<MAX_CPUS;i++)hv_win.cpu_vcpu[i]=i?-1:0;fake_cap=1;fake_slock=true; /* smp-storage */
  ram[0]=(struct hv_sm_range){IPA,0x2000000};ram[1]=(struct hv_sm_range){IPA+0x3000000,0x4000};
  protect[0]=(struct hv_sm_range){IPA+0x100000,0x4000};
  protect[1]=(struct hv_sm_range){IPA+0x110000,17};
@@ -142,6 +148,33 @@ int main(void){
  for(int where=0;where<3;where++)for(int scenario=0;scenario<10;scenario++){
   registered();if(where==0)CHECK(hv_storage_mem_end(&mem));
   switch(scenario){case 0:bhl.lock=-1;break;case 1:bhl.count=0;break;case 2:hv_cpus_in_guest=1;break;case 3:fake_daif&=~BIT(7);break;case 4:fake_daif&=~BIT(6);break;case 5:hv_started_cpus[1]=true;break;case 6:hv_started_cpus[0]=false;break;case 7:hv_win.nr_vcpus=2;break;case 8:fake_cpu=1;break;case 9:hv_win.vcpu_cpu[0]=1;break;}
+  CHECK(where==0?!hv_storage_mem_begin(&mem,55):where==1?!hv_storage_guest_span(&mem,IPA,1,true):!hv_storage_mem_end(&mem));CHECK(mem.state==HV_SM_DEAD);
+ }
+
+/* smp-storage: cap 1 is the r4.14 lease (above, unchanged). With cap > 1 a CPU hosting one of the admitted
+  * vCPUs may dispatch while other vCPUs run, holding bhl and the storage lock with IRQ/FIQ masked. */
+#define SMP2() do{fake_cap=2;hv_win.nr_vcpus=2;hv_win.vcpu_cpu[1]=1;hv_win.cpu_vcpu[1]=1;}while(0)
+ setup();SMP2();CHECK(hv_storage_mem_register(&mem,&cfg)); /* PREP: boot CPU, nothing started */
+ hv_started_cpus[0]=hv_started_cpus[1]=true;hv_cpus_in_guest=1;  /* vCPU 0 in the guest */
+ fake_cpu=1;bhl=(spinlock_t){1,1};CHECK(hv_storage_mem_begin(&mem,55));
+ CHECK(hv_storage_guest_span(&mem,IPA+0x4000,4096,false)==(void*)(IPA+0x4000));CHECK(hv_storage_mem_end(&mem));
+ fake_cpu=0;bhl=(spinlock_t){0,1};hv_cpus_in_guest=2;CHECK(hv_storage_mem_begin(&mem,55));CHECK(hv_storage_mem_end(&mem));
+ CHECK(mem.state==HV_SM_READY);
+ setup();SMP2();hv_win.nr_vcpus=1;CHECK(hv_storage_mem_register(&mem,&cfg));hv_started_cpus[0]=true;CHECK(hv_storage_mem_begin(&mem,55));CHECK(hv_storage_mem_end(&mem));
+ /* registration still boot CPU, before any start, nr_vcpus <= cap */
+ for(int scenario=0;scenario<4;scenario++){
+  setup();SMP2();switch(scenario){case 0:hv_win.nr_vcpus=3;break;case 1:fake_cpu=1;bhl=(spinlock_t){1,1};break;case 2:hv_started_cpus[1]=true;break;case 3:hv_cpus_in_guest=2;break;}
+  CHECK(!hv_storage_mem_register(&mem,&cfg));CHECK(mem.state==HV_SM_DEAD);
+ }
+ for(int where=0;where<3;where++)for(int scenario=0;scenario<12;scenario++){
+  setup();SMP2();CHECK(hv_storage_mem_register(&mem,&cfg));hv_started_cpus[0]=hv_started_cpus[1]=true;hv_cpus_in_guest=1;
+  fake_cpu=1;bhl=(spinlock_t){1,1};CHECK(hv_storage_mem_begin(&mem,55));if(where==0)CHECK(hv_storage_mem_end(&mem));
+  switch(scenario){case 0:fake_cpu=2;bhl=(spinlock_t){2,1};break;     /* a CPU that hosts no vCPU */
+   case 1:bhl.lock=0;break;case 2:bhl.count=0;break;case 3:fake_slock=false;break;
+   case 4:fake_daif&=~BIT(7);break;case 5:fake_daif&=~BIT(6);break;case 6:hv_win.nr_vcpus=3;break;
+   case 7:hv_win.vgic=false;break;case 8:hv_win.vcpu_cpu[1]=3;break;case 9:hv_win.cpu_vcpu[1]=2;break;
+   case 10:fake_cap=1;break;   /* cap 1: back to the r4.14 lease, which refuses vCPU 1 */
+   case 11:hv_win.cpu_vcpu[1]=-1;break;}
   CHECK(where==0?!hv_storage_mem_begin(&mem,55):where==1?!hv_storage_guest_span(&mem,IPA,1,true):!hv_storage_mem_end(&mem));CHECK(mem.state==HV_SM_DEAD);
  }
 

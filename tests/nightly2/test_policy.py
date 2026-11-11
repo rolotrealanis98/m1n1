@@ -75,7 +75,8 @@ check(b.index('hv_win_storage_native_stat(0) & 6') < b.index('started = true') a
 hw = (S / 'hv/win/hv_win.c').read_text()
 g = body(hw, 'bool hv_win_storage_smp_gate(const char *what)')
 t = g.index('u1_storage_touched = true')
-for c in ('hv_win_smcp_actions_armed()', 'hv_win_m5wn_attempted()', 'hv_win_n1_touched()', 'hv_win.nr_vcpus > 1'):
+for c in ('hv_win_smcp_actions_armed()', 'hv_win_m5wn_attempted()', 'hv_win_n1_touched()',
+          'hv_win.nr_vcpus > hv_win_storage_max_cpus()'):  # smp-storage: was > 1 (cap default 1)
     check(g.find(c) >= 0 and g.index(c) < t, 'storage gate refuses before admitting: ' + c)
 
 # F3: the SMCP mailbox send on the tick path never blocks

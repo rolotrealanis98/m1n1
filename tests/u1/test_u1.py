@@ -29,13 +29,14 @@ for p in list((S / 'hv/win/s1').glob('*')) + list((S / 'hv/win').glob('hv_win_st
 w = (S / 'hv/win/hv_win.c').read_text()
 a = w.index('static bool u1_storage_touched;'); b = w.index('/* smp2d: EL2 is emulating the guest', a)
 gate = w[a:b]
-c = w.index('    if (nr_vcpus > 1 && u1_storage_touched) {'); d = w.index('    }\n', c) + 6
+# smp-storage: the CONFIGURE check compares with the storage cap (was > 1)
+c = w.index('    if (nr_vcpus > hv_win_storage_max_cpus() && u1_storage_touched) {'); d = w.index('    }\n', c) + 6
 cfg = w[c:d]
 code = r'''
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
-typedef uint32_t u32; typedef int64_t s64;
+typedef uint32_t u32; typedef int64_t s64; typedef uint64_t u64;
 static struct { u32 nr_vcpus; } hv_win;
 static int lines;
 static bool n1;                                  /* nightly: N1 probe/bring-up ran */
@@ -47,6 +48,12 @@ static bool hv_win_m5wn_attempted(void) { return m5wn_cfg; }
 static const void *hv_win_storage_model(bool *a, bool *r) { *a = s1_attempted; *r = false; return 0; }
 static unsigned long long hv_win_storage_native_stat(unsigned long long i) { return i ? 0 : native_stat0; }
 #define printf(...) (lines++, fprintf(stderr, __VA_ARGS__))
+/* smp-storage: the launcher cap (hv_win_storage.c: once, before PREP, n >= 1) and guest start */
+#define MAX_CPUS 24
+static bool hv_started_cpus[MAX_CPUS];
+static u32 cap = 1;
+static u32 hv_win_storage_max_cpus(void) { return cap; }
+static bool hv_win_storage_set_max_cpus(u32 n) { if (s1_attempted || cap != 1 || n < 1) return false; cap = n; return true; }
 ''' + gate + r'''
 static int configure(long nr_vcpus) {
 ''' + cfg + r'''
@@ -80,6 +87,21 @@ int main(void) {
     native_stat0 = 2; bad |= !hv_win_disk_path_used(); native_stat0 = 4; bad |= !hv_win_disk_path_used();
     native_stat0 = 0; s1_attempted = true; bad |= !hv_win_disk_path_used(); s1_attempted = false;
     bad |= !hv_win_storage_smp_gate("t") || !hv_win_disk_path_used();    /* admitted -> used */
+    /* smp-storage: P_HV_WIN_STORAGE_MAX_CPUS raises the gate's limit; refused once a disk path was touched,
+     * after a vCPU started, out of range, or a second time. The default (cap 1) is everything above. */
+    u1_storage_touched = false; native_stat0 = 0; s1_attempted = false; cap = 1;
+    l = lines; bad |= hv_win_storage_max_cpus_set(0) != -1; bad |= hv_win_storage_max_cpus_set(25) != -1;
+    hv_started_cpus[3] = true; bad |= hv_win_storage_max_cpus_set(2) != -1; hv_started_cpus[3] = false;
+    native_stat0 = 4; bad |= hv_win_storage_max_cpus_set(2) != -1; native_stat0 = 0;
+    bad |= cap != 1 || lines != l + 4;
+    bad |= hv_win_storage_max_cpus_set(2) != 0 || cap != 2;
+    bad |= hv_win_storage_max_cpus_set(6) != -1 || cap != 2;            /* once */
+    hv_win.nr_vcpus = 3; bad |= hv_win_storage_smp_gate("t") != false; bad |= u1_storage_touched;
+    hv_win.nr_vcpus = 2; bad |= hv_win_storage_smp_gate("t") != true; bad |= !u1_storage_touched;
+    bad |= hv_win_storage_max_cpus_set(6) != -1;                          /* storage touched */
+    bad |= configure(3) != -1; bad |= configure(2) != 0;                  /* touched: up to the cap only */
+    cap = 1; u1_storage_touched = false; native_stat0 = 0;
+    bad |= hv_win_storage_max_cpus_set(18) != 0; hv_win.nr_vcpus = 18; bad |= hv_win_storage_smp_gate("t") != true;
     printf("gate harness %s\n", bad ? "FAILED" : "passed");
     return bad;
 }

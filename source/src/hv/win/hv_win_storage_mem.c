@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "hv_win_storage_mem.h"
+#include "hv_win_storage.h"
 #include "hv_win.h"
 #include "hv.h"
 #include "cpu_regs.h"
@@ -39,13 +40,30 @@ static bool sm_overlap(struct hv_sm_range a, struct hv_sm_range b)
 
 static bool sm_single_cpu(int cpu)
 {
-    return cpu >= 0 && cpu < MAX_CPUS && cpu == boot_cpu_idx &&
-           hv_win_vgic_enabled() && hv_win.nr_vcpus == 1 && hv_win.vcpu_cpu[0] == cpu;
+    /* smp-storage: 1..cap vCPUs, cap 1 (default) = the r4.14 nr_vcpus == 1 condition */
+    return cpu >= 0 && cpu < MAX_CPUS && cpu == boot_cpu_idx && hv_win_vgic_enabled() &&
+           (u32)hv_win.nr_vcpus >= 1 &&
+           (u32)hv_win.nr_vcpus <= hv_win_storage_max_cpus() && hv_win.vcpu_cpu[0] == cpu;
+}
+
+/* smp-storage (cap > 1): the dispatching CPU hosts one of the admitted vCPUs and holds bhl and the storage
+ * lock with IRQ/FIQ masked. Other vCPUs may run: every guest structure is copied once into resident memory
+ * before it is validated or used, and stage 2 changes only under bhl (SMP-STORAGE-DESIGN.md). */
+static bool sm_smp_dispatch_context(int cpu)
+{
+    int v = (cpu >= 0 && cpu < MAX_CPUS) ? hv_win.cpu_vcpu[cpu] : -1;
+    return v >= 0 && v < MAX_CPUS && hv_win_vgic_enabled() && (u32)hv_win.nr_vcpus >= 1 &&
+           (u32)hv_win.nr_vcpus <= hv_win_storage_max_cpus() && (u32)v < (u32)hv_win.nr_vcpus &&
+           hv_win.vcpu_cpu[v] == cpu && __atomic_load_n(&bhl.lock, __ATOMIC_ACQUIRE) == cpu &&
+           bhl.count > 0 && hv_storage_lock_held() &&
+           (mrs(DAIF) & (BIT(7) | BIT(6))) == (BIT(7) | BIT(6));
 }
 
 static bool sm_dispatch_context(const struct hv_storage_mem *m)
 {
     int cpu = smp_id();
+    if (hv_win_storage_max_cpus() > 1)
+        return sm_smp_dispatch_context(cpu);
     if (cpu != m->owner_cpu || !sm_single_cpu(cpu) ||
         __atomic_load_n(&bhl.lock, __ATOMIC_ACQUIRE) != cpu || bhl.count <= 0 ||
         __atomic_load_n(&hv_cpus_in_guest, __ATOMIC_ACQUIRE) ||

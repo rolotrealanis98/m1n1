@@ -13,6 +13,8 @@ code='''#include <assert.h>
 #include "proxy.h"
 int cpu,boot_cpu_idx;u32 uartproxy_storage_exceptions;
 bool hv_win_storage_guest_ram_contains(u64 a,u64 n){(void)a;(void)n;return false;}
+static bool smp_ctx; /* smp-storage: hv_win_storage.c (cap > 1 and the storage lock held by this CPU) */
+bool hv_win_storage_smp_context(void){return smp_ctx;}
 enum {START_BOOT,START_EXCEPTION,START_EXCEPTION_LOWER,START_HV};
 struct exc_info {u64 regs[46];};
 /* r4.9: r4.8 uartproxy.c brackets the session with start->info (s1n_link_exc_ctx); stub carries it */
@@ -31,6 +33,10 @@ static int uartproxy_run_inner(struct uartproxy_msg_start *s) {
 int main(void){
  s1n_link_lock();assert(s1n_storage_context());
  cpu=1;assert(!s1n_storage_context());assert(!s1n_link_proxy(P_HV_WIN_STORAGE_PREP,false));cpu=0;
+ /* smp-storage: a secondary CPU passes only with the SMP context, never inside a host exception session */
+ cpu=3;smp_ctx=true;assert(s1n_storage_context());
+ uartproxy_storage_exceptions=1;assert(!s1n_storage_context());uartproxy_storage_exceptions=0;
+ smp_ctx=false;assert(!s1n_storage_context());cpu=0;assert(s1n_storage_context());
  for(unsigned reason=0;reason<4;reason++)for(code=-1;code<3;code++){
   struct uartproxy_msg_start s={reason,0,0};assert(uartproxy_run(&s)==code);assert(!uartproxy_storage_exceptions);assert(s1n_storage_context());
  }
