@@ -4,6 +4,9 @@ static int fails, checks;
 static void reset_world(void)
 {
     memset(&sess, 0, sizeof(sess));
+    memset(&pw, 0, sizeof(pw));
+    memset(hv_cpu_rec, 0, sizeof(hv_cpu_rec));
+    wdt_kicks = wdt_sets = hang_reports = 0; wdt_alarm = 0; wdt_old = 3600000000u;
     memset(hv_started_cpus, 0, sizeof(hv_started_cpus));
     hv_win.exit_reason = HV_WIN_EXIT_NONE;
     nexits = resets = final_lines = 0;
@@ -64,24 +67,51 @@ int main(void)
     now_ticks += 600 * freq; hv_win_session_tick();
     CHECK(nexits == 0);
 
-    /* 3. guest exit (SYSTEM_OFF/RESET) with the dead-man armed: the host collects if it talks within 30 s ... */
-    reset_world();
-    hv_win_session_heartbeat(120);
-    hv_win.exit_reason = HV_WIN_EXIT_SYSTEM_RESET; guest_stops();
-    host_bytes = 1; host_bytes_at = now_ticks + 2 * freq;
-    CHECK(run_after_exit() == 0 && resets == 0);
-    /* ... and the resident resets by itself if nobody does */
+    /* 3. nightly-7b (changed from nightly-7, which waited 30 s here and so reset before the launcher could read the
+     * P_HV_START reply): a guest exit with the dead-man armed returns at once and leaves the SoC watchdog at 30 s
+     * (every host request pets it; without a host it resets the machine) */
     reset_world();
     hv_win_session_heartbeat(120);
     hv_win.exit_reason = HV_WIN_EXIT_SYSTEM_RESET; guest_stops();
     u64 t0 = now_ticks;
-    CHECK(run_after_exit() == 1 && resets == 1 && strstr(lastline, "guest exit"));
-    CHECK(now_ticks - t0 >= 30 * freq && now_ticks - t0 < 31 * freq);
+    CHECK(run_after_exit() == 0 && resets == 0 && now_ticks == t0);
+    CHECK(wdt_sets == 1 && wdt_alarm == 30u * 24000000u);
+    /* ... with the progress watchdog armed, its alarm is kept for the collection */
+    reset_world();
+    CHECK(hv_win_progress_wdt_arm(20) == 0);
+    hv_win.exit_reason = HV_WIN_EXIT_SYSTEM_OFF; guest_stops();
+    CHECK(run_after_exit() == 0 && resets == 0 && wdt_alarm == 20u * 24000000u && !pw.on);
     /* guest exit without the dead-man armed: unchanged (the host collects; no wait, no reset) */
     reset_world();
     hv_win.exit_reason = HV_WIN_EXIT_SYSTEM_OFF; guest_stops();
     t0 = now_ticks;
     CHECK(run_after_exit() == 0 && resets == 0 && now_ticks == t0);
+
+    /* 4. nightly-7b progress watchdog: range; applied at the first tick; pets only when every other started CPU took
+     * a timer FIQ in the last second; reports the stuck CPU; off when stage 1 left no watchdog armed */
+    reset_world();
+    CHECK(hv_win_progress_wdt_arm(4) == -1 && hv_win_progress_wdt_arm(121) == -1 && !pw.on);
+    CHECK(!hv_win_progress_wdt_tick() && wdt_kicks == 0);           /* not armed: hv_tick pets as before */
+    CHECK(hv_win_progress_wdt_arm(20) == 0 && wdt_sets == 0);       /* deferred to the guest's first tick */
+    CHECK(hv_win_progress_wdt_tick() && wdt_sets == 1 && wdt_alarm == 20u * 24000000u && wdt_kicks == 1);
+    for (int s = 0; s < 10; s++) {                                  /* all CPUs advance: one pet per second */
+        for (int ms = 0; ms < 1000; ms++) {
+            now_ticks += freq / 1000;
+            hv_cpu_rec[0].heartbeat++; hv_cpu_rec[12].heartbeat++;
+            hv_win_progress_wdt_tick();
+        }
+    }
+    CHECK(wdt_kicks == 1 + 10 && hang_reports == 0);
+    for (int s = 0; s < 10; s++) {                                  /* CPU 12 stops taking FIQs: no pet, reported */
+        for (int ms = 0; ms < 1000; ms++) {
+            now_ticks += freq / 1000;
+            hv_cpu_rec[0].heartbeat++;
+            hv_win_progress_wdt_tick();
+        }
+    }
+    CHECK(wdt_kicks <= 1 + 10 + 1 && hang_reports >= 2 && hang_cpu == 12);
+    reset_world(); wdt_old = 0;                                     /* no watchdog left armed by stage 1 */
+    CHECK(hv_win_progress_wdt_arm(20) == 0 && !hv_win_progress_wdt_tick() && !pw.on);
 
     printf("win-session: %d checks, %d failed\n", checks, fails);
     fprintf(stdout, "%s", lastline);

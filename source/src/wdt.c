@@ -22,6 +22,17 @@ void wdt_kick(void)
         write32(wdt_base + WDT_COUNT, 0);
 }
 
+u32 wdt_set_alarm(u32 ticks)
+{
+    if (!wdt_kept || !wdt_base)
+        return 0;
+    u32 old = read32(wdt_base + WDT_ALARM);
+    write32(wdt_base + WDT_COUNT, 0);
+    write32(wdt_base + WDT_ALARM, ticks);
+    write32(wdt_base + WDT_COUNT, 0);
+    return old;
+}
+
 void wdt_disable(void)
 {
     int path[8];

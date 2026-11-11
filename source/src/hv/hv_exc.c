@@ -277,6 +277,8 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
                           void *extra)
 {
     int from_el = FIELD_GET(SPSR_M, ctx->spsr) >> 2;
+    u32 doing_before = hv_cpu_rec[smp_id()].doing; /* nightly-7b */
+    HV_DOING(HV_DO_PROXY);
 
     hv_wdt_breadcrumb('P');
 
@@ -303,6 +305,7 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
     hv_wdt_suspend();
     int ret = uartproxy_run(&start);
     hv_wdt_resume();
+    HV_DOING(doing_before); /* nightly-7b */
 
     switch (ret) {
         case EXC_RET_HANDLED:
@@ -1418,6 +1421,85 @@ static void hv_get_context(struct exc_info *ctx)
 u64 hv_bhl_wait_max[MAX_CPUS], hv_bhl_wait_1ms[MAX_CPUS];
 static u64 hv_bhl_tick_1ms;
 
+/* nightly-7b hang evidence (hv_win.h) */
+struct hv_cpu_rec hv_cpu_rec[MAX_CPUS];
+volatile s64 hv_bhl_holder_cpu = -1;
+volatile u64 hv_bhl_holder_ra;
+static const char *const hv_doing_names[HV_DO_NR] = {
+    "GUEST", "SYNC", "IRQ", "FIQ", "TICK", "PROXY", "PMU_TICK", "FB_TICK", "NVME_TICK", "VGIC_TICK", "STATUS",
+    "SESSION", "EXIT", "BHL_WAIT"};
+const char *hv_doing_name(u32 d)
+{
+    return d < HV_DO_NR ? hv_doing_names[d] : "?";
+}
+#define HV_BHL_WAIT_REPORT_S 2
+
+/* One report of who holds the big lock and what every CPU is doing, by a CPU that waited for bhl more than 2 s (it
+ * does not hold bhl) or by the progress watchdog. Reads per-CPU records only; the console lock is the one lock it
+ * takes (if the holder is stuck holding the console too, the hardware watchdog still resets the machine). */
+void hv_hang_report(const char *why, int cpu)
+{
+    static volatile u64 last;
+    extern bool hv_started_cpus[MAX_CPUS];
+    u64 now = mrs(CNTPCT_EL0), f = mrs(CNTFRQ_EL0);
+    if (last && now - last < 5 * f)
+        return; /* at most one report every 5 s */
+    last = now;
+    s64 h = hv_bhl_holder_cpu;
+    printf("HV/win n7b HANG: %s (cpu %d): bhl owner %ld count %ld | recorded holder cpu %ld ra 0x%lx", why, cpu,
+           (long)__atomic_load_n(&bhl.lock, __ATOMIC_RELAXED), (long)bhl.count, (long)h,
+           (unsigned long)hv_bhl_holder_ra);
+    s64 o = __atomic_load_n(&bhl.lock, __ATOMIC_RELAXED);
+    if (o >= 0 && o < MAX_CPUS) {
+        struct hv_cpu_rec *r = &hv_cpu_rec[o];
+        struct exc_info *c = r->ctx;
+        printf(" | owner doing %s esr 0x%lx bhl-ra 0x%lx", hv_doing_name(r->doing), (unsigned long)r->esr,
+               (unsigned long)r->bhl_ra);
+        if (c)
+            printf(" elr 0x%lx lr 0x%lx far 0x%lx", (unsigned long)c->elr, (unsigned long)c->regs[30],
+                   (unsigned long)c->far);
+    }
+    printf("\nHV/win n7b HANG: cpus (doing/heartbeat)");
+    for (int i = 0; i < MAX_CPUS; i++)
+        if (hv_started_cpus[i])
+            printf(" c%d:%s/%lu", i, hv_doing_name(hv_cpu_rec[i].doing), (unsigned long)hv_cpu_rec[i].heartbeat);
+    printf("\n");
+    iodev_console_flush();
+}
+
+/* bhl at exception entry: the same lock word and count as spin_lock(), plus a report after 2 s of waiting and the
+ * holder recorded (cpu + return address) */
+static void hv_bhl_take(u64 ra)
+{
+    s64 me = smp_id();
+    if (__atomic_load_n(&bhl.lock, __ATOMIC_ACQUIRE) == me) {
+        bhl.count++;
+        return;
+    }
+    u64 t0 = 0;
+    bool told = false;
+    for (u64 n = 0;; n++) {
+        s64 none = -1;
+        if (__atomic_compare_exchange_n(&bhl.lock, &none, me, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            break;
+        if (!n) {
+            t0 = mrs(CNTPCT_EL0);
+            hv_cpu_rec[me].prev = hv_cpu_rec[me].doing;
+            hv_cpu_rec[me].doing = HV_DO_BHL_WAIT;
+        } else if (!told && !(n & 1023) && mrs(CNTPCT_EL0) - t0 > HV_BHL_WAIT_REPORT_S * mrs(CNTFRQ_EL0)) {
+            told = true;
+            hv_hang_report("waited > 2 s for bhl", (int)me);
+        }
+        __asm__ volatile("yield");
+    }
+    if (t0)
+        hv_cpu_rec[me].doing = hv_cpu_rec[me].prev;
+    bhl.count++;
+    hv_bhl_holder_cpu = me;
+    hv_bhl_holder_ra = ra;
+    hv_cpu_rec[me].bhl_ra = ra;
+}
+
 static void hv_exc_entry(void)
 {
     // Enable SErrors in the HV, but only if not already pending
@@ -1426,7 +1508,7 @@ static void hv_exc_entry(void)
 
     __atomic_and_fetch(&hv_cpus_in_guest, ~BIT(smp_id()), __ATOMIC_ACQUIRE);
     u64 bhl_t0 = mrs(CNTPCT_EL0);
-    spin_lock(&bhl);
+    hv_bhl_take((u64)__builtin_return_address(0)); /* nightly-7b: was spin_lock(&bhl) */
     hv_wdt_breadcrumb('X');
     exc_entry_time = mrs(CNTPCT_EL0);
     {
@@ -1448,18 +1530,22 @@ static void hv_exc_entry(void)
 static void hv_exc_exit(struct exc_info *ctx)
 {
     hv_wdt_breadcrumb('x');
+    HV_DOING(HV_DO_EXIT);
     hv_integ_check(ctx); /* smp2d: async-exit frame must be unchanged (bugcheck-0A suspect A) */
     hv_update_fiq();
     hv_sprr_timer_arm();
     /* reenable PMU counters */
     reg_set(SYS_IMP_APL_PMCR0, PERCPU(exc_entry_pmcr0_cnt));
     msr(CNTVOFF_EL2, stolen_time);
+    if (bhl.count == 1)
+        hv_bhl_holder_cpu = -1; /* nightly-7b: released below (the record is advisory) */
     spin_unlock(&bhl);
     hv_maybe_exit();
     __atomic_or_fetch(&hv_cpus_in_guest, BIT(smp_id()), __ATOMIC_ACQUIRE);
 
     hv_set_spsr(ctx->spsr);
     hv_set_elr(ctx->elr);
+    HV_DOING(HV_DO_GUEST); /* nightly-7b */
     msr(SP_EL0, ctx->sp[0]);
     msr(SP_EL1, ctx->sp[1]);
 }
@@ -1845,6 +1931,10 @@ static void hv_exc_fiq_body(struct exc_info *ctx)
  */
 bool hv_exc_sync(struct exc_info *ctx)
 {
+    struct hv_cpu_rec *rec = &hv_cpu_rec[smp_id()]; /* nightly-7b */
+    rec->ctx = ctx;
+    rec->esr = hv_get_esr();
+    rec->doing = HV_DO_SYNC;
     u64 t0 = hv_perf_t0();
     u64 esr = t0 ? hv_get_esr() : 0;
     u32 ec = FIELD_GET(ESR_EC, esr);
@@ -1858,6 +1948,8 @@ bool hv_exc_sync(struct exc_info *ctx)
 
 void hv_exc_irq(struct exc_info *ctx)
 {
+    hv_cpu_rec[smp_id()].ctx = ctx; /* nightly-7b */
+    hv_cpu_rec[smp_id()].doing = HV_DO_IRQ;
     u64 t0 = hv_perf_t0();
     hv_exc_irq_body(ctx);
     hv_perf_t1(&hv_perf_el2_irq, t0);
@@ -1865,6 +1957,10 @@ void hv_exc_irq(struct exc_info *ctx)
 
 void hv_exc_fiq(struct exc_info *ctx)
 {
+    struct hv_cpu_rec *rec = &hv_cpu_rec[smp_id()]; /* nightly-7b: progress evidence on every timer FIQ */
+    rec->ctx = ctx;
+    rec->doing = HV_DO_FIQ;
+    __atomic_add_fetch(&rec->heartbeat, 1, __ATOMIC_RELAXED);
     u64 t0 = hv_perf_t0();
     hv_exc_fiq_body(ctx);
     hv_perf_t1(&hv_perf_el2_fiq, t0);
@@ -2027,6 +2123,20 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
         if (d)
             printf(" %02x:+%lu@0x%lx/0x%lx", ec, (unsigned long)d, hv_trap_ec_pc[ec], hv_trap_ec_far[ec]);
         st_prev_ec[ec] = hv_trap_ec[ec];
+    }
+    {   /* nightly-7b: what every started CPU is doing (those not in the guest), and the bhl holder record */
+        extern bool hv_started_cpus[MAX_CPUS];
+        int nguest = 0;
+        printf(" | do");
+        for (int c = 0; c < MAX_CPUS; c++) {
+            if (!hv_started_cpus[c])
+                continue;
+            if (hv_cpu_rec[c].doing == HV_DO_GUEST)
+                nguest++;
+            else
+                printf(" c%d:%s", c, hv_doing_name(hv_cpu_rec[c].doing));
+        }
+        printf(" guest:%d | bhl-ra 0x%lx", nguest, (unsigned long)hv_bhl_holder_ra);
     }
     printf("\n");
     st_prev_irq = hv_exits_irq; st_prev_fiq = hv_exits_fiq; st_prev_sync = hv_exits_sync;

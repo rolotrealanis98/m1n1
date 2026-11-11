@@ -726,6 +726,9 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WIN_SESSION_STAT:
             reply->retval = hv_win_session_stat(request->args[0]);
             break;
+        case P_HV_WIN_WATCHDOG: /* nightly-7b */
+            reply->retval = hv_win_progress_wdt_arm(request->args[0]);
+            break;
         case P_DCPW_LIVE:
 #if defined(DCPW_LIVE) && DCPW_LIVE
             reply->retval = dcpw_live_run(request->args[0], request->args[1], request->args[2],

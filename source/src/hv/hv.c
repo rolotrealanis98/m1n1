@@ -698,7 +698,11 @@ bool hv_cpu_should_exit(void)
 
 void hv_tick(struct exc_info *ctx)
 {
-    wdt_kick();
+    HV_DOING(HV_DO_TICK); /* nightly-7b */
+    /* nightly-7b: with the progress watchdog armed, the SoC watchdog is petted only when every started CPU made
+     * progress (hv_win_session.c); otherwise as before */
+    if (!hv_win_progress_wdt_tick())
+        wdt_kick();
     hv_wdt_pet();
     iodev_handle_events(uartproxy_iodev);
     if (iodev_can_read(uartproxy_iodev)) {
@@ -711,22 +715,31 @@ void hv_tick(struct exc_info *ctx)
     /* Windows personality only: a no-op unless P_HV_WIN_PL011 configured the emulated PL011 */
     hv_win_pl011_poll();
     /* Windows PMU rewrite: periodic re-arm of pinned pages; a no-op unless it is armed */
+    HV_DOING(HV_DO_PMU_TICK);
     hv_win_pmu_tick();
+    HV_DOING(HV_DO_FB_TICK);
     hv_win_fb_tick();
+    HV_DOING(HV_DO_TICK);
     /* smp2: per-vCPU timer/SGI report every 10 s with N > 1 vCPUs; no-op otherwise */
     hv_win_tick();
     /* r3: native read-only storage keeps the ANS mailbox drained; no-op otherwise */
+    HV_DOING(HV_DO_NVME_TICK);
     hv_win_storage_tick();
+    HV_DOING(HV_DO_TICK);
     hv_win_hidm_tick();
     hv_win_smcp_tick();
     hv_win_n1_tick();
     hv_win_m5wn_tick();
     /* nightly-7: host-heartbeat dead-man; a no-op until the launcher arms it */
+    HV_DOING(HV_DO_SESSION);
     hv_win_session_tick();
     /* r4.12: re-present a declined, still-high NVMe INTx line (vGIC hold-off) */
+    HV_DOING(HV_DO_VGIC_TICK);
     hv_vgic3_tick();
     /* r4.11 diagnostics: periodic guest/trap/vGIC/NVMe status on the console */
+    HV_DOING(HV_DO_STATUS);
     hv_status_tick(ctx);
+    HV_DOING(HV_DO_TICK);
     /* cpuperf-B: Desired -> cluster p-state; no-op unless P_HV_WIN_CPPC_DVFS enabled it */
     hv_win_cppc_tick();
 }

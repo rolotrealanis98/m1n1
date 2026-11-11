@@ -38,6 +38,17 @@ static void hv_win_system_exit(u32 reason)
 }
 static char lastline[512]; static int lines;
 #define printf(...) (lines++, snprintf(lastline, sizeof(lastline), __VA_ARGS__))
+/* nightly-7b: watchdog and per-CPU progress records */
+static u32 wdt_alarm, wdt_old = 3600000000u; static int wdt_kicks, wdt_sets;
+static u32 wdt_set_alarm(u32 ticks) { wdt_sets++; u32 o = wdt_old; if (o) wdt_alarm = ticks; return o; }
+static void wdt_kick(void) { wdt_kicks++; }
+struct hv_cpu_rec { void *ctx; u64 esr, heartbeat, bhl_ra; u32 doing, prev; };
+struct hv_cpu_rec hv_cpu_rec[MAX_CPUS];
+static int hang_reports, hang_cpu;
+static void hv_hang_report(const char *why, int cpu) { (void)why; hang_reports++; hang_cpu = cpu; }
+static int smp_id(void) { return 0; }
+s64 hv_win_progress_wdt_arm(u64 seconds);
+bool hv_win_progress_wdt_tick(void);
 s64 hv_win_session_end(u64 code, u64 flags);
 s64 hv_win_session_heartbeat(u64 seconds);
 void hv_win_session_tick(void);

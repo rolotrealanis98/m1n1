@@ -96,6 +96,29 @@ void hv_win_session_tick(void);
 void hv_win_session_after_exit(void);
 u64 hv_win_session_stat(u64 index);
 
+/* nightly-7b hang evidence: what each CPU is doing (one word, set on entry to each EL2 activity), its last exception
+ * context, a heartbeat bumped on every timer FIQ, and who holds bhl (cpu + return address). Lock-free, per CPU. */
+enum hv_doing {
+    HV_DO_GUEST, HV_DO_SYNC, HV_DO_IRQ, HV_DO_FIQ, HV_DO_TICK, HV_DO_PROXY, HV_DO_PMU_TICK, HV_DO_FB_TICK,
+    HV_DO_NVME_TICK, HV_DO_VGIC_TICK, HV_DO_STATUS, HV_DO_SESSION, HV_DO_EXIT, HV_DO_BHL_WAIT, HV_DO_NR
+};
+struct hv_cpu_rec {
+    void *ctx;     /* struct exc_info * of the exception being handled */
+    u64 esr;
+    u64 heartbeat; /* timer FIQs taken (every CPU, ~1 kHz while it can take interrupts) */
+    u64 bhl_ra;    /* return address of this CPU's last bhl acquisition */
+    u32 doing;     /* enum hv_doing */
+    u32 prev;      /* doing before HV_DO_BHL_WAIT */
+};
+extern struct hv_cpu_rec hv_cpu_rec[];
+extern volatile s64 hv_bhl_holder_cpu;
+extern volatile u64 hv_bhl_holder_ra;
+const char *hv_doing_name(u32 d);
+#define HV_DOING(x) (hv_cpu_rec[smp_id()].doing = (x))
+void hv_hang_report(const char *why, int cpu);
+/* progress watchdog (hv_win_session.c): P_HV_WIN_WATCHDOG(seconds) */
+s64 hv_win_progress_wdt_arm(u64 seconds);
+bool hv_win_progress_wdt_tick(void);
 /* MPIDR affinity fields: Aff3 (bits 39:32) and Aff2..Aff0 (bits 23:0) */
 #define HV_WIN_MPIDR_AFF_MASK 0xff00ffffffUL
 

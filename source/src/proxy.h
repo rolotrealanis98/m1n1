@@ -195,6 +195,7 @@ typedef enum {
     P_HV_WIN_SESSION_END = 0xc5a,    /* nightly-7: (code, flags bit0 reset after) end the running guest like SYSTEM_OFF */
     P_HV_WIN_HEARTBEAT = 0xc5b,      /* nightly-7: (seconds) host heartbeat; arms the dead-man (10..3600 s) */
     P_HV_WIN_SESSION_STAT = 0xc5c,   /* nightly-7: (index) session-end counters */
+    P_HV_WIN_WATCHDOG = 0xc5d,       /* nightly-7b: (seconds) progress-gated SoC watchdog, before guest start */
     P_DCPW_LIVE = 0xc2a, /* dcpw-live-1: live DCP session from the proxy, no guest (stage, nflips, report, flags) */
 
     P_FB_INIT = 0xd00,

@@ -713,6 +713,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_SESSION_END = 0xc5a   # nightly-7
     P_HV_WIN_HEARTBEAT = 0xc5b
     P_HV_WIN_SESSION_STAT = 0xc5c
+    P_HV_WIN_WATCHDOG = 0xc5d    # nightly-7b
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1240,6 +1241,9 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_HEARTBEAT, seconds, signed=True)
     def hv_win_session_stat(self, index):
         return self.request(self.P_HV_WIN_SESSION_STAT, index)
+    def hv_win_watchdog(self, seconds):
+        # nightly-7b: SoC watchdog alarm (5..120 s), petted only while every started CPU makes progress
+        return self.request(self.P_HV_WIN_WATCHDOG, seconds, signed=True)
     def hv_win_caps(self):
         return self.request(self.P_HV_WIN_CAPS)
     def hv_win_configure(self, irq_model, gicd_base, gicr_base, nr_vcpus, flags, cpus=0):
