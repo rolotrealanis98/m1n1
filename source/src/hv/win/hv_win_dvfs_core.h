@@ -22,6 +22,8 @@
  *     PS1 must equal the expected state (else fail: another owner); write only if target differs and
  *     the per-cluster minimum interval has passed (rate limit; later requests coalesce).
  *   - a failure latches for that cluster: no further write (Linux transition_failed).
+ *   - fixed mode (cpuperf-B2, --cpu-dvfs fixed): a cluster configured with pmin == pmax is driven to that one
+ *     p-state without any Desired request (one write, then nothing unless another owner moves it = latch).
  */
 #ifndef HV_WIN_DVFS_CORE_H
 #define HV_WIN_DVFS_CORE_H
@@ -215,8 +217,8 @@ static inline void dvfs_service(struct dvfs_state *s, const struct dvfs_io *io, 
             if (desired[k] > want)
                 want = desired[k];
         }
-        if (!any)
-            continue;
+        if (!any && c->cfg.pmin != c->cfg.pmax)
+            continue; /* follow-Desired cluster without a request: untouched; fixed cluster: always */
         c->target = dvfs_pstate_for(&c->cfg, want);
 
         u64 cmd = io->rd64(io->ctx, c->cfg.base + DVFS_CMD);
