@@ -117,6 +117,11 @@ static struct {
     u64 printed;
     u64 skips_printed;
     struct pmu_log_entry log[HV_WIN_PMU_LOG_SIZE];
+    /* Eight distinct EL0 unknown-exception sites per CPU, for this armed session. */
+    struct {
+        u32 count;
+        u64 pc[8], ttbr0[8];
+    } diag[MAX_CPUS];
 } pmu;
 
 static u64 stuck_elr[MAX_CPUS];
@@ -136,6 +141,11 @@ __attribute__((weak)) void heapblock_pool_info(u64 *base, u64 *size, u64 *used)
 __attribute__((weak)) bool pmu_host_s1(struct pmu_s1 *s)
 {
     (void)s;
+    return false;
+}
+__attribute__((weak)) bool pmu_host_el1_exception(struct exc_info *ctx)
+{
+    (void)ctx;
     return false;
 }
 #endif
@@ -487,6 +497,69 @@ static bool pmu_exec_proof(struct exc_info *ctx, u64 ipa, bool hint)
     return pmu_s1_exec(&s, ctx->far, ctx->spsr, pmu_read_pte, NULL, &walked) && walked == ipa;
 }
 
+/* Observe before handling the EL2 exit (and before a tick re-protects blocks). Absent PMU
+ * accesses can UNDEF directly to EL1, so an EL2 EC=0 hook alone would miss them. Saved EL1
+ * state is sampled, not intercepted: nested exceptions/process switches can overwrite it.
+ * Never change guest state, permissions or cache state here. Call only with the big HV lock. */
+void hv_win_pmu_diag(const struct exc_info *ctx)
+{
+    if (!pmu.armed || pmu.mode16k || pmu.diag[smp_id()].count == 8)
+        return;
+    struct exc_info saved = {0};
+    bool direct = ctx && (ctx->spsr & 0x1f) == 0;
+    if (direct) {
+        saved = *ctx;
+    } else {
+#ifdef PMU_REWRITE_HOST_TEST
+        if (!pmu_host_el1_exception(&saved))
+            return;
+#else
+        saved.elr = mrs(ELR_EL12);
+        saved.spsr = mrs(SPSR_EL12);
+        saved.esr = mrs(ESR_EL12);
+#endif
+    }
+    if ((saved.spsr & 0x1f) != 0 || (saved.esr >> 26) != 0 || !saved.elr || (saved.elr & 3))
+        return;
+    struct pmu_s1 s;
+#ifdef PMU_REWRITE_HOST_TEST
+    if (!pmu_host_s1(&s))
+        return;
+#else
+    s = (struct pmu_s1){.sctlr = mrs(SCTLR_EL12),
+                        .tcr = mrs(TCR_EL12),
+                        .ttbr = {mrs(TTBR0_EL12), mrs(TTBR1_EL12)}};
+#endif
+    u32 cpu = smp_id(), n = pmu.diag[cpu].count;
+    for (u32 i = 0; i < n; i++)
+        if (pmu.diag[cpu].pc[i] == saved.elr && pmu.diag[cpu].ttbr0[i] == s.ttbr[0])
+            return;
+    pmu.diag[cpu].pc[n] = saved.elr;
+    pmu.diag[cpu].ttbr0[n] = s.ttbr[0];
+    pmu.diag[cpu].count++;
+
+    u64 ipa = 0, pa = 0;
+    u32 flips = 0, word = 0, frames = 0, scanned = 0;
+    enum hv_xt_state st = HV_XT_UNTRACKED;
+    bool walked = pmu_s1_exec(&s, saved.elr, saved.spsr, pmu_read_pte, NULL, &ipa);
+    u8 *fr = walked ? pmu_frames(ipa) : NULL;
+    if (fr) {
+        st = hv_xt_get(ipa, &pa, &flips);
+        frames = *fr;
+        scanned = !!(frames & PMU_BS_SCANNED((ipa & (PMU_PAGE - 1)) / PMU_FRAME_SIZE));
+    }
+    bool valid = st != HV_XT_UNTRACKED;
+    if (valid)
+        word = *(const volatile u32 *)(pa + (ipa & (PMU_PAGE - 1)));
+    printf("HV/win: PMU EL0 unknown %s cpu=%u pc=0x%lx esr=0x%lx spsr=0x%lx "
+           "observer=0x%lx walk=%u ipa=0x%lx word_valid=%u word=0x%08x kind=%u "
+           "scanned=%u frames=0x%02x block=%u flips=%u gran=%s "
+           "sctlr=0x%lx tcr=0x%lx ttbr0=0x%lx ttbr1=0x%lx\n",
+           direct ? "direct-el2" : "sampled-el1", cpu, saved.elr, saved.esr, saved.spsr,
+           ctx ? ctx->elr : 0, walked, ipa, valid, word, pmu_rw_classify(word), scanned,
+           frames, st, flips, pmu.mode16k ? "16k" : "4k", s.sctlr, s.tcr, s.ttbr[0], s.ttbr[1]);
+}
+
 /* Scan one proven frame (block in SCANNING). frame = 4 KiB index in the block, pa = block PA. */
 static void pmu_scan_frame(struct exc_info *ctx, u64 block, u64 pa, u32 frame, u8 *fr, bool proven)
 {
@@ -775,6 +848,7 @@ void hv_win_pmu_tick(void)
     if (!pmu.armed)
         return;
 
+    hv_win_pmu_diag(NULL);
     if (pmu.nr_open && ++pmu.close_ticks >= PMU_CLOSE_TICKS)
         pmu_close_open();
 

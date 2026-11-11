@@ -329,6 +329,7 @@ u64 hv_win_pmu_stat(u64 idx);
 bool hv_win_handle_iabort(struct exc_info *ctx);          /* true: re-execute the instruction */
 bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr); /* true: re-execute the access */
 void hv_win_pmu_tick(void);                               /* hv_tick(), under the big HV lock */
+void hv_win_pmu_diag(const struct exc_info *ctx);          /* locked, before exit handling */
 void hv_win_pmu_report(void);                             /* printf summary (guest exit) */
 /* EL2 is about to store into guest RAM for a device (DMA write): re-arm the scan of what the range
  * touches (hv_win_pmu.c). Under the big HV lock, before the copy. Returns pages whose X was revoked. */

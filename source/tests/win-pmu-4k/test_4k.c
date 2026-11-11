@@ -54,6 +54,10 @@ static struct pmu_s1 s1;
 static unsigned long checks;
 static bool at_ok;
 static u64 hpfar;
+static struct exc_info guest_exception;
+static bool have_guest_exception;
+static unsigned diag_lines;
+static char diag_line[1024];
 int host_cpu;
 u64 hv_cpus_in_guest;
 struct hv_win_state hv_win;
@@ -72,8 +76,19 @@ u8 hv_win_pmu_host_frame(u64 ipa);
 
 int host_printf(const char *fmt, ...)
 {
-    (void)fmt;
+    if (strstr(fmt, "HV/win: PMU EL0")) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(diag_line, sizeof(diag_line), fmt, ap);
+        va_end(ap);
+        diag_lines++;
+    }
     return 0;
+}
+bool pmu_host_el1_exception(struct exc_info *ctx)
+{
+    *ctx = guest_exception;
+    return have_guest_exception;
 }
 void host_ic_ialluis(void) {}
 size_t heapblock_remaining(void)
@@ -199,6 +214,9 @@ static struct {
 static void reset(void)
 {
     hv_win_pmu_host_reset();
+    have_guest_exception = false;
+    diag_lines = 0;
+    diag_line[0] = 0;
     memset(&hv_win, 0, sizeof(hv_win));
     hv_win.irq_model = HV_WIN_IRQ_VGIC3;
     hv_win.nr_vcpus = 1;
@@ -862,8 +880,124 @@ static void replay(void)
            n, hazards16);
 }
 
+/* Reconstruct the suspected failure: EL0 enters frame 2, then branches to the PMCCNTR at
+ * +0x50c in unscanned frame 0 without a second stage-2 fault. This is a coverage reproduction,
+ * not a claim that the hardware's unknown VA-to-IPA mapping was the same. */
+static void el0_exception_diagnostics(void)
+{
+    reset();
+    table(31)[0] |= BIT(6);
+    table(31)[2] |= BIT(6);
+    mem[0x50c / 4] = 0xd53b9d08;
+    struct exc_info fetch = {.far = VA + 8192, .elr = VA + 8192, .esr = IESR, .spsr = 0};
+    CHECK(hv_win_handle_iabort(&fetch));
+    CHECK(states[0] == HV_XT_CODE);
+    CHECK(hv_win_pmu_host_frame(BASE + 8192) & PMU_FRAME_SCANNED);
+    CHECK(!(hv_win_pmu_host_frame(BASE) & PMU_FRAME_SCANNED));
+    CHECK(mem[0x50c / 4] == 0xd53b9d08); /* CPU can reach the absent register here */
+    memcpy(ref, mem, sizeof(mem));
+    guest_exception = (struct exc_info){.elr = VA + 0x50c, .spsr = 0, .esr = BIT(25)};
+    have_guest_exception = true; /* saved EL1 state at the next EL2 observation */
+    hv_win_pmu_tick();
+    CHECK(diag_lines == 1);
+    CHECK(strstr(diag_line, "pc=0x40050c") && strstr(diag_line, "word=0xd53b9d08"));
+    CHECK(strstr(diag_line, "ipa=0x10050c") && strstr(diag_line, "scanned=0"));
+    CHECK(strstr(diag_line, "block=3") && strstr(diag_line, "frames=0x84"));
+    CHECK(strstr(diag_line, "walk=1") && strstr(diag_line, "gran=4k"));
+    CHECK(memcmp(mem, ref, sizeof(mem)) == 0); /* diagnostic never repairs or changes memory */
+    for (unsigned i = 0; i < 30; i++)
+        hv_win_pmu_tick();
+    CHECK(diag_lines == 1); /* repeated/stale saved exception is not repeatedly printed */
+    guest_exception.spsr = 5;
+    guest_exception.elr += 4;
+    hv_win_pmu_tick();
+    CHECK(diag_lines == 1); /* only EL0 unknown-instruction exceptions */
+    guest_exception.spsr = 0;
+    guest_exception.esr = IESR;
+    hv_win_pmu_tick();
+    CHECK(diag_lines == 1);
+    guest_exception.esr = BIT(25);
+    for (unsigned i = 0; i < 20; i++) {
+        guest_exception.elr += 4;
+        hv_win_pmu_tick();
+    }
+    CHECK(diag_lines == 8); /* hard session budget, including non-PMU illegal words */
+    host_cpu = 1;
+    hv_win_pmu_tick();
+    CHECK(diag_lines == 9 && strstr(diag_line, "cpu=1"));
+    host_cpu = 0;
+
+    reset();
+    table(31)[0] |= BIT(6) | BIT(54); /* denied translation: report, never dereference */
+    guest_exception = (struct exc_info){.elr = VA + 0x50c, .esr = BIT(25)};
+    have_guest_exception = true;
+    hv_win_pmu_tick();
+    CHECK(diag_lines == 1 && strstr(diag_line, "walk=0"));
+    CHECK(strstr(diag_line, "word_valid=0") && strstr(diag_line, "block=0"));
+    reset();
+    table(31)[0] = (BASE + sizeof(mem)) | 3 | BIT(10) | BIT(7) | BIT(6);
+    have_guest_exception = true;
+    hv_win_pmu_tick();
+    CHECK(diag_lines == 1 && strstr(diag_line, "walk=1"));
+    CHECK(strstr(diag_line, "word_valid=0") && strstr(diag_line, "block=0"));
+
+    /* Exact failing user VA, Windows TCR and a non-page-aligned TTBR0 root. An invalid
+     * TTBR1 proves this walks the user half; no claim about the real hardware's IPA. */
+    reset();
+    u64 user_pc = 0x7ff6ac5f250cUL;
+    table(TABLE0)[256 + ((user_pc >> 39) & 255)] = (BASE + 29 * 4096UL) | 3;
+    table(29)[(user_pc >> 30) & 511] = (BASE + 30 * 4096UL) | 3;
+    table(30)[(user_pc >> 21) & 511] = (BASE + 31 * 4096UL) | 3;
+    table(31)[(user_pc >> 12) & 511] = leaf(0) | BIT(6);
+    s1.ttbr[1] = 0;
+    mem[0x50c / 4] = 0xd53b9d08;
+    guest_exception = (struct exc_info){.elr = user_pc, .esr = BIT(25)};
+    have_guest_exception = true;
+    hv_win_pmu_tick();
+    CHECK(strstr(diag_line, "pc=0x7ff6ac5f250c") && strstr(diag_line, "word=0xd53b9d08"));
+    CHECK(strstr(diag_line, "walk=1") && strstr(diag_line, "block=1"));
+
+    /* A scanned frame and a write-flipped/pinned frame must remain distinguishable. */
+    reset();
+    execute(0);
+    table(31)[0] |= BIT(6);
+    guest_exception = (struct exc_info){.elr = VA + 128, .esr = BIT(25)};
+    have_guest_exception = true;
+    hv_win_pmu_tick();
+    CHECK(strstr(diag_line, "scanned=1") && strstr(diag_line, "word=0xd53be045"));
+    CHECK(strstr(diag_line, "block=3") && strstr(diag_line, "frames=0x81"));
+    reset();
+    for (unsigned i = 0; i < 4; i++) {
+        execute(0);
+        store(4096 + 4, 4, i);
+    }
+    store(128, 4, 0xd53b9d08);
+    table(31)[0] |= BIT(6);
+    guest_exception = (struct exc_info){.elr = VA + 128, .esr = BIT(25)};
+    have_guest_exception = true;
+    hv_win_pmu_tick();
+    CHECK(strstr(diag_line, "scanned=0") && strstr(diag_line, "word=0xd53b9d08"));
+    CHECK(strstr(diag_line, "block=4") && strstr(diag_line, "flips=4"));
+
+    /* Identical physical layout and first fetch in 16 KiB mode covers the sibling. */
+    reset();
+    hv_win_pmu_host_reset();
+    legacy16k = true;
+    mem[0x50c / 4] = 0xd53b9d08;
+    CHECK(hv_win_pmu_set_mode(HV_WIN_PMU_MODE_16K) == 0);
+    CHECK(hv_win_pmu_arm(BASE, sizeof(mem)) == BLOCKS);
+    CHECK(hv_win_handle_iabort(&fetch));
+    CHECK(mem[0x50c / 4] == 0xd53be048);
+    have_guest_exception = true;
+    guest_exception = (struct exc_info){.elr = VA + 0x50c, .esr = BIT(25)};
+    hv_win_pmu_tick();
+    CHECK(diag_lines == 0); /* the new diagnostic is limited to the 4 KiB investigation */
+    legacy16k = false;
+}
+
 int main(void)
 {
+    el0_exception_diagnostics();
     frame_scanner();
     mixed();
     unproven();

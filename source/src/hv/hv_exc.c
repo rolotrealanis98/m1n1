@@ -1598,6 +1598,7 @@ static bool hv_exc_sync_body(struct exc_info *ctx)
 
     hv_exc_entry();
 
+    hv_win_pmu_diag(ctx);
     bool protect_elr = false;
 
     switch (ec) {
