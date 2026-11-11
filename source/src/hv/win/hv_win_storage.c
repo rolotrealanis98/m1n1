@@ -16,6 +16,59 @@ static struct hv_storage_mem memory;
 static bool attempted, ready, frames_reserved;
 static u64 epoch, dispatches, rejections, lease_failures;
 extern char _base[], _end[];
+/* smp-storage (SMP-STORAGE-DESIGN.md): the big storage lock. Every entry into the emulated controller, the
+ * lease and the backend (MMIO hooks, tick, PREP, retire, native select/quiesce, canary) holds it for the whole
+ * synchronous call. Lock order: bhl (hv_exc_entry, before any hook or tick) -> storage -> vgic_lock (irq
+ * callback). Recursive for its owner CPU (retire runs inside a hook). Never released inside a call. */
+static struct { s64 owner; s64 depth; } storage_lock = {-1, 0};
+static u32 storage_max_cpus = 1; /* launcher cap (P_HV_WIN_STORAGE_MAX_CPUS); 1 = the r4.14 disk path */
+void hv_storage_lock_take(void)
+{
+    s64 me = smp_id();
+    if (__atomic_load_n(&storage_lock.owner, __ATOMIC_RELAXED) == me) {
+        storage_lock.depth++;
+        return;
+    }
+    for (;;) {
+        s64 none = -1;
+        if (__atomic_compare_exchange_n(&storage_lock.owner, &none, me, false, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_RELAXED))
+            break;
+#if defined(__aarch64__)
+        __asm__ volatile("yield");
+#endif
+    }
+    storage_lock.depth = 1;
+}
+void hv_storage_lock_release(void)
+{
+    if (__atomic_load_n(&storage_lock.owner, __ATOMIC_RELAXED) != smp_id() || storage_lock.depth <= 0)
+        return; /* not the owner: unreachable (every take/release pair is lexical) */
+    if (!--storage_lock.depth)
+        __atomic_store_n(&storage_lock.owner, -1, __ATOMIC_RELEASE);
+}
+bool hv_storage_lock_held(void)
+{
+    return __atomic_load_n(&storage_lock.owner, __ATOMIC_RELAXED) == smp_id() && storage_lock.depth > 0;
+}
+u32 hv_win_storage_max_cpus(void)
+{
+    return storage_max_cpus;
+}
+/* Once, before PREP; hv_win.c also refuses it after any disk path was touched or a vCPU started. */
+bool hv_win_storage_set_max_cpus(u32 n)
+{
+    if (attempted || storage_max_cpus != 1 || n < 1)
+        return false;
+    storage_max_cpus = n;
+    return true;
+}
+/* The backend may be driven from this CPU on behalf of a vCPU (native_link.c s1n_storage_context): more
+ * than one vCPU admitted and this CPU holds the storage lock. The lease adds the vCPU/bhl/DAIF checks. */
+bool hv_win_storage_smp_context(void)
+{
+    return storage_max_cpus > 1 && hv_storage_lock_held();
+}
 
 static bool contains(u64 base,u64 size,u64 addr,u64 length)
 {
@@ -54,7 +107,14 @@ static void publish(void *opaque)
 static const struct s1_ops ops={
     .guest_span=guest_span,.map=logical_map,.unmap=logical_unmap,.irq=irq,.publish=publish,
 };
+static void storage_retire_locked(void);
 void hv_win_storage_retire(void)
+{
+    hv_storage_lock_take(); /* smp-storage */
+    storage_retire_locked();
+    hv_storage_lock_release();
+}
+static void storage_retire_locked(void)
 {
     /* r3.1 R1: a native backend selected before PREP must still be quiesced. */
     if(!attempted){s1_backend_retire();return;}
@@ -70,7 +130,9 @@ void hv_win_storage_retire(void)
  * r3.1 R1: from native selection on, PREP or not (fixture backend: no poll hook). */
 void hv_win_storage_tick(void)
 {
+    hv_storage_lock_take(); /* smp-storage */
     s1_backend_poll();
+    hv_storage_lock_release();
 }
 bool hv_win_storage_claims_spi(u32 gsiv)
 {
@@ -91,7 +153,16 @@ bool hv_win_storage_guest_ram_contains(u64 addr, u64 size)
     }
     return false;
 }
+static bool access_locked(struct exc_info *ctx,u64 address,u64 *value,bool write,int width);
+/* smp-storage: an MMIO hook may run on any vCPU's CPU (under bhl); the whole access holds the storage lock. */
 static bool access(struct exc_info *ctx,u64 address,u64 *value,bool write,int width)
+{
+    hv_storage_lock_take();
+    bool ok=access_locked(ctx,address,value,write,width);
+    hv_storage_lock_release();
+    return ok;
+}
+static bool access_locked(struct exc_info *ctx,u64 address,u64 *value,bool write,int width)
 {
     (void)ctx;
     dispatches++;
@@ -114,7 +185,15 @@ static bool access(struct exc_info *ctx,u64 address,u64 *value,bool write,int wi
     if(!ok)rejections++;
     return ok;
 }
+static s64 storage_prepare_locked(u64 data,u64 size);
 s64 hv_win_storage_prepare(u64 data,u64 size)
+{
+    hv_storage_lock_take(); /* smp-storage */
+    s64 r=storage_prepare_locked(data,size);
+    hv_storage_lock_release();
+    return r;
+}
+static s64 storage_prepare_locked(u64 data,u64 size)
 {
     if(attempted)return -1;
     attempted=true;
@@ -129,7 +208,7 @@ s64 hv_win_storage_prepare(u64 data,u64 size)
        d->block_size!=4096 || d->reserved0 || d->blocks!=s1_backend_blocks() || !d->blocks || d->reserved1 || !c.epoch ||
        !c.nr_ram || c.nr_ram>HV_SM_MAX_RAM || !c.nr_protected || c.nr_protected>HV_SM_MAX_PROTECTED ||
        size!=sizeof(c)+(u64)(c.nr_ram+c.nr_protected)*16 ||
-       !hv_win_vgic_enabled() || hv_win.nr_vcpus!=1 || hv_win.vcpu_cpu[0]!=boot_cpu_idx ||
+       !hv_win_vgic_enabled() || hv_win.nr_vcpus<1 || hv_win.nr_vcpus>storage_max_cpus || hv_win.vcpu_cpu[0]!=boot_cpu_idx ||
        hv_win_pl011_gsiv()==HV_S1_GSIV || !hv_vgic3_spi_unassigned(HV_S1_GSIV))goto fail;
     if(!contains(c.resident_base,c.resident_size,(u64)_base,(u64)_end-(u64)_base) ||
        !contains(c.resident_base,c.resident_size,(u64)&controller,sizeof(controller)) ||

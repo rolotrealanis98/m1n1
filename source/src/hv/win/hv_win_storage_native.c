@@ -64,7 +64,24 @@ static s64 refuse(void)
     return -1;
 }
 
+static s64 native_select_locked(u64 data, u64 size);
+static s64 native_quiesce_locked(void);
+/* smp-storage: both run under the storage lock (hv_win_storage.c) */
 s64 hv_win_storage_native_select(u64 data, u64 size)
+{
+    hv_storage_lock_take();
+    s64 r = native_select_locked(data, size);
+    hv_storage_lock_release();
+    return r;
+}
+s64 hv_win_storage_native_quiesce(void)
+{
+    hv_storage_lock_take();
+    s64 r = native_quiesce_locked();
+    hv_storage_lock_release();
+    return r;
+}
+static s64 native_select_locked(u64 data, u64 size)
 {
     if (!s1n_storage_context()) { ans_ro_abort(ANS_RO_E_CONTEXT); return -1; }
     s1n_link_lock(); /* one-way even when select fails */
@@ -105,7 +122,7 @@ s64 hv_win_storage_native_select(u64 data, u64 size)
 /* r3.1 R1: launcher `finally` path and hardware run 0. Retires the frontend (if prepared)
  * and runs the stage-1 quiesce. Refused while any guest CPU is started; a frozen driver is
  * never touched (returns -1: recover by platform reset). */
-s64 hv_win_storage_native_quiesce(void)
+static s64 native_quiesce_locked(void)
 {
     if (!s1n_storage_context()) { ans_ro_abort(ANS_RO_E_CONTEXT); return -1; }
     if (!selected)

@@ -1129,9 +1129,37 @@ static void guard_case(int which) { (void)which; fprintf(stderr, "FAIL: build ha
 #include "r46_cases.h"
 #include "chk_cases.h"
 
+/* smp-storage: final state for the 1-vCPU trace comparison (TRACE_1CPU, trace_1cpu.py); never installed otherwise */
+static u64 trace_bytes(const void *p, size_t n)
+{
+    u64 h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const u8 *)p)[i]) * 0x100000001b3ull;
+    return h;
+}
+static void trace_final(void)
+{
+    if (!trace_f) return;
+    const struct vnvme_ctrl *q = &controller.queue;
+    fprintf(trace_f, "END guest %llx diag %llx wcanary %llx stats %llx prp %llx/%llx/%llx dup %llu/%llu/%llu csts %x cc %x intms %x "
+            "irq %d/%llu faulted %d ready %d disp %llu rej %llu lease %llu | ans io r%u w%u f%u admin %llx io %llx outside %u durable %u cached %u state %d\n",
+            (unsigned long long)trace_guest_hash(), (unsigned long long)trace_bytes(&controller.diag, sizeof(controller.diag)),
+            (unsigned long long)trace_bytes(&controller.wcanary, sizeof(controller.wcanary)),
+            (unsigned long long)trace_bytes(&q->stats, sizeof(q->stats)),
+            (unsigned long long)trace_bytes(q->prp_refusals, sizeof(q->prp_refusals)), (unsigned long long)q->prp_refusal_total,
+            (unsigned long long)trace_bytes(q->prp_log, sizeof(q->prp_log)), (unsigned long long)q->prp_dup_dest_reads,
+            (unsigned long long)q->prp_part_dest_reads, (unsigned long long)q->prp_dup_src_writes, controller.regs.csts,
+            controller.regs.cc, controller.regs.intms, irq_level, (unsigned long long)controller.irq_changes, controller.faulted,
+            ready, (unsigned long long)dispatches, (unsigned long long)rejections, (unsigned long long)lease_failures,
+            F.io_reads, F.io_writes, F.io_flushes, (unsigned long long)trace_bytes(F.admin_ops, sizeof(F.admin_ops)),
+            (unsigned long long)trace_bytes(F.io_ops, sizeof(F.io_ops)), F.writes_outside_window, fake_durable_blocks(),
+            fake_cached_blocks(), (int)ans_ro_state());
+    fclose(trace_f);
+    trace_f = NULL;
+}
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
+    if (getenv("TRACE_1CPU")) atexit(trace_final);
     const char *s = argv[1];
     if (!strcmp(s, "happy")) s_happy();
     else if (!strcmp(s, "prep_blocks_mismatch")) s_e2e();

@@ -827,7 +827,12 @@ static bool post_completion(struct vnvme_ctrl *ctrl, u16 cqid, u16 sqid, u16 sq_
         set_fatal(ctrl, VNVME_FATAL_CQE); /* refused CQE memory is a controller fatal status */
         return false;
     }
-    memcpy(cqe_dst, &cqe, sizeof(cqe));
+    /* smp-storage: another vCPU may poll this CQ meanwhile. The dword holding the phase tag is stored
+     * last, with release order after the first 12 bytes and every data byte copied for this command. */
+    u32 cqe_dw3;
+    memcpy(cqe_dst, &cqe, 12);
+    memcpy(&cqe_dw3, (const u8 *)&cqe + 12, sizeof(cqe_dw3));
+    __atomic_store_n((u32 *)((u8 *)cqe_dst + 12), cqe_dw3, __ATOMIC_RELEASE);
     cq->cq_tail = next;
     cq->cq_pending++;
     if (!next)

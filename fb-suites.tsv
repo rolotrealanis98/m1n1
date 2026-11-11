@@ -87,3 +87,7 @@ M	storage-admit-n5-mutants	*	FB_OUT=$FB_OUT FB_JOBS=$FB_JOBS python3 -I source/t
 QF	heapblock-pool-n5c	source/src/heapblock.* source/tests/heapblock-pool-n5c/*	make -s -C source/tests/heapblock-pool-n5c check OUT=$FB_OUT 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 M	heapblock-pool-n5c-mutants	*	FB_OUT=$FB_OUT python3 -I source/tests/heapblock-pool-n5c/mutants.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 QF	win-perf	source/src/hv/win/hv_win_perf.h source/src/hv/hv_exc.c source/src/hv/hv_asm.S source/src/hv/win/hv_win.c source/src/proxy.* source/proxyclient/m1n1/proxy.py source/tests/win-perf/*	make -s -C source/tests/win-perf clean >/dev/null 2>&1; make -s -C source/tests/win-perf check 2>&1 | grep -E "^(win-perf|FAIL|mutant)" | tr "\n" " "; test ${PIPESTATUS[0]} = 0
+# ---- smp-storage: the disk path on N vCPUs (big storage lock, SMP lease, cap); multi-threaded stress under TSan and ASan+UBSan
+QF	smp-storage-stress	source/src/hv/win/hv_win_storage* source/src/hv/win/s1/* source/tests/smp-storage/*	python3 -I source/tests/smp-storage/run.py > $FB_OUT/smps.json 2>&1; rc=$?; tail -3 $FB_OUT/smps.json | cut -c1-200; exit $rc
+M	smp-storage-mutants	*	SMPS_JOBS=$FB_JOBS python3 -I source/tests/smp-storage/run.py mutants > $FB_OUT/smpsm.json 2>&1; rc=$?; tail -1 $FB_OUT/smpsm.json; exit $rc
+QF	trace-1cpu	source/src/hv/win/* source/src/hv/win/s1/* tests/native/*	FB_JOBS=$FB_JOBS python3 -I tests/native/trace_1cpu.py 7e803d6 > $FB_OUT/trace.json 2>&1; rc=$?; tail -1 $FB_OUT/trace.json; exit $rc

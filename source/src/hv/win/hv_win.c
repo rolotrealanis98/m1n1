@@ -209,10 +209,10 @@ bool hv_win_storage_smp_gate(const char *what)
                "no disk path after N1 (wireless/n1-20261111 WRITES.md)\n", what);
         return false;
     }
-    if (hv_win.nr_vcpus > 1) {
-        printf("HV/win u1: %s REFUSED: %u vCPUs configured; the disk path (emulated NVMe, ANS reads/writes) "
-               "is single-vCPU only - run storage with -C 1 (SMP-SAFETY.md)\n",
-               what, hv_win.nr_vcpus);
+    if (hv_win.nr_vcpus > hv_win_storage_max_cpus()) { /* smp-storage: was > 1 (u1) */
+        printf("HV/win u1: %s REFUSED: %u vCPUs configured, storage admits %u (--storage-max-cpus; "
+               "SMP-STORAGE-DESIGN.md)\n",
+               what, hv_win.nr_vcpus, hv_win_storage_max_cpus());
         return false;
     }
     u1_storage_touched = true;
@@ -225,6 +225,27 @@ bool hv_win_disk_path_used(void)
     bool attempted = false, ready = false;
     hv_win_storage_model(&attempted, &ready);
     return u1_storage_touched || (hv_win_storage_native_stat(0) & 6) || attempted;
+}
+
+/*
+ * smp-storage: P_HV_WIN_STORAGE_MAX_CPUS. The launcher raises the number of vCPUs the disk path admits (default
+ * 1) stepwise. Once, before any disk path is touched (gate, native select, PREP) and before any vCPU starts;
+ * the locked host link refuses it after native select anyway (native_link.c allowlist).
+ */
+extern bool hv_started_cpus[MAX_CPUS];
+s64 hv_win_storage_max_cpus_set(u64 n)
+{
+    bool started = false;
+    for (int i = 0; i < MAX_CPUS; i++)
+        started |= hv_started_cpus[i];
+    if (n < 1 || n > MAX_CPUS || u1_storage_touched || hv_win_disk_path_used() || started ||
+        !hv_win_storage_set_max_cpus((u32)n)) {
+        printf("HV/win smp-storage: storage vCPU cap %lu REFUSED (range 1..%d, once, before any disk path or "
+               "guest start)\n", (unsigned long)n, MAX_CPUS);
+        return -1;
+    }
+    printf("HV/win smp-storage: the disk path admits up to %lu vCPUs\n", (unsigned long)n);
+    return 0;
 }
 
 /* smp2d: EL2 is emulating the guest's WFI (HCR_EL2.TWI set in hv_win_configure) */
@@ -326,9 +347,9 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
         printf("HV/win: invalid vCPU count %ld\n", nr_vcpus);
         return -1;
     }
-    if (nr_vcpus > 1 && u1_storage_touched) {
-        printf("HV/win u1: CONFIGURE with %ld vCPUs REFUSED: storage was already selected/prepared and the "
-               "disk path is single-vCPU only (SMP-SAFETY.md)\n", nr_vcpus);
+    if (nr_vcpus > hv_win_storage_max_cpus() && u1_storage_touched) { /* smp-storage: was > 1 (u1) */
+        printf("HV/win u1: CONFIGURE with %ld vCPUs REFUSED: storage was already selected/prepared and "
+               "admits %u vCPUs (SMP-STORAGE-DESIGN.md)\n", nr_vcpus, hv_win_storage_max_cpus());
         return -1;
     }
 

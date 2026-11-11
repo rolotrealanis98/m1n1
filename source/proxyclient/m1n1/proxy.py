@@ -705,6 +705,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_STORAGE_NATIVE_STAT = 0xc23
     P_HV_WIN_STORAGE_NATIVE_QUIESCE = 0xc24
     P_HV_WIN_SMP_DUMP = 0xc29  # u1: was 0xc25 (clashed with the storage line CANARY)
+    P_HV_WIN_STORAGE_MAX_CPUS = 0xc50  # smp-storage
     P_HV_WIN_CPPC_CONFIGURE = 0xc38
     P_HV_WIN_CPPC_STAT = 0xc39
     P_HV_WIN_CPPC_DVFS = 0xc3a
@@ -1292,6 +1293,9 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_STORAGE_NATIVE, window_addr, size, signed=True)
     def hv_win_storage_native_stat(self, index):
         return self.request(self.P_HV_WIN_STORAGE_NATIVE_STAT, index)
+    def hv_win_storage_max_cpus(self, n):
+        # smp-storage: vCPUs the disk path admits (default 1); once, before native select/PREP and guest start.
+        return self.request(self.P_HV_WIN_STORAGE_MAX_CPUS, n, signed=True)
     def hv_win_storage_native_quiesce(self):
         # r3.1: stage-1 quiesce of the selected native backend; refused while a guest CPU runs.
         return self.request(self.P_HV_WIN_STORAGE_NATIVE_QUIESCE, signed=True)

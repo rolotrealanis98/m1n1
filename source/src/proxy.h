@@ -181,6 +181,7 @@ typedef enum {
     P_HV_WIN_N1_START = 0xc4c,
     P_HV_WIN_N1_CTL = 0xc4d,
     P_HV_WIN_N1_PARK = 0xc4e,
+    P_HV_WIN_STORAGE_MAX_CPUS = 0xc50, /* smp-storage: (n) vCPUs the disk path admits, once, pre-storage */
     P_HV_WIN_SMP_DUMP = 0xc29, /* smp2f: print the SMP/WFI/timer/vGIC dump (boot CPU; -1 elsewhere) */
     /* smcp (platform/power-audio-20261111): far from the other lines' numbers */
     P_HV_WIN_SMCP_CONFIGURE = 0xc40, /* (version, flags) pre-guest */

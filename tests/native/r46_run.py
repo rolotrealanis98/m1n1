@@ -24,8 +24,8 @@ mutants=[
  ('ro_cap_changed',3,['r46_ro_cap'],[('s1/native_window.c','    if (!mx) mx = want_rw ? 256 : 1;','    if (!mx) mx = 256;')]),
 
  ('exec_lock_removed',3,['r46_nested','r46_concurrent'],[(A,'if (__atomic_test_and_set(&exec_busy, __ATOMIC_ACQUIRE))','if (false)')]),
- ('context_cpu_removed',3,['r46_context_1','r46_proxy'],[(L,'s1n_test_cpu == 0 && !s1n_test_exception','!s1n_test_exception')]),
- ('context_exception_removed',3,['r46_context_0','r46_proxy'],[(L,'s1n_test_cpu == 0 && !s1n_test_exception','s1n_test_cpu == 0')]),
+ ('context_cpu_removed',3,['r46_context_1','r46_proxy'],[(L,'(s1n_test_cpu == 0 || S1N_TEST_SMP_CONTEXT()) && !s1n_test_exception','!s1n_test_exception')]),
+ ('context_exception_removed',3,['r46_context_0','r46_proxy'],[(L,'(s1n_test_cpu == 0 || S1N_TEST_SMP_CONTEXT()) && !s1n_test_exception','(s1n_test_cpu == 0 || S1N_TEST_SMP_CONTEXT())')]),
  ('exec_context_removed',3,['r46_context_10'],[(A,'    if (!s1n_storage_context()) {\n        freeze(ANS_RO_E_CONTEXT);\n        rc = -2;','    if (false) {\n        freeze(ANS_RO_E_CONTEXT);\n        rc = -2;')]),
  ('proxy_exception_removed',2,['r46_proxy'],[(L,'if (guest_exception || !s1n_storage_context())','if (!s1n_storage_context())')]),
  ('canary_start_removed',2,['r46_proxy'],[(L,'return s1n_storage_context() && !start_used;','return s1n_storage_context();')]),

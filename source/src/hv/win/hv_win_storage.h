@@ -37,6 +37,14 @@ struct s1_model;
 const struct s1_model *hv_win_storage_model(bool *is_attempted, bool *is_ready);
 void hv_win_storage_status_lines(const char *prefix);
 bool hv_win_storage_watch(void); /* true: printed (caller flushes the console) */
+/* smp-storage: the big storage lock (held by every storage entry; bhl -> storage -> vgic_lock), the
+ * launcher-visible vCPU cap (default 1) and the backend's SMP context (SMP-STORAGE-DESIGN.md). */
+void hv_storage_lock_take(void);
+void hv_storage_lock_release(void);
+bool hv_storage_lock_held(void);
+u32 hv_win_storage_max_cpus(void);
+bool hv_win_storage_set_max_cpus(u32 n);
+bool hv_win_storage_smp_context(void);
 /* Existing-device ownership queries, no mutation. */
 bool hv_vgic3_spi_unassigned(u32 intid);
 u32 hv_win_pl011_gsiv(void);

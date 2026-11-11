@@ -242,8 +242,8 @@ MUTANTS = [
     '    for (unsigned i = 0; i < 0; i++) {\n        if (!rtkit_can_recv(rtk))')]),
  ('storage_tick_noop',
   [('hv_win_storage.c',
-    'void hv_win_storage_tick(void)\n{\n    s1_backend_poll();\n}',
-    'void hv_win_storage_tick(void)\n{\n}')]),
+    'void hv_win_storage_tick(void)\n{\n    hv_storage_lock_take(); /* smp-storage */\n    s1_backend_poll();\n    hv_storage_lock_release();\n}',
+    'void hv_win_storage_tick(void)\n{\n}')]),  # smp-storage: the tick body now holds the storage lock (same intent)
  ('retire_skips_backend', [('hv_win_storage.c', '    s1_backend_retire();\n}', '}')]),
  ('prep_accepts_zero_blocks',
   [('hv_win_storage.c',
@@ -264,7 +264,8 @@ MUTANTS = [
  ('r1_retire_needs_prep',
   [('hv_win_storage.c', 'if(!attempted){s1_backend_retire();return;}', 'if(!attempted)return;')]),
  ('r1_tick_needs_attempted',
-  [('hv_win_storage.c', '    s1_backend_poll();\n}', '    if(attempted)s1_backend_poll();\n}')]),
+  [('hv_win_storage.c', '    s1_backend_poll();\n    hv_storage_lock_release();\n}',
+    '    if(attempted)s1_backend_poll();\n    hv_storage_lock_release();\n}')]),  # smp-storage: retargeted (same intent)
  ('r1_quiesce_ignores_guest',
   [('hv_win_storage_native.c',
     '        if (hv_started_cpus[i])\n            return -1;',
