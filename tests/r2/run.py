@@ -36,7 +36,10 @@ mutants = [
  ('cq_ack_blocked_after_cfs', N, 'if (!cq && (m->regs.csts&CSTS_CFS)) why|=S1DG_DB_CFS;', 'if (m->regs.csts&CSTS_CFS) why|=S1DG_DB_CFS;'),
  ('prp_list_offset_rejected', Q, 'if (!list || (list & 7) || frags == VNVME_MAX_LIST_FRAGS) return false;', 'if (!list || (list & (VNVME_PAGE_SIZE - 1)) || frags == VNVME_MAX_LIST_FRAGS) return false;'),
  ('prp_chain_offset_accepted', Q, '                if (frags && (list & (VNVME_PAGE_SIZE - 1))) return false; /* chained: page aligned */\n', ''),
- ('r414_read_dup_dest_refused', Q, 'if (!to_guest || n != VNVME_PAGE_SIZE ||', 'if (true ||'),
+ # nightly-4: the overlap check is now `if (!to_guest) {` (READ: any overlap accepted); same intent.
+ ('r414_read_dup_dest_refused', Q, 'if (!to_guest) {', 'if (true) {'),
+ ('n4_read_partial_refused', Q, 'if (!to_guest) {', 'if (!to_guest || n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i]) {'),
+ ('n4_part_counter_missing', Q, '                ctrl->prp_part_dest_reads++;\n', ''),
  ('r414_rule_not_recorded', Q, '    ctrl->prp_refusals[rule]++;', '    ctrl->prp_refusals[rule]++; rule = 0;'),
  ('prp_fragment_overlap_unchecked', Q, '        for (size_t i = 0; i < frags; i++)\n            if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;\n', ''),
  ('intms_not_reset', N, 'm->regs.csts=0;m->regs.cc=value;m->regs.intms=0;', 'm->regs.csts=0;m->regs.cc=value;'),

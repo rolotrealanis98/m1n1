@@ -221,6 +221,7 @@ struct prp_plan {
     size_t len[VNVME_MAX_XFER_BLOCKS + 1];
     size_t count;
     bool dup_dest; /* r4.14: a destination segment repeats an earlier one (to_guest only) */
+    bool part_dest; /* nightly-4: ... and at least one such overlap is not an exact whole-page repeat */
 };
 /* r4: data buffer for READ/WRITE: the backend's private transfer buffer when it has one
  * (single copy), else the 128 KiB frontend bounce (fixture, r2.2 behaviour). */
@@ -329,15 +330,23 @@ static bool plan_prps_body(struct vnvme_ctrl *ctrl, const struct vnvme_command *
          * can start on it). Every segment has been admitted (guest_span, write) on its own above and
          * still may not touch a queue or a list fragment; a repeated destination only means the last
          * copy wins, as on a real controller. r2.1-r4.13 refused this with 0x04 (31 READs in RUN B
-         * 20261110-211000, 248 in 20261110-212026). Any other overlap (partial, unaligned PRP1) and
-         * every overlap between WRITE source segments keep the r2.1 refusal. */
+         * 20261110-211000, 248 in 20261110-212026).
+         * nightly-4: in that direction ANY overlap between data segments is accepted, also a partial
+         * one (the unaligned first segment, PRP1 with an offset, or the short last segment sharing a
+         * page with a whole-page segment). Each segment is exactly [addr, addr + n) within one page,
+         * admitted on its own above; copy_to_plan writes segment i's n bytes to that range, in command
+         * order, so bytes named twice hold the later segment's data, as on a real controller. Nothing
+         * outside the admitted ranges is written. Every overlap between WRITE source segments keeps
+         * the r2.1 refusal. */
         for (size_t i = 0; i < plan->count; i++)
             if (overlaps(addr, n, plan->addr[i], plan->len[i])) {
-                if (!to_guest || n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i]) {
+                if (!to_guest) {
                     PRP_AT(VNVME_PRP_DATA_DATA, plan->count, addr, n, plan->addr[i]);
                     return false;
                 }
                 plan->dup_dest = true;
+                if (n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i])
+                    plan->part_dest = true;
             }
         plan->addr[plan->count] = addr;
         plan->ptr[plan->count] = ptr;
@@ -355,6 +364,10 @@ static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *c
         if (plan->dup_dest && cmd->opcode == VNVME_IO_READ) {
             ctrl->prp_dup_dest_reads++;
             ctrl->prp_dup_dest_last = cmd->prp1;
+            if (plan->part_dest) { /* nightly-4: partial overlaps, counted separately */
+                ctrl->prp_part_dest_reads++;
+                ctrl->prp_part_dest_last = cmd->prp1;
+            }
         }
         return true;
     }

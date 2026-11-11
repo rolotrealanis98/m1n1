@@ -77,6 +77,8 @@ static void io_pair(u16 n)
     CHECK(submit(&aq,cmd(5,0,IOCQ,((u32)(n-1)<<16)|1,3),true,NULL)==0);
     CHECK(submit(&aq,cmd(1,0,IOSQ,((u32)(n-1)<<16)|1,(1u<<16)|1),true,NULL)==0);
 }
+/* nightly-4: bytes [off, off+n) of the READ stream starting at lba (fixture block pattern) */
+static void stream(u64 a,unsigned lba,size_t off,size_t n){const u8 *p=ptr(a);for(size_t k=0;k<n;k++){size_t s=off+k;unsigned i=(unsigned)(s%PAGE);CHECK(p[k]==(i<32?(u8)((lba+s/PAGE)*17+i):0));}}
 static void pattern(u64 a,unsigned lba){const u8 *p=ptr(a);for(unsigned i=0;i<PAGE;i++)CHECK(p[i]==(i<32?(u8)(lba*17+i):0));}
 
 static void test_identify_and_ids(void)
@@ -478,12 +480,17 @@ static void test_r21_fixes(void)
      /* a repeated page that is not admitted is still refused, by data admission */
      nx[4]=RAM+RAM_SIZE+PAGE;CHECK(submit(&ioq,r,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR);
      CHECK(m.queue.prp_refusal_total==rf+1&&m.queue.prp_log[rf%VNVME_PRP_LOG].rule==VNVME_PRP_DATA_ADMIT);
-     /* a partial overlap (unaligned PRP1 repeated in the list) is still refused, rule data-overlap */
+     /* nightly-4: a partial overlap (unaligned PRP1 repeated in the list as a whole page) is accepted (r4.14:
+      * refused, rule data-overlap) and copied in command order: DATA = stream 2048..6143, DATA+PAGE =
+      * 6144..10239, DATA+2*PAGE starts with 10240..12287 and keeps its old second half. */
      {u64 L5=L+5*PAGE;u64 *e5=ptr(L5);e5[0]=DATA;e5[1]=DATA+PAGE;e5[2]=DATA+2*PAGE;
       struct vnvme_command p3=cmd(2,1,DATA+2048,0,0);p3.prp2=L5;p3.cdw12=2;u64 rb3=m.backend_reads;
-      CHECK(submit(&ioq,p3,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR&&m.backend_reads==rb3);
-      const struct vnvme_prp_refusal *x=&m.queue.prp_log[(m.queue.prp_refusal_total-1)%VNVME_PRP_LOG];
-      CHECK(x->rule==VNVME_PRP_DATA_DATA&&x->index==1&&x->addr==DATA&&x->other==DATA+2048&&x->to_guest);}
+      u64 pd=m.queue.prp_part_dest_reads,rf3=m.queue.prp_refusal_total;
+      memset(ptr(DATA),0xa5,4*PAGE);
+      CHECK(submit(&ioq,p3,true,NULL)==0&&m.backend_reads>rb3);
+      stream(DATA,0,2048,PAGE);stream(DATA+PAGE,0,6144,PAGE);stream(DATA+2*PAGE,0,10240,2048);
+      {const u8 *z=ptr(DATA+2*PAGE+2048);for(unsigned i=0;i<PAGE+2048;i++)CHECK(z[i]==0xa5);}
+      CHECK(m.queue.prp_refusal_total==rf3&&m.queue.prp_part_dest_reads==pd+1&&m.queue.prp_part_dest_last==DATA+2048);}
      nx[4]=DATA+7*PAGE;}
     /* N2: shutdown after fatal posts nothing more (held AER discarded, admin CQ untouched) */
     fresh();enable(8);io_pair(8);

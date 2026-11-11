@@ -308,7 +308,14 @@ static void tests_alias_policy(void)
      CHECK(submit(1,cmd(VNVME_IO_READ,1,0,3,DATA,LIST))==0);CHECK(reads>b4);
      pattern(DATA,0,1);pattern(DATA+PAGE,2,1);unchanged(DATA+2*PAGE,30*PAGE,0x5c);}
     entries[0]=DATA;entries[1]=DATA+PAGE;memcpy(mem(LIST),entries,2*sizeof(u64));
-    read_reject(cmd(VNVME_IO_READ,1,0,2,DATA+19,LIST),VNVME_SC_DATA_TRANSFER_ERROR);
+    /* nightly-4: a partial overlap (unaligned PRP1 DATA+19, then DATA as a whole page) is accepted and copied
+     * in command order: DATA ends with stream bytes 4077..8172, DATA+PAGE starts with 8173..8191, nothing else
+     * changes. r2.1-r4.14 completed it 0x04. */
+    {memset(mem(DATA),0x5c,32*PAGE);unsigned b4=reads;
+     CHECK(submit(1,cmd(VNVME_IO_READ,1,0,2,DATA+19,LIST))==0);CHECK(reads>b4);
+     CHECK(s0_disk_read(disk,0,2,sink));
+     CHECK(memcmp(mem(DATA),sink+4077,PAGE)==0);CHECK(memcmp(mem(DATA+PAGE),sink+4077+PAGE,19)==0);
+     unchanged(DATA+PAGE+19,31*PAGE-19,0x5c);}
     /* Writable metadata: alias rejection must not depend on a read-only list. */
     permissions[(LIST-BASE)/PAGE]=READ|WRITE;
     entries[0]=DATA;entries[1]=DATA+PAGE;memcpy(mem(LIST),entries,2*sizeof(u64));

@@ -225,7 +225,7 @@ enum vnvme_prp_rule {
     VNVME_PRP_DATA_ADMIT,   /* data segment refused by guest-memory admission */
     VNVME_PRP_DATA_QUEUE,   /* data segment overlaps an active SQ/CQ */
     VNVME_PRP_DATA_LIST,    /* data segment overlaps a consumed PRP list fragment */
-    VNVME_PRP_DATA_DATA,    /* data segment overlaps an earlier one (READ: other than an exact whole-page repeat) */
+    VNVME_PRP_DATA_DATA,    /* WRITE: source segment overlaps an earlier one (nightly-4: READ overlaps are accepted) */
     VNVME_PRP_RULES
 };
 #define VNVME_PRP_LOG 16
@@ -278,6 +278,8 @@ struct vnvme_ctrl {
     u64 prp_refusal_total;
     struct vnvme_prp_refusal prp_log[VNVME_PRP_LOG];
     u64 prp_dup_dest_reads, prp_dup_dest_last;
+    /* nightly-4: READs among those whose overlap is partial (not an exact whole-page repeat) */
+    u64 prp_part_dest_reads, prp_part_dest_last;
     u8 bounce[VNVME_MAX_BLOCKS * VNVME_LBA_SIZE] ALIGNED(VNVME_PAGE_SIZE);
 };
 

@@ -24,6 +24,8 @@ static void io_init(u64 sq,u64 cq,unsigned n){
  struct vnvme_command c=cmd(VNVME_ADMIN_CREATE_CQ,0,cq);c.cdw10=((n-1)<<16)|1;c.cdw11=3;CHECK(command(0,c,true)==0);
  c=cmd(VNVME_ADMIN_CREATE_SQ,0,sq);c.cdw10=((n-1)<<16)|1;c.cdw11=(1<<16)|1;CHECK(command(0,c,true)==0);
 }
+/* nightly-4: bytes [off, off+n) of the READ stream starting at lba (fixture block pattern) */
+static void stream(u64 data,unsigned lba,size_t off,size_t n){u8 *p=gp(data);for(size_t k=0;k<n;k++){size_t s=off+k;unsigned i=(unsigned)(s%4096);CHECK(p[k]==(i<32?(u8)((lba+s/4096)*17+i):0));}}
 static void pattern(u64 data,unsigned lba){u8 *p=gp(data);for(unsigned i=0;i<4096;i++)CHECK(p[i]==(i<32?(u8)(lba*17+i):0));}
 static void read_block(u64 data,unsigned lba,bool acknowledge){
  struct vnvme_command c=cmd(VNVME_IO_READ,1,data);c.cdw10=lba;
@@ -108,9 +110,16 @@ static void test_aliases(void){
   * last copy wins) and the third page holds block 2. */
  list[0]=GUEST+16384;list[1]=GUEST+28672;CHECK(command(1,c,true)==0);CHECK(controller.backend_reads>before);
  pattern(GUEST+16384,1);pattern(GUEST+28672,2);
- /* the same repeat behind an unaligned PRP1 is a partial overlap: still refused */
+ /* nightly-4: the same repeat behind an unaligned PRP1 is a partial overlap. r4.14 refused it (0x04); it is now
+  * accepted and copied in command order: seg0 (stream 0..3583) at +512, then seg1 (stream 3584..7679) over the
+  * whole page, seg2 (7680..11775) on the third page, seg3 (11776..12287) on the first 512 bytes of the fourth. */
  before=controller.backend_reads;c.prp1=GUEST+16384+512;list[0]=GUEST+16384;list[1]=GUEST+28672;list[2]=GUEST+32768;
- CHECK(command(1,c,true)==VNVME_SC_DATA_TRANSFER_ERROR);CHECK(controller.backend_reads==before);c.prp1=GUEST+16384;
+ {static u8 tail[4096-512];memcpy(tail,gp(GUEST+32768+512),sizeof tail);
+  CHECK(command(1,c,true)==0);CHECK(controller.backend_reads>before);
+  stream(GUEST+16384,0,3584,4096);stream(GUEST+28672,0,7680,4096);stream(GUEST+32768,0,11776,512);
+  CHECK(!memcmp(tail,gp(GUEST+32768+512),sizeof tail));
+  CHECK(controller.queue.prp_part_dest_reads==1&&controller.queue.prp_part_dest_last==GUEST+16384+512);}
+ c.prp1=GUEST+16384;
  /* Adjacent disjoint queue/data pages are legal, as is old queue storage after reset. */
  read_block(GUEST+16384,39,true);disable();admin_init(GUEST+20480,GUEST+24576,8);io_init(GUEST+28672,GUEST+32768,8);read_block(GUEST+8192,0,true);
 }
