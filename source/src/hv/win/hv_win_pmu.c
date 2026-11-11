@@ -34,6 +34,14 @@
  * every PMU_CLOSE_TICKS ticks; the next fetch from an unscanned frame then faults and is proven and
  * scanned, a fetch from a scanned frame only reopens the block. Between those points an unscanned
  * sibling can run without a scan (a PMU coverage gap, never a data write).
+ *   nightly-6d closes that gap (and the PINNED one: a pinned block's frames are never scanned) with the
+ *   UNDEF catcher below: the T6050 UNDEFs an unrewritten PMU access straight to the guest's EL1 (Q24),
+ *   but the guest's handler must read ESR_EL1 (and FAR_EL1) before it can act, and those reads trap to
+ *   EL2 (HFGRTR_EL2, armed per CPU by hv_win.c). On an EC 0 read whose ELR_EL1 the guest's stage-1 tables
+ *   map executable to a tracked frame holding a PMU word, that frame is proven (it was just executed)
+ *   and scanned like a faulting one, and the pending exception becomes a translation fault at that PC,
+ *   which the guest's memory manager finds already mapped and retries: the rewritten word then runs.
+ *   Still only frames proven executable are ever written.
  *   SCANNING (RO, XN) is therefore also a stable state in this mode: a fetch reopens it (scanning
  *   the faulting frame if needed), a store flips it to DIRTY like CODE, a device refill clears the
  *   touched frames and keeps it.
@@ -147,6 +155,22 @@ __attribute__((weak)) bool pmu_host_el1_exception(struct exc_info *ctx)
 {
     (void)ctx;
     return false;
+}
+/* nightly-6d UNDEF catcher: the guest's EL1 exception registers (esr, far, elr, spsr), and the FGT arm
+ * hook (hv_win.c) */
+__attribute__((weak)) bool pmu_host_el1(u64 *regs)
+{
+    (void)regs;
+    return false;
+}
+__attribute__((weak)) void pmu_host_el1_forge(u64 esr, u64 far)
+{
+    (void)esr;
+    (void)far;
+}
+__attribute__((weak)) void hv_win_pmu_catch_cpu(bool reset)
+{
+    (void)reset;
 }
 #endif
 
@@ -270,6 +294,7 @@ int hv_win_pmu_arm(u64 base, u64 size)
     pmu.stats[HV_WIN_PMU_PAGES] += pages;
     pmu.stats[HV_WIN_PMU_TABLES] += tables;
     pmu.armed = true;
+    hv_win_pmu_catch_cpu(false); /* nightly-6d: this CPU; secondaries arm it in hv_win_cpu_init() */
 
     printf(
         "HV/win: PMU rewrite armed on 0x%lx..0x%lx: %d page(s) of 16 KiB execute-tracked, %lu L3 "
@@ -654,6 +679,7 @@ static bool pmu_exec_fault_4k(struct exc_info *ctx, u64 ipa, bool hint)
     }
 
     pmu.stats[HV_WIN_PMU_EXEC_FAULTS]++;
+    hv_win_pmu_catch_cpu(false); /* nightly-6d: cheap re-check that this CPU still traps ESR reads */
     if (!(*fr & PMU_BS_SCANNED(frame))) {
         if (pmu_exec_proof(ctx, ipa, hint)) {
             pmu_scan_frame(ctx, block, pa, frame, fr, true);
@@ -671,6 +697,200 @@ static bool pmu_exec_fault_4k(struct exc_info *ctx, u64 ipa, bool hint)
         pmu_open_add(block, fr);
     pmu_productive();
     return true;
+}
+
+/* ---- UNDEF catcher (nightly-6d, 4 KiB mode) ------------------------------------------------------ */
+
+#define PMU_CATCH_IFSC       0x07 /* translation fault, level 3: "not mapped", which the guest finds mapped */
+#define PMU_CATCH_LOOP_LIMIT 4    /* the same PC caught this often in a row on a CPU with nothing left to
+                                   * rewrite: hand it on */
+#define PMU_CATCH_PRINT_MAX  64
+
+struct pmu_el1 {
+    u64 esr, far, elr, spsr;
+};
+
+static u64 catch_elr[MAX_CPUS];
+static u32 catch_repeat[MAX_CPUS];
+static u64 catch_printed;
+
+static bool pmu_el1_get(struct pmu_el1 *e)
+{
+#ifdef PMU_REWRITE_HOST_TEST
+    u64 r[4];
+    if (!pmu_host_el1(r))
+        return false;
+    *e = (struct pmu_el1){.esr = r[0], .far = r[1], .elr = r[2], .spsr = r[3]};
+    return true;
+#else
+    e->esr = mrs(ESR_EL12);
+    e->far = mrs(FAR_EL12);
+    e->elr = mrs(ELR_EL12);
+    e->spsr = mrs(SPSR_EL12);
+    return true;
+#endif
+}
+
+static void pmu_el1_forge(u64 esr, u64 far)
+{
+#ifdef PMU_REWRITE_HOST_TEST
+    pmu_host_el1_forge(esr, far);
+#else
+    msr(ESR_EL12, esr);
+    msr(FAR_EL12, far);
+#endif
+}
+
+bool hv_win_pmu_catch_wanted(u64 esr_el1)
+{
+    return pmu.armed && !pmu.mode16k && !((esr_el1 >> 26) & 0x3f);
+}
+
+void hv_win_pmu_catch_note(bool ok, u64 hfgrtr)
+{
+    pmu.stats[ok ? HV_WIN_PMU_CATCH_CPUS : HV_WIN_PMU_CATCH_UNAVAIL]++;
+    printf("HV/win: PMU UNDEF catcher on CPU %d: %s (HFGRTR_EL2 0x%lx)\n", smp_id(),
+           ok ? "ESR_EL1/FAR_EL1 reads trap" : "UNAVAILABLE, unscanned siblings can UNDEF", hfgrtr);
+}
+
+/* the rewrite ring holds this word's IPA: another CPU rewrote it after this CPU's UNDEF */
+static bool pmu_logged(u64 ipa)
+{
+    u64 n = pmu.stats[HV_WIN_PMU_INSNS] < HV_WIN_PMU_LOG_SIZE ? pmu.stats[HV_WIN_PMU_INSNS]
+                                                              : HV_WIN_PMU_LOG_SIZE;
+    for (u64 i = 0; i < n; i++)
+        if (pmu.log[i].ipa == ipa)
+            return true;
+    return false;
+}
+
+/*
+ * The guest's EL1 handler is reading ESR_EL1 or FAR_EL1 of an exception it has just taken. If that is an
+ * UNDEF (EC 0) of a PMU word in a tracked frame that the guest's current stage-1 tables map executable at
+ * the faulting EL (the walk is the 4 KiB fault path's proof; the UNDEF itself shows the word was fetched
+ * and executed), scan the frame exactly as a proven fetch fault would (block read-only and execute-never
+ * on every CPU first), rewrite that word even if the data guard kept it (it was executed), and turn the
+ * exception into a translation fault at that PC. Returns true when the guest must see the forged values.
+ * Only while an OS runs: firmware and boot applications (TTBR1 walks disabled, EL1 code at low addresses)
+ * keep their own PMU UNDEF handling (Mu's fallback emulates them).
+ */
+static bool pmu_catch(struct exc_info *ctx, const struct pmu_el1 *e)
+{
+    if (!hv_win_pmu_catch_wanted(e->esr))
+        return false;
+
+    struct pmu_s1 s;
+#ifdef PMU_REWRITE_HOST_TEST
+    if (!pmu_host_s1(&s)) {
+        pmu.stats[HV_WIN_PMU_CATCH_SKIPS]++;
+        return false;
+    }
+#else
+    s = (struct pmu_s1){.sctlr = mrs(SCTLR_EL12),
+                        .tcr = mrs(TCR_EL12),
+                        .ttbr = {mrs(TTBR0_EL12), mrs(TTBR1_EL12)}};
+#endif
+    u32 mode = e->spsr & 0x1f;
+    if ((s.tcr & BIT(23)) || (mode != 0 && !(e->elr & BIT(55)))) {
+        pmu.stats[HV_WIN_PMU_CATCH_PASSIVE]++;
+        return false;
+    }
+
+    int cpu = smp_id();
+    if (catch_elr[cpu] == e->elr && catch_repeat[cpu] >= PMU_CATCH_LOOP_LIMIT) {
+        /* retried and UNDEFed again: not ours to fix; the guest gets its UNDEF (no livelock). Every
+         * later read of this PC's exception (ESR, then FAR) is handed on alike, until another PC is
+         * caught on this CPU. */
+        if (catch_repeat[cpu] == PMU_CATCH_LOOP_LIMIT) {
+            catch_repeat[cpu]++;
+            pmu.stats[HV_WIN_PMU_CATCH_LOOPS]++;
+            printf("HV/win: PMU UNDEF catcher: PC 0x%lx UNDEFs again after %d retries on CPU %d; "
+                   "handed to the guest\n",
+                   e->elr, PMU_CATCH_LOOP_LIMIT, cpu);
+        }
+        return false;
+    }
+
+    u64 ipa, pa = 0;
+    u32 flips = 0;
+    if (!pmu_s1_exec(&s, e->elr, e->spsr, pmu_read_pte, NULL, &ipa)) {
+        pmu.stats[HV_WIN_PMU_CATCH_SKIPS]++;
+        return false;
+    }
+    u64 block = ipa & ~(PMU_PAGE - 1);
+    u32 frame = (ipa - block) / PMU_FRAME_SIZE;
+    u8 *fr = pmu_frames(block);
+    enum hv_xt_state st = fr ? hv_xt_get(block, &pa, &flips) : HV_XT_UNTRACKED;
+    if (st == HV_XT_UNTRACKED) {
+        pmu.stats[HV_WIN_PMU_CATCH_SKIPS]++;
+        return false;
+    }
+    volatile u32 *word = (volatile u32 *)(pa + (ipa - block));
+    u32 old = *word;
+    if (catch_elr[cpu] != e->elr) {
+        catch_elr[cpu] = e->elr;
+        catch_repeat[cpu] = 0;
+    }
+
+    if (pmu_rw_classify(old) == PMU_RW_NONE) {
+        /* not a PMU word now: rewritten by another CPU since the UNDEF (retry runs the replacement), or
+         * a genuine UNDEF that is the guest's business */
+        if (!pmu_logged(ipa)) {
+            pmu.stats[HV_WIN_PMU_CATCH_SKIPS]++;
+            return false;
+        }
+        catch_repeat[cpu]++; /* no progress possible here: counted towards the loop limit */
+    } else {
+        catch_repeat[cpu] = 0; /* progress: a PMU word is about to be rewritten */
+        /* 1. No writer and no executor of the block on any CPU (as a fetch fault on DIRTY/CODE) */
+        if (st != HV_XT_SCANNING) {
+            if (st != HV_XT_CODE)
+                pmu_clear_frames(fr); /* DIRTY or PINNED: was writable, no frame state survives */
+            hv_xt_set(block, HV_XT_SCANNING, flips);
+            hv_xt_tlbi(true);
+        }
+        /* 2. The frame is proven: scan it (logged against the guest PC that executed the word) */
+        struct exc_info lc = *ctx;
+        lc.elr = e->elr;
+        pmu_scan_frame(&lc, block, pa, frame, fr, true);
+        if (pmu_rw_classify(*word) != PMU_RW_NONE) {
+            /* kept by the data guard or the frame boundary, but this word was executed: rewrite it */
+            struct pmu_scan sc = {.ipa = block + frame * PMU_FRAME_SIZE, .elr = e->elr};
+            u64 kinds[PMU_RW_NR_KINDS] = {0};
+            u32 was = *word, now = pmu_rw_replacement(was);
+            kinds[pmu_rw_classify(was)]++;
+            *word = now; /* one aligned, single-copy atomic 32-bit store */
+            pmu_record(&sc, (ipa & (PMU_FRAME_SIZE - 1)) / 4, was, now);
+            pmu_scanned(&lc, pa + frame * PMU_FRAME_SIZE, PMU_FRAME_SIZE, 1, &sc, kinds);
+        }
+        /* 3. Executable and read-only again, as after a proven fetch fault */
+        hv_xt_set(block, HV_XT_CODE, flips);
+        hv_xt_tlbi(false);
+        if (!pmu_all_scanned(fr))
+            pmu_open_add(block, fr);
+    }
+
+    pmu.stats[HV_WIN_PMU_CATCHES]++;
+    if (catch_printed++ < PMU_CATCH_PRINT_MAX)
+        printf("HV/win: PMU UNDEF catcher: EL%u PC 0x%lx IPA 0x%lx word 0x%08x -> 0x%08x (block state %d, "
+               "frame %u %s), CPU %d: retried as a translation fault%s\n",
+               mode ? 1 : 0, e->elr, ipa, old, *word, st, frame,
+               pmu_rw_classify(old) == PMU_RW_NONE ? "rewritten elsewhere" : "scanned", cpu,
+               catch_printed == PMU_CATCH_PRINT_MAX ? " (further catches: counters only)" : "");
+    return true;
+}
+
+u64 hv_win_pmu_el1_read(struct exc_info *ctx, bool far)
+{
+    struct pmu_el1 e;
+    if (!pmu_el1_get(&e))
+        return 0;
+    if (pmu_catch(ctx, &e)) {
+        e.esr = ((!(e.spsr & 0x1f) ? 0x20UL : 0x21UL) << 26) | BIT(25) | PMU_CATCH_IFSC;
+        e.far = e.elr;
+        pmu_el1_forge(e.esr, e.far);
+    }
+    return far ? e.far : e.esr;
 }
 
 static bool pmu_exec_fault(struct exc_info *ctx, u64 ipa, bool hint)
@@ -848,6 +1068,7 @@ void hv_win_pmu_tick(void)
     if (!pmu.armed)
         return;
 
+    hv_win_pmu_catch_cpu(false); /* nightly-6d: re-check this CPU's ESR/FAR read trap */
     hv_win_pmu_diag(NULL);
     if (pmu.nr_open && ++pmu.close_ticks >= PMU_CLOSE_TICKS)
         pmu_close_open();
@@ -882,6 +1103,11 @@ void hv_win_pmu_report(void)
            s[HV_WIN_PMU_DATA_SKIPS], s[HV_WIN_PMU_WORDS_SKIP_OTHER],
            s[HV_WIN_PMU_MODIFIED_NEVER_EXECUTED], s[HV_WIN_PMU_EXEC_FAULTS],
            s[HV_WIN_PMU_EXEC_DENIED], s[HV_WIN_PMU_REPROTECTS]);
+    if (!pmu.mode16k)
+        printf("HV/win: PMU UNDEF catcher: %lu caught and retried, %lu EC-0 reads not ours, %lu outside "
+               "the OS, %lu repeated PCs handed on; armed on %lu CPU(s), unavailable on %lu\n",
+               s[HV_WIN_PMU_CATCHES], s[HV_WIN_PMU_CATCH_SKIPS], s[HV_WIN_PMU_CATCH_PASSIVE],
+               s[HV_WIN_PMU_CATCH_LOOPS], s[HV_WIN_PMU_CATCH_CPUS], s[HV_WIN_PMU_CATCH_UNAVAIL]);
     printf(
         "HV/win: PMU rewrite: %lu pages tracked, %lu scans, %lu pages rewritten, %lu words "
         "(PMCCNTR %lu, other mrs %lu, msr %lu); flips: write %lu, walker %lu; pinned %lu (list "
@@ -913,5 +1139,8 @@ void hv_win_pmu_host_reset(void)
     memset(&pmu, 0, sizeof(pmu));
     memset(stuck_elr, 0, sizeof(stuck_elr));
     memset(stuck_count, 0, sizeof(stuck_count));
+    memset(catch_elr, 0, sizeof(catch_elr));
+    memset(catch_repeat, 0, sizeof(catch_repeat));
+    catch_printed = 0;
 }
 #endif

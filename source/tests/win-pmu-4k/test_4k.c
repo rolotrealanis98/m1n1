@@ -995,9 +995,283 @@ static void el0_exception_diagnostics(void)
     legacy16k = false;
 }
 
+
+/* ---- nightly-6d: UNDEF catcher ----------------------------------------------------------------- */
+/*
+ * G7 an unrewritten PMU word that runs natively inside an executable block (an unscanned sibling frame,
+ *    a PINNED block) never reaches the guest's UNDEF dispatcher: the handler's ESR_EL1/FAR_EL1 reads
+ *    (trapped) see a translation fault at that PC, the frame is scanned exactly as a proven fetch would
+ *    scan it, and the retry runs the replacement;
+ * G8 nothing else is modified: a data frame (not executable in stage 1), a genuine UNDEF, firmware
+ *    (TTBR1 walks off), and a PC that keeps UNDEFing are handed to the guest unchanged, byte for byte.
+ */
+#define KVA 0xffff800000400000UL /* TTBR1 alias of VA (L0[0] -> the same L1 table) */
+static u64 el1r[4]; /* esr, far, elr, spsr: the guest's EL1 exception registers */
+static bool el1_valid;
+static unsigned forges;
+bool pmu_host_el1(u64 *regs)
+{
+    memcpy(regs, el1r, sizeof(el1r));
+    return el1_valid;
+}
+void pmu_host_el1_forge(u64 esr, u64 far)
+{
+    el1r[0] = esr;
+    el1r[1] = far;
+    forges++;
+}
+/* A resident without the catcher (aa98ccf) answers the trapped read with the raw register: the
+ * sibling tests below then fail, as they must. The production definition overrides this one. */
+__attribute__((weak)) u64 hv_win_pmu_el1_read(struct exc_info *ctx, bool far)
+{
+    (void)ctx;
+    return far ? el1r[1] : el1r[0];
+}
+/* The guest takes an UNDEF at frame f + byte off (mode 0: EL0 at VA, 5: EL1h at KVA) and its handler
+ * reads ESR_EL1 then FAR_EL1. Returns the ESR it saw. */
+static u64 guest_undef(unsigned f, unsigned off, unsigned mode)
+{
+    u64 va = (mode ? KVA : VA) + f * 4096UL + off;
+    el1r[0] = BIT(25); /* EC 0, IL */
+    el1r[1] = 0xdeadbeef000UL;
+    el1r[2] = va;
+    el1r[3] = mode;
+    el1_valid = true;
+    struct exc_info trap = {.elr = 0xfffff80012345678UL, .esr = (0x18UL << 26) | BIT(25), .spsr = 5};
+    u64 esr = hv_win_pmu_el1_read(&trap, false);
+    u64 far = hv_win_pmu_el1_read(&trap, true);
+    if ((esr >> 26) & 0x3f) {
+        CHECK(((esr >> 26) & 0x3f) == (mode ? 0x21U : 0x20U) && (esr & 0x3f) == 7 && (esr & BIT(25)));
+        CHECK(far == va && trap.elr == 0xfffff80012345678UL); /* the trapped MRS is not moved */
+    } else {
+        CHECK(esr == BIT(25) && far == 0xdeadbeef000UL); /* handed on untouched */
+    }
+    return esr;
+}
+/* The model of one catch: the frame's proven scan, the executed word even if the guard kept it */
+static void ref_catch(unsigned f, unsigned word)
+{
+    unsigned b = f / 4;
+    if (m.st[b] == HV_XT_DIRTY || m.st[b] == HV_XT_PINNED)
+        ref_clear(b);
+    ref_scan(f);
+    u32 *w = &ref[f * 1024 + word];
+    if (replacement(*w) != *w) {
+        *w = replacement(*w);
+        m.words++;
+    }
+    m.st[b] = HV_XT_CODE;
+    if (!ref_all(b) && !m.listed[b]) {
+        if (m.nlisted >= PMU_MAX_OPEN)
+            ref_close();
+        m.listed[b] = true;
+        m.nlisted++;
+    }
+}
+/* The guest runs the word at frame f + byte off natively in an executable block. If it is an
+ * unrewritten PMU access it UNDEFs; a translation fault on its mapped page makes it retry. Returns
+ * true once the word runs, false if an UNDEF reached the guest's dispatcher (STATUS_ILLEGAL_INSTRUCTION). */
+static bool guest_run(unsigned f, unsigned off, unsigned mode)
+{
+    CHECK(m.st[f / 4] == HV_XT_CODE || m.st[f / 4] == HV_XT_PINNED);
+    for (unsigned tries = 0; tries < 8; tries++) {
+        u32 w = mem[f * 1024 + off / 4];
+        if (replacement(w) == w)
+            return true;
+        if (!((guest_undef(f, off, mode) >> 26) & 0x3f))
+            return false;
+        ref_catch(f, off / 4);
+        equivalent();
+    }
+    return false;
+}
+static void ref_sync(void)
+{
+    memcpy(ref, mem, sizeof(mem));
+}
+
+/* G7: the hardware failure (smss, 2026-11-11): EL0 enters frame 2 of a block, then branches to the
+ * PMCCNTR read at +0x50c of frame 0 without a second stage-2 fault */
+static void catcher_sibling(void)
+{
+    reset();
+    table(31)[0] |= BIT(6); /* EL0 read-only, executable: an image page */
+    table(31)[2] |= BIT(6);
+    mem[0x50c / 4] = 0xd53b9d08; /* mrs x8, PMCCNTR_EL0 */
+    ref_sync();
+    struct exc_info fetch = {.far = VA + 8192, .elr = VA + 8192, .esr = IESR, .spsr = 0};
+    CHECK(hv_win_handle_iabort(&fetch));
+    ref_scan(2);
+    m.st[0] = HV_XT_CODE;
+    m.listed[0] = true;
+    m.nlisted = 1;
+    equivalent();
+    CHECK(mem[0x50c / 4] == 0xd53b9d08 && !m.scanned[0]); /* the hole: runnable, unscanned */
+    CHECK(guest_run(0, 0x50c, 0));                         /* aa98ccf: UNDEF reaches the guest */
+    CHECK(mem[0x50c / 4] == 0xd53be048 && m.scanned[0] && states[0] == HV_XT_CODE);
+#ifdef HV_WIN_PMU_CATCH_STATS
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_CATCHES) == 1 && forges == 1);
+#endif
+    /* the same through the kernel's TTBR1 view (EL1h) */
+    reset();
+    table(TABLE0)[0] = table(TABLE0)[256];
+    ref_sync();
+    execute(0);
+    CHECK(!m.scanned[2] && mem[2048 + 32] == 0xd53b9d05);
+    CHECK(guest_run(2, 128, 5));
+    CHECK(mem[2048 + 32] == 0xd53be045 && m.scanned[2]);
+    /* a PINNED (RWX) block: code written and run while pinned */
+    reset();
+    table(TABLE0)[0] = table(TABLE0)[256];
+    ref_sync();
+    for (int i = 0; i < 4; i++) {
+        execute(4);
+        store(5 * 4096 + 4, 4, (u64)i);
+    }
+    CHECK(states[1] == HV_XT_PINNED);
+    store(6 * 4096 + 0x40, 4, 0xd53b9d03); /* lands natively: no fault on RWX */
+    CHECK(guest_run(6, 0x40, 5));
+    CHECK(mem[6 * 1024 + 0x10] == 0xd53be043 && states[1] == HV_XT_CODE);
+    ticks(100); /* the sweep leaves a block that is no longer PINNED alone */
+    CHECK(states[1] != HV_XT_PINNED);
+    /* an executed word the data guard keeps (next word looks like data) and the last slot */
+    reset();
+    table(TABLE0)[0] = table(TABLE0)[256];
+    ref_sync();
+    execute(0);
+    CHECK(guest_run(2, 96 * 4, 5)); /* 0xd53be8c3 followed by 0x00200100 */
+    CHECK(mem[2048 + 96] == 0xd2800003 && mem[2048 + 97] == 0x00200100);
+    CHECK(guest_run(2, 4092, 5) && mem[3071] == 0xd53be040); /* frame 3 word 0 is NOP: guarded */
+}
+
+/* G8: data next to code, genuine UNDEFs, firmware, repeated PCs */
+static void catcher_data(void)
+{
+    reset();
+    table(31)[0] |= BIT(6);
+    table(31)[2] |= BIT(6);
+    table(TABLE0)[0] = table(TABLE0)[256];
+    ref_sync();
+    execute(0); /* block 0 CODE: frame 1 (data: PXN + UXN) is reachable by a stray branch */
+    static u32 data1[1024];
+    memcpy(data1, &mem[1024], sizeof(data1));
+    /* a (stray or stale) EC 0 at a data frame's PMU-looking word, both ELs: not provably code */
+    CHECK(!((guest_undef(1, 128, 0) >> 26) & 0x3f));
+    CHECK(!((guest_undef(1, 128, 5) >> 26) & 0x3f));
+    CHECK(!((guest_undef(1, 400, 5) >> 26) & 0x3f)); /* the guard-defeating one */
+    /* a genuine UNDEF in a code frame (not a PMU word, never rewritten): the guest's own business */
+    mem[2048 + 5] = ref[2048 + 5] = 0x00000000; /* udf #0 */
+    CHECK(!((guest_undef(2, 20, 0) >> 26) & 0x3f));
+    /* firmware: TTBR1 walks disabled, or EL1 code at a low address */
+    s1.tcr |= BIT(23);
+    CHECK(!((guest_undef(2, 128, 0) >> 26) & 0x3f));
+    s1.tcr &= ~BIT(23);
+    {
+        el1r[0] = BIT(25), el1r[1] = 0, el1r[2] = VA + 2 * 4096 + 128, el1r[3] = 5; /* EL1, low VA */
+        struct exc_info trap = {0};
+        CHECK(hv_win_pmu_el1_read(&trap, false) == BIT(25) && hv_win_pmu_el1_read(&trap, true) == 0);
+    }
+    CHECK(memcmp(&mem[1024], data1, sizeof(data1)) == 0);
+    equivalent(); /* nothing scanned or rewritten by any of the above */
+    /* a catch at frame 2 (EL0) leaves data frames 1 and 3 byte-identical */
+    reset();
+    table(31)[0] |= BIT(6);
+    table(31)[2] |= BIT(6);
+    ref_sync();
+    execute(0);
+    memcpy(data1, &mem[1024], sizeof(data1));
+    static u32 data3[1024];
+    memcpy(data3, &mem[3072], sizeof(data3));
+    CHECK(guest_run(2, 128, 0));
+    CHECK(memcmp(&mem[1024], data1, sizeof(data1)) == 0 && memcmp(&mem[3072], data3, sizeof(data3)) == 0);
+    equivalent();
+    /* a PC that UNDEFs again after its word was rewritten (logged): retried a few times, then the
+     * guest gets its UNDEF, no livelock */
+    unsigned n = 0;
+    while ((guest_undef(2, 128, 0) >> 26) & 0x3f)
+        CHECK(++n < 10);
+#ifdef HV_WIN_PMU_CATCH_STATS
+    CHECK(n == 4 && hv_win_pmu_stat(HV_WIN_PMU_CATCH_LOOPS) == 1);
+#endif
+    /* progress resets the count: the same VA in four processes, each with its own copy of the page */
+    reset();
+    table(31)[2] |= BIT(6);
+    ref_sync();
+    execute(0);
+    for (unsigned i = 0; i < 6; i++) {
+        store(2 * 4096 + 128, 4, 0xd53b9d05); /* a fresh unrewritten copy (the block flips DIRTY) */
+        execute(0);
+        CHECK(guest_run(2, 128, 0));
+    }
+#ifdef HV_WIN_PMU_CATCH_STATS
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_CATCH_LOOPS) == 0 && hv_win_pmu_stat(HV_WIN_PMU_CATCHES) == 6);
+#endif
+    equivalent();
+}
+
+/* G7/G8 randomized: the existing operations plus native runs of words in executable blocks */
+static void catcher_differential(void)
+{
+    static const u32 vals[] = {NOP, 0xd53b9d01, 0xd51befc3, 0x00200100, 0xd53bec03, 0x87654321, BRK};
+    unsigned long runs = 0, undefs = 0;
+    for (unsigned seed = 0; seed < 16; seed++) {
+        reset();
+        table(TABLE0)[0] = table(TABLE0)[256];
+        ref_sync();
+        rng = 0x6d20261111UL + seed;
+        for (unsigned n = 0; n < 3000; n++) {
+            unsigned f = random32() % 24, off = f * 4096 + (random32() % 1024) * 4;
+            u32 v = vals[random32() % 7];
+            switch (random32() % 8) {
+                case 0:
+                case 1:
+                case 2:
+                    if (!executable[f])
+                        break;
+                    if (m.st[f / 4] != HV_XT_CODE && m.st[f / 4] != HV_XT_PINNED)
+                        execute_at(f, (off & 4095) / 4); /* the fetch faults first */
+                    runs++;
+                    undefs += replacement(mem[off / 4]) != mem[off / 4];
+                    CHECK(guest_run(f, off & 4095, 5));
+                    break;
+                case 3:
+                    store(off & ~3U, 4, v);
+                    break;
+                case 4: {
+                    unsigned size = 1 + random32() % 6000;
+                    if (off + size > 24 * 4096)
+                        size = 24 * 4096 - off;
+                    fill(off, size, v);
+                    break;
+                }
+                case 5:
+                    ticks(1 + random32() % 12);
+                    break;
+                case 6:
+                    walker_update(f);
+                    break;
+                case 7: /* data frames are never written by a stray EC 0 */
+                    if (!executable[f]) {
+                        unsigned b = f / 4;
+                        if (m.st[b] == HV_XT_CODE || m.st[b] == HV_XT_PINNED)
+                            CHECK(!((guest_undef(f, off & 4095, 5) >> 26) & 0x3f));
+                        equivalent();
+                    }
+                    break;
+            }
+        }
+    }
+    CHECK(undefs > 100);
+    printf("win-pmu-4k catcher: %lu native runs, %lu would-be UNDEFs caught and retried\n", runs, undefs);
+}
+
 int main(void)
 {
+#ifndef PMU_4K_BASELINE_DEMO /* make demo-baseline: this file against aa98ccf, which has no diagnostics */
     el0_exception_diagnostics();
+#else
+    (void)el0_exception_diagnostics;
+#endif
     frame_scanner();
     mixed();
     unproven();
@@ -1006,6 +1280,9 @@ int main(void)
     walker();
     differential();
     replay();
+    catcher_sibling();
+    catcher_data();
+    catcher_differential();
     hv_win_pmu_host_reset();
     printf("win-pmu-4k: %lu checks, %lu differential operations, 0 failed\n", checks, ops);
     return 0;
