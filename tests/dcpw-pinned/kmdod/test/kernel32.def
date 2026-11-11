@@ -1,0 +1,15 @@
+LIBRARY kernel32.dll
+EXPORTS
+  GetStdHandle
+  WriteFile
+  ExitProcess
+  LoadLibraryA
+  GetProcAddress
+  GetLastError
+  CreateFileW
+  DeviceIoControl
+  CloseHandle
+  Sleep
+  GetTickCount
+  ProcessIdToSessionId
+  GetCurrentProcessId
