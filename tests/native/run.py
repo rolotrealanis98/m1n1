@@ -400,9 +400,11 @@ MUTANTS = [
  ('r4_canary_missing',
   [('s1/ans_ro.c', '        if (first < st.w_abs_min_first) st.w_abs_min_first = first;\n', '')]),
  ('r414_write_src_overlap_allowed',
-  [('s1/hv_nvme_queue.c', 'if (!to_guest) {', 'if (false) {')]),   # nightly-4: check line changed, same intent
+  [('s1/hv_nvme_queue.c', 'if (!to_guest && !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {', 'if (false) {')]),   # nightly-4b: check line changed, same intent (partial WRITE overlap allowed)
  ('r414_read_dup_dest_refused',
-  [('s1/hv_nvme_queue.c', 'if (!to_guest) {', 'if (true) {')]),    # nightly-4: check line changed, same intent
+  [('s1/hv_nvme_queue.c', 'if (!to_guest && !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {', 'if (to_guest || !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {')]),    # nightly-4b: same intent
+ ('n4b_write_dup_refused',
+  [('s1/hv_nvme_queue.c', 'if (!to_guest && !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {', 'if (!to_guest) {')]),
  ('r4_vwc_dishonest', [('s1/hv_nvme_queue.c', '    data[525] = ctrl->caps.vwc ? 1 : 0;', '    data[525] = 0;')]),
  ('r4_nsattr_wp_in_rw',
   [('s1/hv_nvme_queue.c', '    data[99] = ctrl->caps.writable ? 0 : 1;', '    data[99] = 1;')]),

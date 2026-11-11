@@ -255,7 +255,8 @@ static void secA_raw_ro_op(u8 op)
 }
 /* r4.14: one PRP list naming the same guest page twice. A READ may (Windows points the already
  * resident pages of a clustered in-page read at one dummy page): it succeeds, the last copy wins.
- * A WRITE may not: its source segments must stay disjoint (0x04, rule recorded, nothing reaches ANS). */
+ * nightly-4b: a WRITE may repeat a whole page exactly (n2-a3 shapes); a partial WRITE overlap is still refused
+ * (0x04, rule recorded, nothing reaches ANS). */
 static void r414_dup_pages(void)
 {
     rw_up(rw_cfg(), 0);
@@ -274,20 +275,48 @@ static void r414_dup_pages(void)
     CHECK(F.io_reads > r && F.io_writes == w);
     CHECK(controller.queue.prp_dup_dest_reads == 1 && controller.queue.prp_dup_dest_last == RDATA);
     CHECK(controller.queue.prp_refusal_total == 0);
+    /* nightly-4b: a WRITE source that exactly repeats an earlier whole, page-aligned source page is accepted
+     * (r4.14-nightly-4 refused it 0x04, rule data-overlap). Each occurrence is copied into the transfer buffer at
+     * its own offset: block 102 gets PRP1's page (block 100's data). */
     unsigned n = F.nio;
     for (u32 i = 0; i < 4; i++) gen_block(100 + i, 6, G(WDATA) + 4096ULL * i);
     c.opcode = VNVME_IO_WRITE; c.prp1 = WDATA;
     u64 f[3] = {WDATA + 4096, WDATA, WDATA + 3 * 4096};
     memcpy(G(PRPL), f, sizeof(f));
-    CHECK(submit(1, c) == VNVME_SC_DATA_TRANSFER_ERROR);
-    CHECK(F.nio == n && F.io_writes == w);                 /* nothing reached ANS */
+    CHECK(submit(1, c) == 0);
+    CHECK(F.nio > n && F.io_writes > w);
+    CHECK(controller.queue.prp_refusal_total == 0 && controller.queue.prp_dup_src_writes == 1 &&
+          controller.queue.prp_dup_src_last == WDATA);
+    /* the n2-a3 shapes: PRP1 page aligned, the same page again: nlb 2 (PRP2 = PRP1) and nlb 13 (list) */
+    for (u32 i = 0; i < 4096; i++) G(WDATA + 8 * 4096)[i] = (u8)(i * 13 + 1);
+    struct vnvme_command z = {.opcode = VNVME_IO_WRITE, .nsid = 1, .prp1 = WDATA + 8 * 4096, .cdw10 = 200, .cdw12 = 1,
+                              .prp2 = WDATA + 8 * 4096};
+    CHECK(submit(1, z) == 0);
+    u64 zl[12]; for (u32 i = 0; i < 12; i++) zl[i] = WDATA + 8 * 4096;
+    memcpy(G(PRPL), zl, sizeof(zl));
+    z.cdw10 = 300; z.cdw12 = 12; z.prp2 = PRPL;
+    CHECK(submit(1, z) == 0);
+    CHECK(controller.queue.prp_dup_src_writes == 3 && controller.queue.prp_refusal_total == 0);
+    /* a partial WRITE overlap (unaligned PRP1, then its page whole) is still refused: nothing reaches ANS */
+    n = F.nio; unsigned w2 = F.io_writes;
+    u64 pl[2] = {WDATA + 4 * 4096, WDATA + 5 * 4096};
+    memcpy(G(PRPL), pl, sizeof(pl));
+    struct vnvme_command q = {.opcode = VNVME_IO_WRITE, .nsid = 1, .prp1 = WDATA + 4 * 4096 + 0x200, .cdw10 = 400,
+                              .cdw12 = 1, .prp2 = PRPL};
+    CHECK(submit(1, q) == VNVME_SC_DATA_TRANSFER_ERROR);
+    CHECK(F.nio == n && F.io_writes == w2);
     const struct vnvme_prp_refusal *x = &controller.queue.prp_log[0];
     CHECK(controller.queue.prp_refusal_total == 1 && controller.queue.prp_refusals[VNVME_PRP_DATA_DATA] == 1);
-    CHECK(x->rule == VNVME_PRP_DATA_DATA && x->index == 2 && x->addr == WDATA && x->len == 4096 &&
-          x->other == WDATA && !x->to_guest && x->opcode == VNVME_IO_WRITE && x->ordinal == 1);
-    expect_guest(100, 4, 5);                                /* old data, session live */
+    CHECK(x->rule == VNVME_PRP_DATA_DATA && x->index == 1 && x->addr == WDATA + 4 * 4096 && x->len == 4096 &&
+          x->other == WDATA + 4 * 4096 + 0x200 && !x->to_guest && x->opcode == VNVME_IO_WRITE && x->ordinal == 1);
     CHECK(io_cmd(VNVME_IO_FLUSH, 0, 1, 0, 0) == 0);
-    expect_media(100, 4, 5);
+    u8 a[4096];
+    const u64 src[4] = {100, 101, 100, 103};                /* in command order */
+    for (u32 i = 0; i < 4; i++) { fake_media_block(W_START + 100 + i, a); gen_block(src[i], 6, b); CHECK(!memcmp(a, b, 4096)); }
+    for (u32 i = 0; i < 2; i++) { fake_media_block(W_START + 200 + i, a); CHECK(!memcmp(a, G(WDATA + 8 * 4096), 4096)); }
+    for (u32 i = 0; i < 13; i++) { fake_media_block(W_START + 300 + i, a); CHECK(!memcmp(a, G(WDATA + 8 * 4096), 4096)); }
+    expect_media_base(199, 1); expect_media_base(202, 1); expect_media_base(299, 1); expect_media_base(313, 1);
+    expect_media_base(400, 2);                              /* the refused write left no trace */
     outside_untouched();
     live_policy();
 }

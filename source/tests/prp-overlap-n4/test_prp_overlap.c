@@ -9,11 +9,14 @@
  *   - every list fragment must be readable guest RAM for exactly the bytes read; every data segment must be guest
  *     RAM with write permission (READ) or read permission (WRITE) on its page, may not touch an active queue or a
  *     consumed list fragment;
- *   - WRITE: source segments must be disjoint. READ: destination segments may overlap in any way;
+ *   - WRITE: source segments must be disjoint, except that a whole page-aligned page may exactly repeat an earlier
+ *     whole page-aligned segment (nightly-4b). READ: destination segments may overlap in any way;
  *   - accepted READ: segment k receives the next len(k) bytes of the media stream, in order (later bytes overwrite
  *     earlier ones). Accepted WRITE: the media receives the source segments' bytes in order;
  *   - refused: status 0x04, no backend call, guest memory and media unchanged; the logged rule matches.
  * The whole guest RAM (except the live queue bytes) and the touched media range are compared after every command.
+ * The media is a flat array: GUARD blocks, the NS_BLOCKS namespace ("window"), GUARD blocks; the backend refuses any
+ * LBA outside the window and both guard ranges are compared with their initial bytes after every command.
  *
  * usage: test_prp_overlap [iterations] [seed]
  */
@@ -27,6 +30,7 @@
 #define RAM_SIZE ((size_t)NPAGES * PAGE)
 #define RAM_BASE UINT64_C(0x80000000)
 #define NS_BLOCKS 2048u
+#define GUARD 64u
 #define XFER_CAP (256u * PAGE)
 #define PR 1u
 #define PW 2u
@@ -41,7 +45,7 @@
 #define DPG(n) PGA(16 + (n))  /* data area: pages 16..511 */
 #define NDATA (NPAGES - 16u)
 
-static u8 *ram, *exp_ram, *disk, *ref_disk;
+static u8 *ram, *exp_ram, *disk_all, *disk, *ref_disk, *guard_lo, *guard_hi;
 static u8 perm[NPAGES];
 static u8 xfer[XFER_CAP];
 static unsigned long read_calls, write_calls, checks;
@@ -68,14 +72,14 @@ static void *span(void *o, u64 ipa, size_t n, bool w) { (void)o; return span_ok(
 static bool rb(void *o, u64 lba, u32 n, void *buf)
 {
     (void)o; read_calls++;
-    if (lba >= NS_BLOCKS || n > NS_BLOCKS - lba || n > 32) return false;
+    if (lba >= NS_BLOCKS || n > NS_BLOCKS - lba || n > 32) return false; /* window */
     memcpy(buf, disk + lba * PAGE, (size_t)n * PAGE);
     return true;
 }
 static bool wb(void *o, u64 lba, u32 n, const void *buf)
 {
     (void)o; write_calls++;
-    if (lba >= NS_BLOCKS || n > NS_BLOCKS - lba || n > 32) return false;
+    if (lba >= NS_BLOCKS || n > NS_BLOCKS - lba || n > 32) return false; /* window */
     memcpy(disk + lba * PAGE, buf, (size_t)n * PAGE);
     return true;
 }
@@ -178,7 +182,8 @@ static void ref_plan(u64 prp1, u64 prp2, size_t total, bool to_guest, struct ref
             if (ovl(a, n, fa[f], fn[f])) { r->rule = VNVME_PRP_DATA_LIST; return; }
         for (size_t i = 0; i < r->nseg; i++)
             if (ovl(a, n, r->seg[i].addr, r->seg[i].len)) {
-                if (!to_guest) { r->rule = VNVME_PRP_DATA_DATA; return; }
+                bool exact = n == PAGE && r->seg[i].len == PAGE && a == r->seg[i].addr;
+                if (!to_guest && !exact) { r->rule = VNVME_PRP_DATA_DATA; return; }
                 r->dup = true;
                 if (!(n == PAGE && r->seg[i].len == PAGE && a == r->seg[i].addr)) r->part = true;
             }
@@ -190,6 +195,7 @@ static void ref_plan(u64 prp1, u64 prp2, size_t total, bool to_guest, struct ref
 /* ---- one command: real controller vs reference ---- */
 static unsigned long st_rule[2][VNVME_PRP_RULES], st_ok[2], st_dup, st_part, st_big;
 static struct ref R;
+static unsigned long cmds, st_dupw;
 static int run_one(u8 op, u64 lba, u32 blocks, u64 prp1, u64 prp2, int expect)
 {
     bool to_guest = op == VNVME_IO_READ;
@@ -207,6 +213,7 @@ static int run_one(u8 op, u64 lba, u32 blocks, u64 prp1, u64 prp2, int expect)
     }
     unsigned long rc = read_calls, wc = write_calls;
     u64 dup = ctrl.prp_dup_dest_reads, part = ctrl.prp_part_dest_reads, rt = ctrl.prp_refusal_total;
+    u64 dupw = ctrl.prp_dup_src_writes;
     struct vnvme_command c = {0};
     c.opcode = op; c.nsid = 1; c.prp1 = prp1; c.prp2 = prp2;
     c.cdw10 = (u32)lba; c.cdw11 = (u32)(lba >> 32); c.cdw12 = blocks - 1;
@@ -224,13 +231,16 @@ static int run_one(u8 op, u64 lba, u32 blocks, u64 prp1, u64 prp2, int expect)
         if (fails < 25) printf("  first difference at page %zu +0x%zx (op %u rule %d nseg %zu)\n", d / PAGE, d % PAGE, op, R.rule, R.nseg);
     }
     CHECK(!memcmp(disk + lba * PAGE, ref_disk + lba * PAGE, total));
+    CHECK(!memcmp(disk_all, guard_lo, (size_t)GUARD * PAGE));                       /* nothing outside the window */
+    CHECK(!memcmp(disk + (size_t)NS_BLOCKS * PAGE, guard_hi, (size_t)GUARD * PAGE));
+    if (!(++cmds % 4096)) CHECK(!memcmp(disk, ref_disk, (size_t)NS_BLOCKS * PAGE)); /* whole window, periodically */
     CHECK(!ctrl.fatal);
     if (R.rule) {
         CHECK(read_calls == rc && write_calls == wc); /* nothing reached the backend */
         CHECK(ctrl.prp_refusal_total == rt + 1);
         const struct vnvme_prp_refusal *x = &ctrl.prp_log[(ctrl.prp_refusal_total - 1) % VNVME_PRP_LOG];
         CHECK(x->rule == R.rule && x->opcode == op && x->to_guest == to_guest);
-        CHECK(ctrl.prp_dup_dest_reads == dup && ctrl.prp_part_dest_reads == part);
+        CHECK(ctrl.prp_dup_dest_reads == dup && ctrl.prp_part_dest_reads == part && ctrl.prp_dup_src_writes == dupw);
         st_rule[to_guest][R.rule]++;
     } else {
         CHECK(ctrl.prp_refusal_total == rt);
@@ -238,8 +248,13 @@ static int run_one(u8 op, u64 lba, u32 blocks, u64 prp1, u64 prp2, int expect)
         else CHECK(write_calls == wc + (blocks + 31) / 32 && read_calls == rc);
         CHECK(ctrl.prp_dup_dest_reads == dup + (to_guest && R.dup));
         CHECK(ctrl.prp_part_dest_reads == part + (to_guest && R.part));
-        CHECK(!R.dup || ctrl.prp_dup_dest_last == prp1);
+        CHECK(!to_guest || !R.dup || ctrl.prp_dup_dest_last == prp1);
         CHECK(!R.part || ctrl.prp_part_dest_last == prp1);
+        CHECK(!to_guest || !R.part || R.dup);
+        CHECK(to_guest || !R.part);                                  /* a WRITE overlap is never partial */
+        CHECK(ctrl.prp_dup_src_writes == dupw + (!to_guest && R.dup));
+        CHECK(to_guest || !R.dup || ctrl.prp_dup_src_last == prp1);
+        st_dupw += !to_guest && R.dup;
         st_ok[to_guest]++;
         st_dup += to_guest && R.dup && !R.part;
         st_part += R.part;
@@ -304,14 +319,45 @@ static void shapes(void)
     CHECK(!memcmp(ram + (DUMMY - RAM_BASE) + 8, ref_disk + 1000 * PAGE + 255 * PAGE, PAGE - 8));
 
     /* ---- still refused ---- */
-    /* W1: Windows' WRITE shape from n2-a3: PRP1 = PRP2 = one page (2 blocks) */
-    ctx = "W1 WRITE exact repeat (2 blocks, PRP2 = PRP1)";
-    fill(ZP, PAGE, 0);
-    CHECK(run_one(VNVME_IO_WRITE, 200, 2, ZP, ZP, VNVME_PRP_DATA_DATA) == VNVME_PRP_DATA_DATA);
-    /* W2: the same with a list (13 blocks, every entry the page) */
-    ctx = "W2 WRITE exact repeat (13 blocks, list)";
-    {u64 e[12]; for (unsigned i = 0; i < 12; i++) e[i] = ZP; put_list(LPG(5), e, 12);}
-    CHECK(run_one(VNVME_IO_WRITE, 210, 13, ZP, LPG(5), VNVME_PRP_DATA_DATA) == VNVME_PRP_DATA_DATA);
+    /* ---- WRITE exact whole-page source repeats (nightly-4b: accepted) ---- */
+    /* W1/W2: Windows' WRITE shapes from n2-a3: PRP1 page aligned, the same page again; nlb 2 (PRP2 = PRP1) and
+     * nlb 3..13 (a list naming the page every time). Media verified literally: every block = the page. */
+    for (u32 nlb = 2; nlb <= 13; nlb++) {
+        ctx = nlb == 2 ? "W1 WRITE exact repeat (2 blocks, PRP2 = PRP1)" : "W2 WRITE exact repeat (list, every entry the page)";
+        for (unsigned i = 0; i < PAGE; i++) ram[ZP - RAM_BASE + i] = (u8)(i * 7 + nlb);   /* distinct per nlb */
+        u64 lba = 200 + 16 * nlb;
+        if (nlb > 2) {u64 e[12]; for (unsigned i = 0; i < 12; i++) e[i] = ZP; put_list(LPG(5), e, nlb - 1);}
+        u64 w = ctrl.prp_dup_src_writes;
+        CHECK(run_one(VNVME_IO_WRITE, lba, nlb, ZP, nlb > 2 ? LPG(5) : ZP, 0) == 0);
+        for (u32 b = 0; b < nlb; b++) CHECK(!memcmp(disk + (lba + b) * PAGE, ram + (ZP - RAM_BASE), PAGE));
+        CHECK(R.dup && ctrl.prp_dup_src_writes == w + 1 && ctrl.prp_dup_src_last == ZP);
+        /* read back through the controller: the same bytes */
+        {u64 e[12]; for (unsigned i = 0; i < 12; i++) e[i] = DPG(201 + i); put_list(LPG(9), e, nlb - 1);}
+        CHECK(run_one(VNVME_IO_READ, lba, nlb, DPG(200), nlb > 2 ? LPG(9) : DPG(201), 0) == 0);
+        for (u32 b = 0; b < nlb; b++) CHECK(!memcmp(ram + (DPG(200 + b) - RAM_BASE), ram + (ZP - RAM_BASE), PAGE));
+    }
+    /* W2b: a mix: page A, B, A, C, A (A repeated between other pages) */
+    ctx = "W2b WRITE repeat between other pages";
+    {u64 e[4] = {DPG(30), ZP, DPG(31), ZP}; put_list(LPG(5), e, 4);}
+    CHECK(run_one(VNVME_IO_WRITE, 500, 5, ZP, LPG(5), 0) == 0);
+    CHECK(!memcmp(disk + 502 * PAGE, ram + (ZP - RAM_BASE), PAGE) && !memcmp(disk + 501 * PAGE, ram + (DPG(30) - RAM_BASE), PAGE));
+    /* W6: an exact repeat of a page that is the PRP list's own page: data-list */
+    ctx = "W6 WRITE repeat of the list page";
+    {u64 e[2] = {LPG(8), LPG(8)}; put_list(LPG(8) + 0x800, e, 2);}
+    CHECK(run_one(VNVME_IO_WRITE, 510, 3, LPG(8), LPG(8) + 0x800, VNVME_PRP_DATA_LIST) == VNVME_PRP_DATA_LIST);
+    /* W7: an exact repeat of a live queue page: data-queue */
+    ctx = "W7 WRITE repeat of a queue page";
+    CHECK(run_one(VNVME_IO_WRITE, 520, 2, IOSQ, IOSQ, VNVME_PRP_DATA_QUEUE) == VNVME_PRP_DATA_QUEUE);
+    /* W8: an unaligned "repeat" (entry = page + 8): entry-align */
+    ctx = "W8 WRITE unaligned repeat";
+    CHECK(run_one(VNVME_IO_WRITE, 530, 2, ZP, ZP + 8, VNVME_PRP_PRP2_ALIGN) == VNVME_PRP_PRP2_ALIGN);
+    {u64 e[2] = {ZP, ZP + 8}; put_list(LPG(5), e, 2);}
+    CHECK(run_one(VNVME_IO_WRITE, 530, 3, ZP, LPG(5), VNVME_PRP_ENTRY_ALIGN) == VNVME_PRP_ENTRY_ALIGN);
+    /* W9: a repeated page that is not readable: data-admit (first occurrence already) */
+    ctx = "W9 WRITE repeat of an unreadable page";
+    perm[16 + 40] = PW;
+    CHECK(run_one(VNVME_IO_WRITE, 540, 2, DPG(40), DPG(40), VNVME_PRP_DATA_ADMIT) == VNVME_PRP_DATA_ADMIT);
+    perm[16 + 40] = PR | PW;
     /* W3: WRITE partial overlap (unaligned PRP1, then the page whole) */
     ctx = "W3 WRITE partial overlap";
     {u64 e[2] = {DPG(16), DPG(17)}; put_list(LPG(5), e, 2);}
@@ -436,8 +482,11 @@ int main(int argc, char **argv)
     rs = argc > 2 ? strtoull(argv[2], NULL, 0) : 20261111;
     if (!rs) rs = 1;
     ram = calloc(1, RAM_SIZE); exp_ram = calloc(1, RAM_SIZE);
-    disk = malloc((size_t)NS_BLOCKS * PAGE); ref_disk = malloc((size_t)NS_BLOCKS * PAGE);
-    for (size_t i = 0; i < (size_t)NS_BLOCKS * PAGE; i++) disk[i] = (u8)rnd();
+    size_t all = (size_t)(NS_BLOCKS + 2 * GUARD) * PAGE;
+    disk_all = malloc(all); disk = disk_all + (size_t)GUARD * PAGE; ref_disk = malloc((size_t)NS_BLOCKS * PAGE);
+    for (size_t i = 0; i < all; i++) disk_all[i] = (u8)rnd();
+    guard_lo = malloc((size_t)GUARD * PAGE); guard_hi = malloc((size_t)GUARD * PAGE);
+    memcpy(guard_lo, disk_all, (size_t)GUARD * PAGE); memcpy(guard_hi, disk + (size_t)NS_BLOCKS * PAGE, (size_t)GUARD * PAGE);
     memcpy(ref_disk, disk, (size_t)NS_BLOCKS * PAGE);
     for (size_t i = 4 * PAGE; i < RAM_SIZE; i++) ram[i] = (u8)rnd();
     setup();
@@ -452,14 +501,14 @@ int main(int argc, char **argv)
     CHECK(!memcmp(disk, ref_disk, (size_t)NS_BLOCKS * PAGE));     /* whole media at the end */
     if (iters >= 20000) {                                           /* the random mix reached every class */
         CHECK(st_part > 1000 && st_dup > 100 && st_big > 100 && st_ok[0] > 1000 && st_ok[1] > 1000);
-        CHECK(st_rule[0][VNVME_PRP_DATA_DATA] > 1000);
+        CHECK(st_rule[0][VNVME_PRP_DATA_DATA] > 1000 && st_dupw > 1000);
         int need[] = {VNVME_PRP_PRP2, VNVME_PRP_PRP2_ALIGN, VNVME_PRP_LIST_PTR, VNVME_PRP_LIST_ADMIT, VNVME_PRP_ENTRY_ALIGN,
                       VNVME_PRP_DATA_ADMIT, VNVME_PRP_DATA_QUEUE, VNVME_PRP_DATA_LIST};
         for (unsigned i = 0; i < sizeof(need) / sizeof(need[0]); i++) CHECK(st_rule[1][need[i]] > 10);
     }
     printf("{\"checks\":%lu,\"failed\":%d,\"shape_failures\":%lu,\"iterations\":%lu,\"reads_ok\":%lu,\"writes_ok\":%lu,"
-           "\"reads_exact_repeat\":%lu,\"reads_partial_overlap\":%lu,\"over_32_blocks\":%lu,\"read_refused\":{",
-           checks, fails, shape_fails, iters, st_ok[1], st_ok[0], st_dup, st_part, st_big);
+           "\"writes_exact_repeat\":%lu,\"reads_exact_repeat\":%lu,\"reads_partial_overlap\":%lu,\"over_32_blocks\":%lu,\"read_refused\":{",
+           checks, fails, shape_fails, iters, st_ok[1], st_ok[0], st_dupw, st_dup, st_part, st_big);
     for (int i = 1; i < VNVME_PRP_RULES; i++) printf("%s\"%d\":%lu", i > 1 ? "," : "", i, st_rule[1][i]);
     printf("},\"write_refused\":{");
     for (int i = 1; i < VNVME_PRP_RULES; i++) printf("%s\"%d\":%lu", i > 1 ? "," : "", i, st_rule[0][i]);

@@ -8,6 +8,7 @@ HERE = Path(__file__).resolve().parent
 SRC = HERE.parents[1] / 'src/hv/win/s1'
 ITER = sys.argv[1] if len(sys.argv) > 1 else '20000'
 CC = '/opt/homebrew/opt/llvm/bin/clang' if Path('/opt/homebrew/opt/llvm/bin/clang').exists() else 'clang'
+L = 'if (!to_guest && !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {'
 MUTANTS = [
     # data segment admission: READ destinations admitted for read only (a read-only page becomes a target)
     ('data_admission_read_only', 'u8 *ptr = guest_span(ctrl, addr, n, to_guest);', 'u8 *ptr = guest_span(ctrl, addr, n, false);'),
@@ -23,16 +24,40 @@ MUTANTS = [
      'const u8 *src = guest_span(ctrl, list, n * sizeof(u64), false); if (!src && list >= 0x80000000ull && list < 0x80200000ull) src = (const u8 *)ctrl->ops->guest_span(ctrl->opaque, 0x80000000ull, 1, false) + (list - 0x80000000ull);'),
     # entry alignment
     ('entry_align_dropped', 'if (!addr || (addr & (VNVME_PAGE_SIZE - 1))) return false;', 'if (!addr) return false;'),
-    # WRITE overlap allowed (all shapes)
-    ('write_overlap_allowed', 'if (!to_guest) {', 'if (false) {'),
-    # WRITE exact whole-page repeat allowed (the n2-a3 shape), partial still refused
-    ('write_exact_repeat_allowed', 'if (!to_guest) {',
-     'if (!to_guest && !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {'),
+    # nightly-4b: the overlap check line is
+    #   if (!to_guest && !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {
+    # WRITE overlap allowed (all shapes, incl. partial)
+    ('write_overlap_allowed', L, 'if (false) {'),
+    # WRITE exact whole-page repeat refused again (nightly-4 behaviour)
+    ('write_exact_repeat_refused', L, 'if (!to_guest) {'),
+    # WRITE short segment repeating an earlier whole page at the same address allowed (W4)
+    ('write_short_repeat_allowed', L, 'if (!to_guest && !(plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {'),
+    # WRITE any overlap at the same start address allowed (length checks dropped)
+    ('write_same_addr_allowed', L, 'if (!to_guest && !(addr == plan->addr[i])) {'),
+    # WRITE: queue-page check dropped for WRITE sources (W7)
+    ('write_queue_check_dropped', 'if (!ptr || overlaps_queue(ctrl, addr, n)) return false;',
+     'if (!ptr || (to_guest && overlaps_queue(ctrl, addr, n))) return false;'),
+    # WRITE: list-page check dropped for WRITE sources (W6)
+    ('write_list_check_dropped', '            if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;',
+     '            if (to_guest && overlaps(addr, n, frag_addr[i], frag_len[i])) return false;'),
+    # WRITE sources admitted for write instead of read (W9: a write-only page)
+    ('write_admission_wrong_perm', 'u8 *ptr = guest_span(ctrl, addr, n, to_guest);', 'u8 *ptr = guest_span(ctrl, addr, n, true);'),
+    # WRITE: a repeated source page is not copied again (stale bounce bytes submitted)
+    ('write_repeat_not_copied', """    for (size_t i = 0; i < plan->count; i++) {
+        memcpy(buffer, plan->ptr[i], plan->len[i]);""", """    for (size_t i = 0; i < plan->count; i++) {
+        if (i && plan->addr[i] == plan->addr[0]) { buffer += plan->len[i]; continue; }
+        memcpy(buffer, plan->ptr[i], plan->len[i]);"""),
+    # WRITE: bounce offset advanced a whole page per segment
+    ('write_copy_stride_page', """        memcpy(buffer, plan->ptr[i], plan->len[i]);
+        buffer += plan->len[i];""", """        memcpy(buffer, plan->ptr[i], plan->len[i]);
+        buffer += VNVME_PAGE_SIZE;"""),
+    # WRITE repeat counter missing
+    ('dup_src_counter_missing', '            ctrl->prp_dup_src_writes++;\n', ''),
     # r4.14 behaviour: READ partial overlap refused
-    ('read_partial_refused', 'if (!to_guest) {',
+    ('read_partial_refused', L,
      'if (!to_guest || n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i]) {'),
     # every READ overlap refused
-    ('read_overlap_refused', 'if (!to_guest) {', 'if (true) {'),
+    ('read_overlap_refused', L, 'if (to_guest || !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {'),
     # copies in reverse order (earlier bytes would win)
     ('copy_reverse_order', '''    for (size_t i = 0; i < plan->count; i++) {
         memcpy(plan->ptr[i], buffer, plan->len[i]);

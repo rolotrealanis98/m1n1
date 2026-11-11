@@ -91,9 +91,10 @@ void hv_win_storage_status_lines(const char *prefix)
     for (int i = 0; i < VNVME_PRP_RULES; i++)
         if (q->prp_refusals[i])
             printf(" %s:%lu", prp_rule((u8)i), (unsigned long)q->prp_refusals[i]);
-    printf(" | dup-dest reads %lu (last prp1 0x%lx) partial %lu (last prp1 0x%lx)\n",
+    printf(" | dup-dest reads %lu (last prp1 0x%lx) partial %lu (last prp1 0x%lx) | dup-src writes %lu (last prp1 0x%lx)\n",
            (unsigned long)q->prp_dup_dest_reads, (unsigned long)q->prp_dup_dest_last,
-           (unsigned long)q->prp_part_dest_reads, (unsigned long)q->prp_part_dest_last);
+           (unsigned long)q->prp_part_dest_reads, (unsigned long)q->prp_part_dest_last,
+           (unsigned long)q->prp_dup_src_writes, (unsigned long)q->prp_dup_src_last);
     const struct s1dg_entry *sq = diag_last(S1DG_SQE), *cq = diag_last(S1DG_CQE);
     printf("%s nvme: q1 sq h%u t%u cq h%u t%u pend %u ien %d", prefix, q->queues[1].sq_head,
            q->queues[1].sq_tail, q->queues[1].cq_head, q->queues[1].cq_tail, q->queues[1].cq_pending,

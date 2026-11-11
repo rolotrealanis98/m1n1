@@ -220,7 +220,7 @@ struct prp_plan {
     u64 addr[VNVME_MAX_XFER_BLOCKS + 1];
     size_t len[VNVME_MAX_XFER_BLOCKS + 1];
     size_t count;
-    bool dup_dest; /* r4.14: a destination segment repeats an earlier one (to_guest only) */
+    bool dup_dest; /* r4.14: a data segment overlaps an earlier one (nightly-4b: WRITE exact repeats too) */
     bool part_dest; /* nightly-4: ... and at least one such overlap is not an exact whole-page repeat */
 };
 /* r4: data buffer for READ/WRITE: the backend's private transfer buffer when it has one
@@ -336,11 +336,18 @@ static bool plan_prps_body(struct vnvme_ctrl *ctrl, const struct vnvme_command *
          * page with a whole-page segment). Each segment is exactly [addr, addr + n) within one page,
          * admitted on its own above; copy_to_plan writes segment i's n bytes to that range, in command
          * order, so bytes named twice hold the later segment's data, as on a real controller. Nothing
-         * outside the admitted ranges is written. Every overlap between WRITE source segments keeps
-         * the r2.1 refusal. */
+         * outside the admitted ranges is written.
+         * nightly-4b: a WRITE source segment may be an exact repeat of an earlier whole, page-aligned
+         * source segment of the same command (n2-a3: 24 WRITEs, PRP1 page aligned and the same page
+         * again, nlb 2..13, were refused 0x04). It is only a repeated source: copy_from_plan copies
+         * each occurrence once into the private transfer buffer at its own offset, in command order,
+         * and that buffer is what is submitted; where it lands is decided by the LBA range and its
+         * window checks, which do not depend on the PRPs. Each occurrence was read-admitted above and
+         * may not touch a queue or a list fragment. Every other WRITE overlap (partial, unaligned,
+         * short segment) keeps the r2.1 refusal. */
         for (size_t i = 0; i < plan->count; i++)
             if (overlaps(addr, n, plan->addr[i], plan->len[i])) {
-                if (!to_guest) {
+                if (!to_guest && !(n == VNVME_PAGE_SIZE && plan->len[i] == VNVME_PAGE_SIZE && addr == plan->addr[i])) {
                     PRP_AT(VNVME_PRP_DATA_DATA, plan->count, addr, n, plan->addr[i]);
                     return false;
                 }
@@ -368,6 +375,10 @@ static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *c
                 ctrl->prp_part_dest_reads++;
                 ctrl->prp_part_dest_last = cmd->prp1;
             }
+        }
+        if (plan->dup_dest && !to_guest) { /* nightly-4b: WRITEs with a repeated whole source page */
+            ctrl->prp_dup_src_writes++;
+            ctrl->prp_dup_src_last = cmd->prp1;
         }
         return true;
     }
