@@ -60,9 +60,23 @@ u64 smp_get_mpidr(int cpu)
 }
 
 static u32 ipi_mask;
+/* sched1: every vGIC IPI is preceded by exactly one hv_win_kick_note() for the same CPU */
+static u32 kick_noted;
+static u64 kick_notes, kick_ipis;
+void hv_win_kick_note(int cpu)
+{
+    CHECK(cpu != host_cpu);
+    CHECK(!(kick_noted & (1U << cpu))); /* a note never left without its IPI */
+    kick_noted |= 1U << cpu;
+    kick_notes++;
+}
+
 void smp_send_ipi(int cpu)
 {
     CHECK(cpu != host_cpu);
+    CHECK(kick_noted & (1U << cpu)); /* noted before the IPI is sent */
+    kick_noted &= ~(1U << cpu);
+    kick_ipis++;
     ipi_mask |= 1U << cpu;
 }
 
@@ -1900,6 +1914,14 @@ int main(int argc, char **argv)
     RUN(test_smp2f_vctx_and_diag);
     RUN(test_smpn_j716s_6_vcpus);
     RUN(test_smpn_j716s_18_vcpus);
+
+    /* sched1: kick-to-wake timestamps cover every IPI the model sent, and nothing else */
+    cur_test = "sched1_kick_note";
+    CHECK(kick_ipis > 0);
+    CHECK_EQ(kick_notes, kick_ipis);
+    CHECK_EQ(kick_noted, 0);
+    printf("%-40s %s (%lu IPIs)\n", "sched1_kick_note", kick_notes == kick_ipis && !kick_noted ? "ok" : "FAILED",
+           (unsigned long)kick_ipis);
 
     printf("%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;

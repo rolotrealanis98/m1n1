@@ -254,8 +254,10 @@ static void vgic_unlock(void)
         int cpu = vgic.vcpu[v].cpu;
 
         kick &= kick - 1;
-        if (cpu != smp_id() && hv_started_cpus[cpu])
+        if (cpu != smp_id() && hv_started_cpus[cpu]) {
+            hv_win_kick_note(cpu); /* sched1: kick-to-wake latency (hv_exc.c) */
             smp_send_ipi(cpu);
+        }
     }
 }
 
