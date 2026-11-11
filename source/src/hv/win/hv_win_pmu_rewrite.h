@@ -4,8 +4,9 @@
  *
  * The T6050 has no PMUv3 and its EL1 PMU accesses UNDEF at EL1 before any EL2 trap (smoke run
  * 2026-11-08), while Windows reads PMCCNTR_EL0 unconditionally. When the host turns the EL2 rewrite
- * on, guest RAM is non-executable in stage 2 and EL2 rewrites, at the first instruction fetch from
- * a 16 KiB page, every PMUv3 register access in that page into an instruction that needs no PMU:
+ * on, guest RAM starts non-executable in stage 2. After proving a faulting 4 KiB frame executable
+ * in stage 1, EL2 scans only that frame for PMUv3 accesses (guarded below). Stage-2 permissions
+ * still cover 16 KiB, so unobserved sibling execution is possible; see hv_win_pmu.c. Replacements:
  *
  *   mrs Xt, PMCCNTR_EL0      ->  mrs Xt, CNTVCT_EL0  (monotonic, as EL2's trap emulation answers)
  *   mrs Xt, <other PMU reg>  ->  movz Xt, #0         (RAZ: PMCR_EL0.N = 0, nothing implemented)
@@ -35,6 +36,8 @@ enum pmu_rw_kind {
     PMU_RW_READ_OTHER,   /* mrs Xt, any other PMUv3 register */
     PMU_RW_WRITE,        /* msr <PMUv3 register>, Xt */
     PMU_RW_SKIP_DATA,    /* PMU-looking word left alone: the next word cannot execute (data) */
+    PMU_RW_SKIP_BOUNDARY,
+    PMU_RW_SKIP_OTHER,
     PMU_RW_NR_KINDS,
 };
 
@@ -91,5 +94,9 @@ typedef void pmu_rw_record_fn(void *arg, u32 index, u32 old_insn, u32 new_insn);
 u32 pmu_rw_rewrite_words(u32 *words, u32 n, pmu_rw_record_fn *rec, void *arg, u64 *counts);
 u32 pmu_rw_rewrite_words_ex(u32 *words, u32 n, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
                             void *arg, u64 *counts);
+
+/* Production frame scanner: no read outside 4 KiB; final PMU word is left alone. */
+u32 pmu_rw_rewrite_frame(u32 *words, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
+                         void *arg, u64 *counts);
 
 #endif

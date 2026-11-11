@@ -9,24 +9,21 @@
  * hand-off); this file is the insurance for code Mu cannot see: drivers the kernel loads later and
  * anything Mu missed.
  *
- * Per 16 KiB page of guest RAM (state in the stage-2 leaf, hv_vm.c "execute tracking"):
- *
- *   DIRTY (RW, XN)  --first fetch-->  SCANNING (RO, XN), PMUv3 words rewritten  -->  CODE (RO, X)
- *   CODE  --write or walker update-->  DIRTY, or PINNED (RW, X) at the PMU_FLIP_CAP-th flip
- *   PINNED  --sweep, every PMU_SWEEP_TICKS hypervisor ticks-->  DIRTY
- *   CODE, PINNED  --EL2 device write into the page (hv_win_pmu_dma_write)-->  DIRTY
- *
- * Everything runs under the big HV lock (the locked half of hv_exc_sync() and hv_tick()). The
- * rewrite happens only in SCANNING: no CPU can write the page (write permission revoked, broadcast
- * TLBI completed) or execute it (XN since it became DIRTY), so no instruction is modified while
- * another CPU may execute it.
+ * State is per 4 KiB frame; stage-2 permissions remain per 16 KiB block. Only an
+ * observed, stage-1-validated execute fault authorizes a scan. At most one block
+ * is RO+X; switching blocks or a tick revokes it. Siblings can execute during
+ * that window without a scan (PMU coverage is incomplete, data is never scanned
+ * speculatively). Stores are emulated with exact invalidation, never RWX-pinned.
+ * All changes run under bhl and refuse to scan/store with another guest CPU active.
  */
 
 #ifdef PMU_REWRITE_HOST_TEST
 #include "pmu_host.h"
+#include <stdlib.h>
 #else
 #include "cpu_regs.h"
 #include "heapblock.h"
+#include "malloc.h"
 #include "memory.h"
 #include "smp.h"
 #include "utils.h"
@@ -37,6 +34,7 @@
 
 #include "hv_win.h"
 #include "hv_win_pmu_rewrite.h"
+#include "hv_win_pmu_4k.h"
 
 /* ESR_EL2 ISS for instruction and data aborts */
 #define ESR_ISS_ABORT_S1PTW BIT(7)
@@ -46,11 +44,7 @@
 #define FSC_PERM            0x0c /* permission fault, level 0..3 */
 
 #define PMU_PAGE        HV_XT_PAGE_SIZE
-#define PMU_PAGE_WORDS  (PMU_PAGE / 4)
 #define PMU_MAX_RANGES  32
-#define PMU_FLIP_CAP    4   /* write-after-execute flips before a page is pinned RWX */
-#define PMU_MAX_PINNED  256 /* pages pinned at once; past it a page keeps flipping */
-#define PMU_SWEEP_TICKS 100 /* hv_tick() runs at 1 kHz: pinned pages re-armed after 100 ms */
 #define PMU_PRINT_MAX   64  /* rewritten pages reported on the console (all are counted/logged) */
 #define PMU_STUCK_LIMIT                                                                            \
     256 /* unproductive faults in a row at one PC before the stock path gets it */
@@ -71,11 +65,11 @@ static struct {
     u32 nr_ranges;
     struct {
         u64 base, size;
+        u8 *frames;
     } ranges[PMU_MAX_RANGES];
     u64 stats[HV_WIN_PMU_NR_STATS];
-    u64 pinned[PMU_MAX_PINNED];
-    u32 nr_pinned;
-    u32 ticks;
+    u64 open_block;
+    bool open;
     u64 printed;
     u64 skips_printed;
     struct pmu_log_entry log[HV_WIN_PMU_LOG_SIZE];
@@ -83,6 +77,68 @@ static struct {
 
 static u64 stuck_elr[MAX_CPUS];
 static u32 stuck_count[MAX_CPUS];
+
+/* The old host suite has no guest-register/store model. Missing weak hooks deny
+ * the new operations rather than silently inventing executable mappings. */
+#ifdef PMU_REWRITE_HOST_TEST
+__attribute__((weak)) bool pmu_host_s1(struct pmu_s1 *s)
+{
+    (void)s;
+    return false;
+}
+__attribute__((weak)) bool hv_emulate_pt_store(struct exc_info *ctx, u64 far, u64 ipa, u64 *bytes)
+{
+    (void)ctx; (void)far; (void)ipa; (void)bytes;
+    return false;
+}
+#endif
+
+static u8 *pmu_frame(u64 ipa)
+{
+    for (u32 i = 0; i < pmu.nr_ranges; i++) {
+        if (ipa >= pmu.ranges[i].base && ipa - pmu.ranges[i].base < pmu.ranges[i].size)
+            return &pmu.ranges[i].frames[(ipa - pmu.ranges[i].base) / PMU_FRAME_SIZE];
+    }
+    return NULL;
+}
+
+static bool pmu_read_pte(void *arg, u64 ipa, u64 *value)
+{
+    (void)arg;
+    u64 pa;
+    if ((ipa & 7) || hv_xt_get(ipa, &pa, NULL) == HV_XT_UNTRACKED || !pmu_frame(ipa))
+        return false;
+    /* hv_xt_get returns the 16 KiB output base, not the subframe address. */
+    *value = *(volatile u64 *)(pa + (ipa & (PMU_PAGE - 1)));
+    return true;
+}
+
+static bool pmu_exec_proof(struct exc_info *ctx, u64 ipa)
+{
+    if (__atomic_load_n(&hv_cpus_in_guest, __ATOMIC_ACQUIRE) || ctx->far != ctx->elr ||
+        (ctx->esr >> 26) != 0x20 || (ctx->esr & BIT(10)))
+        return false;
+    struct pmu_s1 s;
+#ifdef PMU_REWRITE_HOST_TEST
+    if (!pmu_host_s1(&s))
+        return false;
+#else
+    s = (struct pmu_s1){.sctlr = mrs(SCTLR_EL12), .tcr = mrs(TCR_EL12),
+                       .ttbr = {mrs(TTBR0_EL12), mrs(TTBR1_EL12)}};
+#endif
+    u64 walked;
+    return pmu_s1_exec(&s, ctx->far, ctx->spsr, pmu_read_pte, NULL, &walked) && walked == ipa;
+}
+
+static void pmu_close(void)
+{
+    if (!pmu.open)
+        return;
+    hv_xt_set(pmu.open_block, HV_XT_SCANNING, 0); /* RO + XN, never reopen writes */
+    hv_xt_tlbi(true);
+    pmu.open = false;
+    pmu.stats[HV_WIN_PMU_REPROTECTS]++;
+}
 
 static bool overlaps(u64 a, u64 a_size, u64 b, u64 b_size)
 {
@@ -131,15 +187,24 @@ int hv_win_pmu_arm(u64 base, u64 size)
                base, size);
         return -1;
     }
-    if (tables * PMU_PAGE + PMU_HEAP_MARGIN > heapblock_remaining()) {
+    if (size / PMU_FRAME_SIZE > heapblock_remaining() ||
+        tables * PMU_PAGE + PMU_HEAP_MARGIN > heapblock_remaining() - size / PMU_FRAME_SIZE) {
         printf("HV/win: PMU rewrite: %lu L3 tables (%lu KiB) do not fit the heap (%lu KiB left)\n",
                tables, tables * PMU_PAGE >> 10, (u64)heapblock_remaining() >> 10);
         return -1;
     }
 
+    u8 *frames = calloc(size / PMU_FRAME_SIZE, 1);
+    if (!frames)
+        return -1;
     pages = hv_xt_track(base, size, false, &tables);
+    if (pages <= 0) {
+        free(frames);
+        return -1;
+    }
     hv_xt_tlbi(true);
 
+    pmu.ranges[pmu.nr_ranges].frames = frames;
     pmu.ranges[pmu.nr_ranges].base = base;
     pmu.ranges[pmu.nr_ranges].size = size;
     pmu.nr_ranges++;
@@ -240,47 +305,53 @@ static void pmu_skip(void *arg, u32 index, u32 old_insn, u32 next_word)
 
 static bool pmu_exec_fault(struct exc_info *ctx, u64 ipa)
 {
-    u64 page = ipa & ~(PMU_PAGE - 1), pa;
-    u32 flips;
-
-    switch (hv_xt_get(page, &pa, &flips)) {
-        case HV_XT_UNTRACKED:
-            pmu.stats[HV_WIN_PMU_NOT_OURS]++;
-            return false;
-        case HV_XT_DIRTY:
-            break;
-        default:
-            /* CODE or PINNED: executable already, this CPU's TLB entry was stale */
-            pmu.stats[HV_WIN_PMU_SPURIOUS]++;
-            return pmu_unproductive(ctx);
+    u64 block = ipa & ~(PMU_PAGE - 1), page = ipa & ~(PMU_FRAME_SIZE - 1), pa;
+    u8 *frame = pmu_frame(page);
+    if (!frame || hv_xt_get(block, &pa, NULL) == HV_XT_UNTRACKED) {
+        pmu.stats[HV_WIN_PMU_NOT_OURS]++;
+        return false;
     }
-
-    /* 1. No writer: after the broadcast TLBI completes no guest store to the page is in flight */
-    hv_xt_set(page, HV_XT_SCANNING, flips);
+    pmu.stats[HV_WIN_PMU_EXEC_FAULTS]++;
+    pmu_close();
+    if (!pmu_exec_proof(ctx, ipa)) {
+        pmu.stats[HV_WIN_PMU_EXEC_DENIED]++;
+        pmu.stats[HV_WIN_PMU_WORDS_SKIP_EXEC] += PMU_FRAME_WORDS;
+        return pmu_unproductive(ctx);
+    }
+    *frame |= PMU_FRAME_EXECUTED;
+    hv_xt_set(block, HV_XT_SCANNING, 0);
     hv_xt_tlbi(true);
-
-    /*
-     * 2. Scan what memory holds: the guest may have written the page with its MMU or caches off
-     * (Mu early on), so drop any line EL2's cacheable view may hold (dirty lines are written back).
-     */
-    dc_civac_range((void *)pa, PMU_PAGE);
+    pa += page - block;
+    if (*frame & PMU_FRAME_SCANNED)
+        goto executable;
+    dc_civac_range((void *)pa, PMU_FRAME_SIZE);
     sysop("dsb sy");
-
+    /* Assertion is checked before the first rewrite, and kept for the session. */
+    if (!(*frame & PMU_FRAME_EXECUTED)) {
+        pmu.stats[HV_WIN_PMU_MODIFIED_NEVER_EXECUTED]++;
+        return false;
+    }
     struct pmu_scan sc = {.ipa = page, .elr = ctx->elr};
     u64 kinds[PMU_RW_NR_KINDS] = {0};
-    u32 n = pmu_rw_rewrite_words_ex((u32 *)pa, PMU_PAGE_WORDS, pmu_record, pmu_skip, &sc, kinds);
+    u32 n = pmu_rw_rewrite_frame((u32 *)pa, pmu_record, pmu_skip, &sc, kinds);
     pmu.stats[HV_WIN_PMU_DATA_SKIPS] += kinds[PMU_RW_SKIP_DATA];
+    pmu.stats[HV_WIN_PMU_WORDS_SKIP_BOUNDARY] += kinds[PMU_RW_SKIP_BOUNDARY];
+    pmu.stats[HV_WIN_PMU_WORDS_SKIP_OTHER] += kinds[PMU_RW_SKIP_OTHER];
+    pmu.stats[HV_WIN_PMU_FRAMES_SCANNED]++;
+    pmu.stats[HV_WIN_PMU_WORDS_MODIFIED] += n;
+    *frame |= PMU_FRAME_SCANNED;
 
     if (n) {
         /* to PoC (an MMU-off fetch reads memory), then every CPU's I-cache: lines of an older
          * executable era of this page may be cached anywhere */
-        dc_cvac_range((void *)pa, PMU_PAGE);
+        dc_cvac_range((void *)pa, PMU_FRAME_SIZE);
         sysop("dsb ish");
         ic_ialluis();
         sysop("dsb ish");
         sysop("isb");
 
         pmu.stats[HV_WIN_PMU_PAGES_REWRITTEN]++;
+        pmu.stats[HV_WIN_PMU_FRAMES_MODIFIED]++;
         pmu.stats[HV_WIN_PMU_INSNS_PMCCNTR] += kinds[PMU_RW_READ_PMCCNTR];
         pmu.stats[HV_WIN_PMU_INSNS_MRS] += kinds[PMU_RW_READ_OTHER];
         pmu.stats[HV_WIN_PMU_INSNS_MSR] += kinds[PMU_RW_WRITE];
@@ -291,52 +362,47 @@ static bool pmu_exec_fault(struct exc_info *ctx, u64 ipa)
                    pmu.printed == PMU_PRINT_MAX ? " (further pages: counters and log only)" : "");
     }
 
-    /* 3. Executable and read-only. Adding a permission needs only this CPU's TLB flushed */
-    hv_xt_set(page, HV_XT_CODE, flips);
-    hv_xt_tlbi(false);
-
     pmu.stats[HV_WIN_PMU_SCANS]++;
+executable:
+    if (hv_xt_set(block, HV_XT_CODE, 0) < 0)
+        return false;
+    hv_xt_tlbi(false);
+    pmu.open_block = block;
+    pmu.open = true;
     pmu_productive();
     return true;
 }
 
+static u32 pmu_invalidate(u64 ipa, u64 size);
+
 static bool pmu_write_fault(struct exc_info *ctx, u64 ipa, bool walker)
 {
-    u64 page = ipa & ~(PMU_PAGE - 1);
-    u32 flips;
-
-    switch (hv_xt_get(page, NULL, &flips)) {
-        case HV_XT_UNTRACKED:
-            pmu.stats[HV_WIN_PMU_NOT_OURS]++;
-            return false;
-        case HV_XT_CODE:
-            break;
-        default:
-            /* DIRTY or PINNED: writable already, this CPU's TLB entry was stale */
-            pmu.stats[HV_WIN_PMU_SPURIOUS]++;
-            return pmu_unproductive(ctx);
+    u64 block = ipa & ~(PMU_PAGE - 1);
+    if (!pmu_frame(ipa) || hv_xt_get(block, NULL, NULL) == HV_XT_UNTRACKED) {
+        pmu.stats[HV_WIN_PMU_NOT_OURS]++;
+        return false;
     }
-
-    flips++;
-    if (flips >= PMU_FLIP_CAP) {
-        if (pmu.nr_pinned < PMU_MAX_PINNED) {
-            /* Written and executed too often: leave it RWX until the next sweep */
-            if (!pmu.nr_pinned)
-                pmu.ticks = 0;
-            pmu.pinned[pmu.nr_pinned++] = page;
-            hv_xt_set(page, HV_XT_PINNED, flips);
-            hv_xt_tlbi(false);
-            pmu.stats[HV_WIN_PMU_PINS]++;
-            pmu_productive();
-            return true;
-        }
-        pmu.stats[HV_WIN_PMU_PIN_FULL]++;
-    }
-
-    /* Execute permission goes away on every CPU before the guest's store can land */
-    hv_xt_set(page, HV_XT_DIRTY, flips);
+    pmu_close();
+    hv_xt_set(block, HV_XT_SCANNING, 0);
     hv_xt_tlbi(true);
-    pmu.stats[walker ? HV_WIN_PMU_WALK_FLIPS : HV_WIN_PMU_WRITE_FLIPS]++;
+    /* HPFAR identifies only a 4 KiB table frame for S1PTW, not the descriptor.
+     * Never guess its offset, emulate AF/DBM, or grant whole-block write access. */
+    if (walker || __atomic_load_n(&hv_cpus_in_guest, __ATOMIC_ACQUIRE)) {
+        pmu.stats[HV_WIN_PMU_STORE_DENIED]++;
+        return false;
+    }
+    struct exc_info next = *ctx;
+    u64 bytes;
+    if (!hv_emulate_pt_store(&next, ctx->far, ipa, &bytes)) {
+        pmu.stats[HV_WIN_PMU_STORE_DENIED]++;
+        return false;
+    }
+    /* Guest-requested store, not a rewrite. X was revoked before the store;
+     * the existing emulator rejects spans crossing a 16 KiB leaf. */
+    pmu_invalidate(ipa, bytes);
+    pmu.stats[HV_WIN_PMU_WRITE_FLIPS]++;
+    *ctx = next;
+    ctx->elr += 4; /* caller subtracts 4 for its retry convention */
     pmu_productive();
     return true;
 }
@@ -359,15 +425,8 @@ bool hv_win_handle_iabort(struct exc_info *ctx)
     u64 ipa;
     if (!hv_xt_fault_ipa(ctx, walker, walker, &ipa)) {
         pmu.stats[HV_WIN_PMU_IPA_FAIL]++;
-        /*
-         * AT S1E1R fails if the guest changed its tables under us, or for a page EL1 may execute
-         * but not read (permission indirection). HPFAR_EL2 may then still name the page: the
-         * architecture leaves it UNKNOWN for this fault, so only a DIRTY page is taken from it (a
-         * wrong guess costs one scan and one later write fault).
-         */
-        if (walker || !hv_xt_fault_ipa(ctx, true, false, &ipa) ||
-            hv_xt_get(ipa & ~(PMU_PAGE - 1), NULL, NULL) != HV_XT_DIRTY)
-            return pmu_unproductive(ctx);
+        /* HPFAR is architecturally UNKNOWN here: no speculative scan fallback. */
+        return pmu_unproductive(ctx);
     }
 
     return walker ? pmu_write_fault(ctx, ipa, true) : pmu_exec_fault(ctx, ipa);
@@ -392,67 +451,56 @@ bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr)
     return pmu_write_fault(ctx, ipa, walker);
 }
 
-/*
- * EL2 is about to fill guest RAM [ipa, ipa + size) on the guest's behalf (an emulated device's DMA
- * write: an NVMe READ's data, a mediated-storage reply). EL2 stores through its own identity
- * mapping, which stage 2 does not check, so a CODE page would keep its execute permission while
- * its contents change: an installed Windows pages code back in from disk into frames that held
- * scanned code before, and that code would run with its PMUv3 accesses unrewritten. Every CODE or
- * PINNED 16 KiB page the range touches (partial pages included: a 4 KiB guest page re-arms the
- * whole 16 KiB leaf) goes back to DIRTY, so the next instruction fetch rescans it, as after a
- * guest store (pmu_write_fault); the flips counter is kept (a refill is not a write-after-execute
- * by the guest). DIRTY pages need nothing; SCANNING exists only inside pmu_exec_fault under the
- * same lock. Call before the first byte is stored, under the big HV lock (the storage dispatch
- * holds it for the whole command). One broadcast TLBI per call, only if a page changed state, so
- * execute permission is gone on every CPU before EL2 writes. O(pages touched), no allocation, one
- * test when the rewrite is off. Returns the number of pages reset.
- */
-u32 hv_win_pmu_dma_write(u64 ipa, u64 size)
+/* Invalidate only intersecting 4 KiB frames. Permission revocation is necessarily
+ * 16 KiB. Intersect with armed ranges first: a wrapping/huge DMA span is bounded. */
+static u32 pmu_invalidate(u64 ipa, u64 size)
 {
     if (!pmu.armed || !size)
         return 0;
-
-    u64 last = ipa + (size - 1);
+    u64 last = ipa + size - 1;
     if (last < ipa)
         last = ~0UL;
-    last &= ~(PMU_PAGE - 1);
     u32 n = 0;
-
-    for (u64 page = ipa & ~(PMU_PAGE - 1);; page += PMU_PAGE) {
-        u32 flips;
-        enum hv_xt_state st = hv_xt_get(page, NULL, &flips);
-        if (st == HV_XT_CODE || st == HV_XT_PINNED) {
-            /* hv_xt_set: leaf store, then DSB ISHST before the TLBI below */
-            hv_xt_set(page, HV_XT_DIRTY, flips);
-            n++;
+    bool changed = false;
+    for (u32 i = 0; i < pmu.nr_ranges; i++) {
+        u64 base = pmu.ranges[i].base, end = base + pmu.ranges[i].size - 1;
+        if (last < base || ipa > end)
+            continue;
+        u64 first = (ipa > base ? ipa : base) & ~(PMU_FRAME_SIZE - 1);
+        u64 stop = (last < end ? last : end) & ~(PMU_FRAME_SIZE - 1);
+        for (u64 page = first;; page += PMU_FRAME_SIZE) {
+            u8 *frame = pmu_frame(page);
+            if (hv_xt_get(page, NULL, NULL) != HV_XT_UNTRACKED) {
+                if (*frame & PMU_FRAME_SCANNED)
+                    n++;
+                *frame = 0;
+                hv_xt_set(page, HV_XT_SCANNING, 0);
+                if (pmu.open && (page & ~(PMU_PAGE - 1)) == pmu.open_block)
+                    pmu.open = false;
+                changed = true;
+            }
+            if (page == stop)
+                break;
         }
-        if (page == last)
-            break;
     }
-
-    if (n) {
-        /* DSB ISHST; TLBI VMALLS12E1IS; DSB ISH; ISB (hv_vm.c) */
+    if (changed)
         hv_xt_tlbi(true);
-        pmu.stats[HV_WIN_PMU_DMA_RESETS] += n;
-    }
+    return n;
+}
+
+u32 hv_win_pmu_dma_write(u64 ipa, u64 size)
+{
+    u32 n = pmu_invalidate(ipa, size);
+    pmu.stats[HV_WIN_PMU_DMA_RESETS] += n;
     return n;
 }
 
 void hv_win_pmu_tick(void)
 {
-    if (!pmu.armed || !pmu.nr_pinned || ++pmu.ticks < PMU_SWEEP_TICKS)
-        return;
-
-    for (u32 i = 0; i < pmu.nr_pinned; i++) {
-        if (hv_xt_get(pmu.pinned[i], NULL, NULL) == HV_XT_PINNED) {
-            hv_xt_set(pmu.pinned[i], HV_XT_DIRTY, 0);
-            pmu.stats[HV_WIN_PMU_UNPINS]++;
-        }
+    if (pmu.armed && pmu.open) {
+        pmu_close();
+        pmu.stats[HV_WIN_PMU_SWEEPS]++;
     }
-    pmu.nr_pinned = 0;
-    pmu.ticks = 0;
-    hv_xt_tlbi(true);
-    pmu.stats[HV_WIN_PMU_SWEEPS]++;
 }
 
 void hv_win_pmu_report(void)
@@ -472,11 +520,26 @@ void hv_win_pmu_report(void)
         s[HV_WIN_PMU_PINS], s[HV_WIN_PMU_PIN_FULL], s[HV_WIN_PMU_SWEEPS], s[HV_WIN_PMU_UNPINS],
         s[HV_WIN_PMU_SPURIOUS], s[HV_WIN_PMU_IPA_FAIL], s[HV_WIN_PMU_NOT_OURS],
         s[HV_WIN_PMU_STUCK], s[HV_WIN_PMU_DMA_RESETS], s[HV_WIN_PMU_DATA_SKIPS]);
+    printf("HV/win: PMU 4K: frames scanned %lu modified %lu, words modified %lu; "
+           "skipped exec %lu boundary %lu other %lu; modified-never-executed %lu; "
+           "exec faults %lu denied %lu, stores denied %lu, reprotects %lu\n",
+           s[HV_WIN_PMU_FRAMES_SCANNED], s[HV_WIN_PMU_FRAMES_MODIFIED],
+           s[HV_WIN_PMU_WORDS_MODIFIED], s[HV_WIN_PMU_WORDS_SKIP_EXEC],
+           s[HV_WIN_PMU_WORDS_SKIP_BOUNDARY], s[HV_WIN_PMU_WORDS_SKIP_OTHER],
+           s[HV_WIN_PMU_MODIFIED_NEVER_EXECUTED], s[HV_WIN_PMU_EXEC_FAULTS],
+           s[HV_WIN_PMU_EXEC_DENIED], s[HV_WIN_PMU_STORE_DENIED], s[HV_WIN_PMU_REPROTECTS]);
 }
 
 #ifdef PMU_REWRITE_HOST_TEST
+u8 hv_win_pmu_host_frame(u64 ipa)
+{
+    u8 *frame = pmu_frame(ipa);
+    return frame ? *frame : 0;
+}
 void hv_win_pmu_host_reset(void)
 {
+    for (u32 i = 0; i < pmu.nr_ranges; i++)
+        free(pmu.ranges[i].frames);
     memset(&pmu, 0, sizeof(pmu));
     memset(stuck_elr, 0, sizeof(stuck_elr));
     memset(stuck_count, 0, sizeof(stuck_count));

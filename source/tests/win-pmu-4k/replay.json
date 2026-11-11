@@ -1,0 +1,854 @@
+{
+  "sources": [
+    {
+      "path": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "sha256": "5803c769545a654e6e0f27b01a12ad3055220ca76112222270b5190f6019dc4d"
+    },
+    {
+      "path": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "sha256": "001dec4d0c2acd0173ba3d5716a65bec6284c14d08492a8cdfbb5e9c229135f3"
+    }
+  ],
+  "events": [
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1033,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1034,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1035,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1036,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1037,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f6b8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1038,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f6b8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1039,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f6b8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1040,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f6b8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1041,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1042,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1043,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1044,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1045,
+      "ipa": "0x1007e89b908",
+      "word": "0xd53beb7d",
+      "next": "0x00040000",
+      "pc": "0x7ff74b32a4d4"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1046,
+      "ipa": "0x1007e89b908",
+      "word": "0xd53beb7d",
+      "next": "0x00040000",
+      "pc": "0x7ff74b32a4fc"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1047,
+      "ipa": "0x1007e89b908",
+      "word": "0xd53beb7d",
+      "next": "0x00040000",
+      "pc": "0x7ff74b32a4fc"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1048,
+      "ipa": "0x1007e89b908",
+      "word": "0xd53beb7d",
+      "next": "0x00040000",
+      "pc": "0x7ff74b32a550"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1064,
+      "ipa": "0x1008932b8b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffa582c8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1099,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fde8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1100,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fde8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1101,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fde8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1102,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fde8"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1110,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1111,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1112,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1113,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1122,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1123,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1124,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1125,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1126,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1127,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1128,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1129,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1130,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1131,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1132,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1133,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5fc38"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1134,
+      "ipa": "0x10081e735f8",
+      "word": "0xd5189eb4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f2b0"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1135,
+      "ipa": "0x10081e73608",
+      "word": "0xd5189ebc",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f2b0"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1136,
+      "ipa": "0x10081e73618",
+      "word": "0xd5189ec0",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f2b0"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-233945-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1137,
+      "ipa": "0x10081e73628",
+      "word": "0xd5189ed4",
+      "next": "0x000001cd",
+      "pc": "0x7ff795c5f2b0"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1048,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1049,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f5458"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1050,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1059,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1060,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1061,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1093,
+      "ipa": "0x100d9726ffc",
+      "word": "0xd53b9d08",
+      "next": "0x00000000",
+      "pc": "0xa2e2504"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1123,
+      "ipa": "0x100b36a6d08",
+      "word": "0xd51befc3",
+      "next": "0x00600100",
+      "pc": "0x7ffeedea5ed0"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1138,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1160,
+      "ipa": "0x10122cd8c68",
+      "word": "0xd53bedc6",
+      "next": "0x000014bc",
+      "pc": "0x7ffecf0b0be0"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 1554,
+      "ipa": "0x10091cd18b8",
+      "word": "0xd53b9d00",
+      "next": "0x000e3769",
+      "pc": "0x7ffeec5f8230"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3169,
+      "ipa": "0x10908ae26e0",
+      "word": "0xd51bebf0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3170,
+      "ipa": "0x10908ae26e8",
+      "word": "0xd51be9a0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3171,
+      "ipa": "0x10908ae26f0",
+      "word": "0xd51bec30",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3172,
+      "ipa": "0x10908ae26f8",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3173,
+      "ipa": "0x10908ae2700",
+      "word": "0xd51becc0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3174,
+      "ipa": "0x10908ae2708",
+      "word": "0xd51be940",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3175,
+      "ipa": "0x10908ae28d0",
+      "word": "0xd51bebf0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3176,
+      "ipa": "0x10908ae28d8",
+      "word": "0xd51be9a0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3177,
+      "ipa": "0x10908ae28e0",
+      "word": "0xd51bec30",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3178,
+      "ipa": "0x10908ae28e8",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3179,
+      "ipa": "0x10908ae28f0",
+      "word": "0xd51becc0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3180,
+      "ipa": "0x10908ae28f8",
+      "word": "0xd51be940",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3181,
+      "ipa": "0x10908ae2978",
+      "word": "0xd51bebd0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3182,
+      "ipa": "0x10908ae2988",
+      "word": "0xd51bec30",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3183,
+      "ipa": "0x10908ae2990",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3184,
+      "ipa": "0x10908ae2998",
+      "word": "0xd51becc0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3185,
+      "ipa": "0x10908ae29a0",
+      "word": "0xd51be940",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3186,
+      "ipa": "0x10908ae2a88",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3187,
+      "ipa": "0x10908ae2aa0",
+      "word": "0xd51bee70",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3188,
+      "ipa": "0x10908ae2aa8",
+      "word": "0xd51bee20",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3189,
+      "ipa": "0x10908ae2b98",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3190,
+      "ipa": "0x10908ae2be0",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3191,
+      "ipa": "0x10908ae2c28",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4a54"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3262,
+      "ipa": "0x10908ae26e0",
+      "word": "0xd51bebf0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3263,
+      "ipa": "0x10908ae26e8",
+      "word": "0xd51be9a0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3264,
+      "ipa": "0x10908ae26f0",
+      "word": "0xd51bec30",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3265,
+      "ipa": "0x10908ae26f8",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3266,
+      "ipa": "0x10908ae2700",
+      "word": "0xd51becc0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3267,
+      "ipa": "0x10908ae2708",
+      "word": "0xd51be940",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3268,
+      "ipa": "0x10908ae28d0",
+      "word": "0xd51bebf0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3269,
+      "ipa": "0x10908ae28d8",
+      "word": "0xd51be9a0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3270,
+      "ipa": "0x10908ae28e0",
+      "word": "0xd51bec30",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3271,
+      "ipa": "0x10908ae28e8",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3272,
+      "ipa": "0x10908ae28f0",
+      "word": "0xd51becc0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3273,
+      "ipa": "0x10908ae28f8",
+      "word": "0xd51be940",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3274,
+      "ipa": "0x10908ae2978",
+      "word": "0xd51bebd0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3275,
+      "ipa": "0x10908ae2988",
+      "word": "0xd51bec30",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3276,
+      "ipa": "0x10908ae2990",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3277,
+      "ipa": "0x10908ae2998",
+      "word": "0xd51becc0",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3278,
+      "ipa": "0x10908ae29a0",
+      "word": "0xd51be940",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3279,
+      "ipa": "0x10908ae2a88",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3280,
+      "ipa": "0x10908ae2aa0",
+      "word": "0xd51bee70",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3281,
+      "ipa": "0x10908ae2aa8",
+      "word": "0xd51bee20",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3282,
+      "ipa": "0x10908ae2b98",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3283,
+      "ipa": "0x10908ae2be0",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3284,
+      "ipa": "0x10908ae2c28",
+      "word": "0xd51bec90",
+      "next": "0x00007ffe",
+      "pc": "0x7ffed51b4380"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3390,
+      "ipa": "0x10930cd6bb0",
+      "word": "0xd51bebc8",
+      "next": "0x021cb69a",
+      "pc": "0x20a3780c2c0"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3391,
+      "ipa": "0x10930cd6bb0",
+      "word": "0xd51bebc8",
+      "next": "0x021cb69a",
+      "pc": "0x20a3780c570"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3392,
+      "ipa": "0x10930cd6bb0",
+      "word": "0xd51bebc8",
+      "next": "0x021cb69a",
+      "pc": "0x20a3780c614"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3393,
+      "ipa": "0x10930cd6bb0",
+      "word": "0xd51bebc8",
+      "next": "0x021cb69a",
+      "pc": "0x20a3780c7c4"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3394,
+      "ipa": "0x10930cd6bb0",
+      "word": "0xd51bebc8",
+      "next": "0x021cb69a",
+      "pc": "0x20a3780c7c4"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3402,
+      "ipa": "0x10930cd6bb0",
+      "word": "0xd51bebc8",
+      "next": "0x021cb69a",
+      "pc": "0x20a3780cb34"
+    },
+    {
+      "source": "/Users/rolo/Work/agents/win-el2/tooling/bugcheck-1a-20261111/runB-pmudg/runs/20261110-235709-runB/attempt-1/boot-1/session/hv.log",
+      "line": 3403,
+      "ipa": "0x10930cd6bb0",
+      "word": "0xd51bebc8",
+      "next": "0x021cb69a",
+      "pc": "0x20a3780cc84"
+    }
+  ]
+}

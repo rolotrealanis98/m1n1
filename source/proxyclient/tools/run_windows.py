@@ -109,7 +109,9 @@ HV_WIN_PMU_MAGIC = 0x504d5552          # "PMUR", P_HV_WIN_PMU_STATS(0) >> 32
 HV_WIN_PMU_STATS = ("id", "pages", "ranges", "tables", "scans", "pages_rewritten", "insns", "insns_pmccntr",
                     "insns_mrs", "insns_msr", "write_flips", "walk_flips", "pins", "pin_full", "sweeps",
                     "unpins", "spurious", "ipa_fail", "not_ours", "stuck",
-                    "dma_resets", "data_skips")   # src/hv/win/hv_win.h order (dma_resets, data_skips: ~0 on older residents)
+                    "dma_resets", "data_skips", "frames_scanned", "frames_modified",
+                    "words_modified", "words_skip_exec", "words_skip_boundary", "words_skip_other",
+                    "modified_never_executed", "exec_faults", "exec_denied", "store_denied", "reprotects")   # src/hv/win/hv_win.h order (dma_resets, data_skips: ~0 on older residents)
 HV_WIN_PMU_LOG_SIZE = 256
 HV_WIN_PMU_STAT_LOG_IPA, HV_WIN_PMU_STAT_LOG_OP, HV_WIN_PMU_STAT_LOG_ELR = 0x100, 0x200, 0x300
 GIC_SPI_MIN, GIC_SPI_MAX = 32, 1019  # GICD_TYPER.ITLinesNumber 31 (hv_vgic3.c)

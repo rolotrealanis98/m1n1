@@ -77,3 +77,6 @@ M	nightly2-mutants	*	OUT=$FB_OUT bash tests/nightly2/mutants.sh 2>&1 | tail -1; 
 # ---- nightly-4: PRP planner overlaps (READ: any overlap, in command order; WRITE: refused)
 QF	prp-overlap-n4	source/src/hv/win/s1/hv_nvme_queue.* source/tests/prp-overlap-n4/*	make -s -C source/tests/prp-overlap-n4 clean >/dev/null 2>&1; make -s -C source/tests/prp-overlap-n4 check ITER=200000 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 M	prp-overlap-n4-mutants	*	FB_JOBS=$FB_JOBS python3 -I source/tests/prp-overlap-n4/mutants.py 20000 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+# PMU proof-only 4 KiB policy: host sanitizers and source mutants.
+QF	pmu-4k	source/src/hv/win/*pmu* source/src/hv/win/hv_win.h source/src/hv/hv_vm.c source/tests/win-pmu-4k/*	make -s -C source/tests/win-pmu-4k check OUT=$FB_OUT
+M	pmu-4k-mutants	source/src/hv/win/*pmu* source/src/hv/win/hv_win.h source/src/hv/hv_vm.c source/tests/win-pmu-4k/*	python3 source/tests/win-pmu-4k/mutants.py

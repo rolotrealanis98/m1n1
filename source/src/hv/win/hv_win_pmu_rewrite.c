@@ -82,3 +82,36 @@ u32 pmu_rw_rewrite_words_ex(u32 *words, u32 n, pmu_rw_record_fn *rec, pmu_rw_rec
 
     return done;
 }
+
+/* Proof of execution belongs to hv_win_pmu.c. This function only enforces the
+ * frame boundary and the existing data guard. Keep the generic corpus API above. */
+u32 pmu_rw_rewrite_frame(u32 *words, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
+                         void *arg, u64 *counts)
+{
+    u32 done = 0;
+    for (u32 i = 0; i < 1024; i++) {
+        u32 old = words[i];
+        enum pmu_rw_kind kind = pmu_rw_classify(old);
+        if (kind == PMU_RW_NONE) {
+            counts[PMU_RW_SKIP_OTHER]++;
+            continue;
+        }
+        if (i == 1023) {
+            counts[PMU_RW_SKIP_BOUNDARY]++;
+            continue;
+        }
+        if (pmu_rw_next_is_data(words[i + 1])) {
+            counts[PMU_RW_SKIP_DATA]++;
+            if (skip)
+                skip(arg, i, old, words[i + 1]);
+            continue;
+        }
+        u32 replacement = pmu_rw_replacement(old);
+        *(volatile u32 *)&words[i] = replacement;
+        counts[kind]++;
+        done++;
+        if (rec)
+            rec(arg, i, old, replacement);
+    }
+    return done;
+}
