@@ -172,6 +172,9 @@ typedef enum {
     /* 0xc26/27 reserved for ANSM branch */
     P_HV_WIN_HIDM_CONFIGURE = 0xc28,
     /* u1: was 0xc25 on the smp line, which clashed with the storage line's CANARY */
+    /* wireless/n1-20261111: M5WN mediated network (0xc48/0xc49; clear of ANSM/CPPC/SMCP/UT numbers) */
+    P_HV_WIN_M5WN_CONFIGURE = 0xc48,
+    P_HV_WIN_M5WN_STAT = 0xc49,
     P_HV_WIN_SMP_DUMP = 0xc29, /* smp2f: print the SMP/WFI/timer/vGIC dump (boot CPU; -1 elsewhere) */
 
     P_FB_INIT = 0xd00,

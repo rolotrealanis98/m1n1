@@ -687,6 +687,8 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_FB_PREPARE = 0xc1e
     P_HV_WIN_FB_STAT = 0xc1f
     P_HV_WIN_HIDM_CONFIGURE = 0xc28
+    P_HV_WIN_M5WN_CONFIGURE = 0xc48
+    P_HV_WIN_M5WN_STAT = 0xc49
     P_HV_WIN_STORAGE_PREP = 0xc20
     P_HV_WIN_STORAGE_STAT = 0xc21
     P_HV_WIN_STORAGE_NATIVE = 0xc22
@@ -1225,6 +1227,12 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_FB_STAT, idx)
     def hv_win_hidm_configure(self):
         return self.request(self.P_HV_WIN_HIDM_CONFIGURE, 1, signed=True)
+    def hv_win_m5wn_configure(self, registration):
+        # M5WN v1: 96-byte header + {base,size} ranges (m5wn_contract.build_registration), staged in
+        # target memory like hv_win_storage_prepare. One launch only, before any vCPU starts, 1 vCPU.
+        return self.request(self.P_HV_WIN_M5WN_CONFIGURE, registration, len(registration), signed=True)
+    def hv_win_m5wn_stat(self, index):
+        return self.request(self.P_HV_WIN_M5WN_STAT, index)
 
     def hv_win_storage_prepare(self, registration):
         # Exact96-byte header plus copied {base,size} range arrays; one launch only.

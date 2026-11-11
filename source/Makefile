@@ -203,6 +203,9 @@ OBJECTS := \
 	mtp_kbd_resident.o \
 	hv_win_hidm.o \
 	hidm/service/hidm_service.o \
+	hv_win_m5wn.o \
+	m5wn/service/m5wn_service.o \
+	m5wn/service/m5wn_fake.o \
 	sart.o \
 	sep.o \
 	sio.o \

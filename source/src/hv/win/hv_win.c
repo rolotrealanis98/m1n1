@@ -6,6 +6,7 @@
 
 #include "hv_win.h"
 #include "hv_win_hidm.h"
+#include "hv_win_m5wn.h"
 #include "aic.h"
 #include "aic_regs.h"
 #include "cpu_regs.h"
@@ -762,6 +763,7 @@ static bool hv_win_aic_enable_on_return(void)
 int hv_win_map_irq(u64 aic_line, u64 gsiv)
 {
     if (hv_win_hidm_claims_spi(gsiv)) return -1;
+    if (hv_win_m5wn_claims_spi(gsiv)) return -1;
     if (!hv_win_vgic_enabled() || !aic)
         return -1;
 

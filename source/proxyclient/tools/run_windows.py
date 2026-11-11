@@ -314,6 +314,8 @@ def window_frames(args):
         frames.append(("PL011", args.pl011, PL011_FRAME))
     if getattr(args, "builtin_keyboard", False):
         frames.append(("HIDM", 0xF38100000, 0x8000))
+    if getattr(args, "m5wn_fake", False):
+        frames.append(("M5WN", 0xF38108000, 0x8000))
     return frames
 
 
@@ -658,6 +660,9 @@ def parse_args():
                              "control; default: trapping ON when >1 vCPU). 1-vCPU never traps WFI regardless.")
     parser.add_argument("--builtin-keyboard", action="store_true",
                         help="enable resident MTP keyboard / HIDM (requires HIDM firmware)")
+    parser.add_argument("--m5wn-fake", action="store_true",
+                        help="wireless/n1-20261111: M5WN mediated network device with the fake gateway backend "
+                             "(192.168.77.1, DHCP .2; no Apple hardware). Needs the M5WN firmware DXE, 1 vCPU, GIC route")
     parser.add_argument("--cpu-classes", choices=("uniform", "adt"), default="uniform",
                         help="sched1: efficiency classes Mu publishes. uniform (default): the guest ADT gets the boot "
                              "CPU's cluster-type on every CPU, so the MADT has one class and Windows does not park the "
@@ -803,6 +808,11 @@ def parse_args():
     if args.usb_host is None and args.mu_profile in USB_PROFILES:
         print(f"note: profile {args.mu_profile} without --usb-host: no /chosen/m5w,xhci, Mu runs without USB",
               file=sys.stderr)
+    if args.m5wn_fake:
+        if args.route != "gic" or args.raw_guest or args.cpus != 1:
+            parser.error("--m5wn-fake needs a firmware guest, --route gic and -C 1")
+        if args.pl011_gsiv == 69 or args.usb_gsiv == 69 or any(g == 69 for _, g in args.irq_pairs):
+            parser.error("--m5wn-fake owns GSIV 69")
     if args.builtin_keyboard:
         if args.route != "gic" or args.raw_guest:
             parser.error("--builtin-keyboard needs a firmware guest and --route gic")
@@ -1252,6 +1262,23 @@ def main():
         else:
             hv.add_tracer(irange(0xF38100000, 0x8000), "WIN-HIDM", TraceMode.RESERVED)
             record("HIDM configured; backend failure is reported as zero interfaces")
+    if args.m5wn_fake:
+        # wireless/n1-20261111: register the final layout (same policy as the S1 storage contract).
+        import m5wn_contract
+        wire, receipt = m5wn_contract.build_registration(
+            plan, resident_base=u.base, heap_top=u.heap_top, adt_size=ba.devtree_size, epoch=time.time_ns(),
+            frames=window_frames(args), shadow=shadow,
+            used_gsivs=[g for _, g in args.irq_pairs] + [args.pl011_gsiv, args.usb_gsiv])
+        (run_dir / "m5wn-contract.json").write_text(__import__("json").dumps(receipt, indent=2) + "\n")
+        rc = p.hv_win_m5wn_configure(wire)
+        if rc != 0:
+            print(f"WARNING: M5WN configure refused ({rc}); continuing without M5WN0001", file=sys.stderr)
+            record(f"M5WN configure refused ({rc}); no m5w,m5wn handoff")
+            args.m5wn_fake = False
+        else:
+            hv.add_tracer(irange(0xF38108000, 0x8000), "WIN-M5WN", TraceMode.RESERVED)
+            record(f"M5WN configured (fake gateway), contract {receipt['wire_sha256'][:16]}, "
+                   f"stat0 {p.hv_win_m5wn_stat(0):#x}")
 
     text = format_plan(plan)
     for name, base, size in window_frames(args):
@@ -1313,6 +1340,9 @@ def main():
         hv.adt["chosen"]._properties[name] = value
 
     hv.adt["chosen"]._properties.pop("m5w,hidm", None)
+    hv.adt["chosen"]._properties.pop("m5w,m5wn", None)
+    if args.m5wn_fake:
+        put("m5w,m5wn", struct.pack("<QQQQI", 0xF38108000, 0x1000, 0xF3810C000, 0x1000, 69))
     if args.builtin_keyboard:
         put("m5w,hidm", struct.pack("<QQQQI", 0xF38100000, 0x1000, 0xF38104000, 0x1000, 68))
     put("m5w,memory", memory_prop)
