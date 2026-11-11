@@ -5,7 +5,7 @@ storage stack + fake ANS, run.py's build) twice, from this tree and from a base 
 compares, per scenario: exit code, stdout, and the trace (every MMIO/config hook call: address, direction, width,
 value in/out, result, guest-memory hash after each write; then the final controller/S1DG/canary/queue/PRP/fake-ANS
 state). Any difference fails. Usage: trace_1cpu.py [BASE_REV]"""
-import json, os, subprocess, sys, tempfile
+import json, os, re, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -45,7 +45,11 @@ def main():
             r = subprocess.run([exe, s], capture_output=True, text=True, timeout=300, env=dict(env, TRACE_1CPU=str(tf)))
             res.append((r.returncode, r.stdout, tf.read_text() if tf.exists() else ''))
         (o_rc, o_out, o_tr), (n_rc, n_out, n_tr) = res
-        same = o_rc == n_rc and o_out == n_out and o_tr == n_tr
+        # no_stray_writes_*: the check count is the number of bytes that changed in the resident DMA region, which
+        # holds PRP lists with host addresses of ans_ro's static buffers, so it depends on the binary layout, not on
+        # behaviour. Only there is the count excluded from the comparison (the hook trace still must be identical).
+        strip = (lambda t: re.sub(r'"checks":\d+', '"checks":N', t)) if s.startswith('no_stray_writes') else (lambda t: t)
+        same = o_rc == n_rc and strip(o_out) == strip(n_out) and o_tr == n_tr
         return {'scenario': s, 'same': same, 'rc': n_rc, 'hook_calls': n_tr.count('\n') - (1 if 'END ' in n_tr else 0),
                 'traced': bool(n_tr), 'detail': '' if same else f'rc {o_rc}/{n_rc}, stdout {o_out == n_out}, trace {o_tr == n_tr}'}
 
