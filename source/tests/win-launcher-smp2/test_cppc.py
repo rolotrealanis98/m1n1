@@ -79,9 +79,13 @@ for t, v in run_windows.CPPC_PERF_T6050.items():
     check(f"table {t} passes Mu's ordering rules", ok)
 check("P highest > M highest (Windows should prefer P)", p[0] > m[0])
 check("P nominal > M nominal", p[1] > m[1])
-check("formula: P highest = 1024 at 4608 MHz", p[0] == 1024)
-check("formula: M highest = round(1024*4308/4608*0.6)", m[0] == round(1024 * 4308 / 4608 * 0.6))
-check("formula: P lowest = round(1024*1308/4608)", p[3] == round(1024 * 1308 / 4608))
+# cpuperf-B: values derived from the Linux OPP tables and capacity-dmips-mhz (M 851, P 1024), clamp M p15 / P p17
+check("derived: M = 796/796/248/55, 300-4308 MHz", m == (796, 796, 248, 55, 300, 4308), str(m))
+check("derived: P = 957/957/291/67, 300-4308 MHz", p == (957, 957, 291, 67, 300, 4308), str(p))
+check("derived: M highest = round(4308*851/4608)", m[0] == int(4308 * 851 / 4608 + 0.5))
+check("derived: P lowest-nonlinear = p2 1308 MHz", p[2] == int(1308 * 1024 / 4608 + 0.5))
+check("--dvfs-max P=21 raises P highest to 1024", parse(["--cpu-classes", "cppc", "--dvfs-max", "P=21"]).cppc_table["P"][:2]
+      == (1024, 1024))
 
 # --- cppc_plan bytes ----------------------------------------------------------------------------
 adt, nodes, vcpus = j716s()

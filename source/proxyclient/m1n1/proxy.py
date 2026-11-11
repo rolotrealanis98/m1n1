@@ -694,6 +694,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_SMP_DUMP = 0xc25
     P_HV_WIN_CPPC_CONFIGURE = 0xc38
     P_HV_WIN_CPPC_STAT = 0xc39
+    P_HV_WIN_CPPC_DVFS = 0xc3a
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1202,6 +1203,9 @@ class M1N1Proxy(Reloadable):
     def hv_win_cppc_configure(self, base, ncpus):
         # cpuperf-A: EL2 maps the CPPC hook page behind the firmware's _CPC (0 ok, -1 refused)
         return self.request(self.P_HV_WIN_CPPC_CONFIGURE, base, ncpus, signed=True)
+    def hv_win_cppc_dvfs(self, addr, length):
+        # cpuperf-B: EL2 copies the config, probes CMD/STATUS read-only and enables (0) or refuses (-1)
+        return self.request(self.P_HV_WIN_CPPC_DVFS, addr, length, signed=True)
     def hv_win_cppc_stat(self):
         return self.request(self.P_HV_WIN_CPPC_STAT, signed=True)
     def hv_win_caps(self):

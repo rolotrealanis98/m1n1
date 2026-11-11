@@ -702,6 +702,8 @@ void hv_tick(struct exc_info *ctx)
     hv_win_tick();
     /* r3: native read-only storage keeps the ANS mailbox drained; no-op otherwise */
     hv_win_storage_tick();
+    /* cpuperf-B: Desired -> cluster p-state; no-op unless P_HV_WIN_CPPC_DVFS enabled it */
+    hv_win_cppc_tick();
 }
 
 bool hv_is_nested(void)
