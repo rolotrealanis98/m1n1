@@ -34,6 +34,7 @@
 #define SMCP_STALE_US          10000000u
 #define SMCP_MAX_TIMEOUTS      16u       /* consecutive: then FAILED, no more commands */
 #define SMCP_RECV_BUDGET       8u        /* messages drained per tick */
+#define SMCP_REPULSE_US        100000u   /* re-pulse the GED edge while enabled events stay unacked */
 
 /* transport, supplied by the resident glue / the mock */
 typedef struct smcp_ops {
@@ -95,6 +96,7 @@ typedef struct smcp {
     uint32_t regs[SMCP_R_REG_END / 4];
     uint32_t evt_pending, evt_enable;
     uint32_t irq_edges;    /* rising edges for the edge-triggered GED line (see smcp_irq_edges) */
+    uint64_t last_edge_us;
     bool prev_valid;
     uint32_t prev_bst_state, prev_percent, prev_psr, prev_lid, prev_full, prev_bhld;
     uint32_t err_count, last_err_key, timeouts, consecutive_timeouts;
@@ -110,7 +112,9 @@ bool smcp_irq(const smcp *s);
 /* The GED interrupt is edge-triggered: a level line that stays high until _EVT runs (passive level)
  * storms a single vCPU (twin, runs/i1). The count goes up whenever an enabled event becomes pending
  * that was not pending before, or an already-pending event is enabled; the glue pulses the line on
- * every change of this count. */
+ * every change of this count. While enabled events stay pending and unacknowledged the count is
+ * bumped again every SMCP_REPULSE_US (an edge before Windows connected the interrupt was lost in
+ * the twin, runs/e-i1). */
 uint32_t smcp_irq_edges(const smcp *s);
 bool smcp_failed(const smcp *s);
 

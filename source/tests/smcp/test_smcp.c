@@ -493,25 +493,45 @@ static void t_edges(void)
     CHECK_EQ(smcp_irq_edges(&S), 1);
     smcp_reg_write(&S, SMCP_R_EVT_ENABLE, SMCP_EV_ALL); /* no change: no edge */
     CHECK_EQ(smcp_irq_edges(&S), 1);
-    /* _EVT acks; a new lid event gives a new edge; a repeat while still pending does not */
+    /* _EVT acks; a new lid event gives a new edge within the 50 ms poll (before any re-pulse) */
     smcp_reg_write(&S, SMCP_R_EVT_ACK, smcp_reg_read(&S, SMCP_R_EVT_PENDING));
     mock_set_u(&M, "MSLD", 1);
-    run_ms(100);
+    run_ms(80);
+    CHECK_EQ(smcp_irq_edges(&S), 2);
+    smcp_reg_write(&S, SMCP_R_EVT_ACK, SMCP_EV_LID);
+    run_ms(500);                       /* acked: quiet */
     CHECK_EQ(smcp_irq_edges(&S), 2);
     mock_set_u(&M, "MSLD", 0);
-    run_ms(100);
-    CHECK_EQ(smcp_irq_edges(&S), 2);  /* LID still pending (not acked): coalesced */
-    smcp_reg_write(&S, SMCP_R_EVT_ACK, SMCP_EV_LID);
-    mock_set_u(&M, "MSLD", 1);
-    run_ms(100);
+    run_ms(80);
     CHECK_EQ(smcp_irq_edges(&S), 3);
-    /* disabled events raise no edge */
+    /* disabled events raise no edge and are not re-pulsed */
     smcp_reg_write(&S, SMCP_R_EVT_ACK, 0xff);
     smcp_reg_write(&S, SMCP_R_EVT_ENABLE, SMCP_EV_LID);
     mock_set_u(&M, "bHLD", 1);
-    run_ms(100);
+    run_ms(500);
     CHECK_EQ(smcp_irq_edges(&S), 3);
     CHECK_EQ(rd(SMCP_R_EVT_PENDING), SMCP_EV_PWRB);
+}
+
+/* the edge at _INI time can be lost (interrupt not yet connected): unacked events re-pulse */
+static void t_repulse(void)
+{
+    setup(0);
+    run_ms(200);
+    smcp_reg_write(&S, SMCP_R_EVT_ENABLE, SMCP_EV_ALL);
+    uint32_t e0 = smcp_irq_edges(&S);
+    run_ms(1000);                                   /* nobody acks */
+    uint32_t e1 = smcp_irq_edges(&S);
+    CHECK(e1 - e0 >= 9 && e1 - e0 <= 11);           /* one per 100 ms */
+    smcp_reg_write(&S, SMCP_R_EVT_ACK, 0xff);
+    run_ms(1000);                                   /* acked and quiet: no more pulses */
+    CHECK_EQ(smcp_irq_edges(&S), e1);
+    /* an unplug after a lost edge still reaches the guest */
+    mock_set_u(&M, "CHIS", 0);
+    mock_set_u(&M, "CHCE", 0);
+    run_ms(2500);
+    CHECK(smcp_irq_edges(&S) > e1);
+    CHECK(smcp_irq(&S));
 }
 
 static void t_registers(void)
@@ -752,7 +772,7 @@ int main(void)
         {"discharging", t_discharging}, {"status_logic", t_status_logic}, {"chwa", t_chwa},
         {"capacity_level", t_capacity_level}, {"pre27_b0rm", t_pre27_b0rm}, {"lid_and_button", t_lid_and_button},
         {"notifications", t_notifications}, {"timeouts", t_timeouts}, {"stale_and_dead", t_stale_and_dead},
-        {"size_mismatch", t_size_mismatch}, {"edges", t_edges}, {"registers", t_registers}, {"flt", t_flt},
+        {"size_mismatch", t_size_mismatch}, {"edges", t_edges}, {"repulse", t_repulse}, {"registers", t_registers}, {"flt", t_flt},
         {"power_off", t_power_off}, {"restart", t_restart}, {"power_failures", t_power_failures},
         {"fuzz", t_fuzz},
     };

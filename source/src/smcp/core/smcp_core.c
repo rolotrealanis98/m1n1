@@ -211,8 +211,19 @@ static void raise(smcp *s, uint32_t ev)
 {
     uint32_t fresh = ev & SMCP_EV_ALL & ~s->evt_pending;
     s->evt_pending |= ev & SMCP_EV_ALL;
-    if (fresh & s->evt_enable)
+    if (fresh & s->evt_enable) {
         s->irq_edges++;
+        s->last_edge_us = now(s);
+    }
+}
+
+/* re-pulse: a lost edge must not leave events pending forever */
+static void repulse(smcp *s)
+{
+    if ((s->evt_pending & s->evt_enable) && now(s) - s->last_edge_us >= SMCP_REPULSE_US) {
+        s->irq_edges++;
+        s->last_edge_us = now(s);
+    }
 }
 
 static void update_status(smcp *s)
@@ -527,6 +538,7 @@ void smcp_tick(smcp *s)
 {
     if (s->phase == SMCP_PH_FAILED)
         return;
+    repulse(s);
     pump(s);
     if (s->phase == SMCP_PH_FAILED)
         return;
@@ -615,8 +627,10 @@ void smcp_reg_write(smcp *s, uint32_t off, uint32_t value)
     else if (off == SMCP_R_EVT_ENABLE) {
         uint32_t newly = value & SMCP_EV_ALL & ~s->evt_enable;
         s->evt_enable = value & SMCP_EV_ALL;
-        if (newly & s->evt_pending)
+        if (newly & s->evt_pending) {
             s->irq_edges++; /* events that waited for _INI */
+            s->last_edge_us = now(s);
+        }
     }
     /* everything else: write ignored */
 }
