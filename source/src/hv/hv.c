@@ -316,6 +316,7 @@ void hv_start(void *entry, u64 regs[4])
      */
     hv_secondary_info.cptr = mrs(CPTR_EL2);
 
+    iodev_console_nonblock = true; /* nightly-10: the console never blocks while the guest runs */
     hv_arm_tick(false);
     hv_pinned_cpu = -1;
     hv_want_cpu = -1;
@@ -328,6 +329,7 @@ void hv_start(void *entry, u64 regs[4])
 
     hv_wdt_stop();
 
+    iodev_console_nonblock = false; /* nightly-10: exit path and proxy flush fully again */
     printf("HV: Exiting hypervisor (main CPU)\n");
 
     spin_unlock(&bhl);
@@ -704,17 +706,31 @@ bool hv_cpu_should_exit(void)
 void hv_tick(struct exc_info *ctx)
 {
     HV_DOING(HV_DO_TICK); /* nightly-7b */
+    if (hv_cpu_rec[smp_id()].reason == HV_HOLD_FIQ)
+        hv_cpu_rec[smp_id()].reason = HV_HOLD_TICK; /* nightly-10 */
     /* nightly-7b: with the progress watchdog armed, the SoC watchdog is petted only when every started CPU made
      * progress (hv_win_session.c); otherwise as before */
     if (!hv_win_progress_wdt_tick())
         wdt_kick();
     hv_wdt_pet();
     iodev_handle_events(uartproxy_iodev);
-    if (iodev_can_read(uartproxy_iodev)) {
+    /* nightly-10: heartbeat bytes are consumed here (no proxy entry, no vCPU stop); any other byte ('!') is the
+     * host interrupt as before. The tick runs only on the interruptible CPU, so no byte is taken from another. */
+    while (iodev_can_read(uartproxy_iodev) > 0) {
+        u8 b = 0;
+        if (iodev_read(uartproxy_iodev, &b, 1) != 1)
+            break;
+        if (b == HV_WIN_HEARTBEAT_BYTE) {
+            hv_win_session_heartbeat_byte();
+            continue;
+        }
         printf("HV: User interrupt\n");
         iodev_console_flush();
-        if (hv_pinned_cpu == -1 || hv_pinned_cpu == smp_id())
+        if (hv_pinned_cpu == -1 || hv_pinned_cpu == smp_id()) {
+            hv_cpu_rec[smp_id()].reason = HV_HOLD_PROXY;
             hv_exc_proxy(ctx, START_HV, HV_USER_INTERRUPT, NULL);
+        }
+        break;
     }
     hv_vuart_poll();
     /* Windows personality only: a no-op unless P_HV_WIN_PL011 configured the emulated PL011 */

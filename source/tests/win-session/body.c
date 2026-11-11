@@ -49,9 +49,10 @@ int main(void)
     CHECK(nexits == 0);                                    /* never armed: never fires */
     CHECK(hv_win_session_heartbeat(5) == -1 && hv_win_session_heartbeat(3601) == -1);
     CHECK(hv_win_session_heartbeat(120) == 0 && hv_win_session_stat(4) == 120);
+    hv_win_session_tick();                                 /* nightly-10: the first guest tick starts the window */
     for (int s = 0; s < 119; s++) { now_ticks += freq; hv_win_session_tick(); }
     CHECK(nexits == 0);
-    CHECK(hv_win_session_heartbeat(0) == 0);              /* a refresh restarts the window */
+    hv_win_session_heartbeat_byte();                      /* nightly-10: the heartbeat byte restarts the window */
     for (int s = 0; s < 119; s++) { now_ticks += freq; hv_win_session_tick(); }
     CHECK(nexits == 0);
     now_ticks += 2 * freq; hv_win_session_tick();
@@ -60,6 +61,16 @@ int main(void)
     CHECK(nexits == 1);                                    /* once */
     guest_stops();
     CHECK(run_after_exit() == 1 && resets == 1 && strstr(lastline, "dead-man"));
+    /* nightly-10: armed long before the guest starts (before select): the window starts at the first guest tick */
+    reset_world();
+    hv_win_session_heartbeat(120);
+    now_ticks += 600 * freq;                               /* 10 min pre-guest (gate, uploads) */
+    hv_win_session_tick();
+    CHECK(nexits == 0);
+    for (int s = 0; s < 119; s++) { now_ticks += freq; hv_win_session_tick(); }
+    CHECK(nexits == 0);
+    now_ticks += 2 * freq; hv_win_session_tick();
+    CHECK(nexits == 1 && exits[0] == HV_WIN_EXIT_DEADMAN);
     /* the dead-man does not fire after the guest stopped on its own */
     reset_world();
     hv_win_session_heartbeat(60);

@@ -152,6 +152,12 @@ int in_iodev = 0;
 
 static DECLARE_SPINLOCK(console_lock);
 
+/* nightly-10: while the hypervisor runs a guest the console never waits for the host: a USB write takes what fits in the
+ * ring and the rest stays in the console buffer (flushed by later writes/events; overflow drops the oldest text). The
+ * proxy's own replies (iodev_write outside the console) keep their blocking, 3 s-bounded semantics. */
+bool iodev_console_nonblock;
+extern bool usb_dwc3_nonblock;
+
 static void _iodev_console_write_helper(iodev_id_t iod, char prefix, const void *buf, size_t length)
 {
     if (!length)
@@ -185,6 +191,8 @@ void iodev_console_write(const void *buf, size_t length)
         return;
     }
     in_iodev++;
+    bool nb_saved = usb_dwc3_nonblock;
+    usb_dwc3_nonblock = iodev_console_nonblock;
 
     dprintf("  iodev_console_write() wp=%d\n", con_wp);
     for (iodev_id_t id = 0; id < IODEV_NUM; id++) {
@@ -253,6 +261,7 @@ void iodev_console_write(const void *buf, size_t length)
         length -= block;
     }
 
+    usb_dwc3_nonblock = nb_saved;
     in_iodev--;
     if (do_lock)
         spin_unlock(&console_lock);
@@ -307,7 +316,10 @@ void iodev_console_flush(void)
         if (!(iodevs[id]->usage & USAGE_CONSOLE))
             continue;
 
+        bool nb_saved = usb_dwc3_nonblock; /* nightly-10: a flush while the guest runs is one non-waiting pass */
+        usb_dwc3_nonblock = iodev_console_nonblock;
         iodev_flush(id);
+        usb_dwc3_nonblock = nb_saved;
     }
 }
 

@@ -1385,6 +1385,8 @@ u8 usb_dwc3_getbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
 }
 
 #define USB_DWC3_STALL_US 3000000 /* nightly-9: longest a write/flush waits for a host that does not read */
+/* nightly-10: set by the console path while the guest runs (iodev.c): never wait for the host at all */
+bool usb_dwc3_nonblock;
 
 void usb_dwc3_putbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, u8 byte)
 {
@@ -1426,6 +1428,10 @@ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf, 
         p += wrote;
         sent += wrote;
         if (count) {
+            if (usb_dwc3_nonblock && !wrote) {
+                usb_dwc3_cdc_start_bulk_in_xfer(dev, ep); /* kick what is queued; the caller keeps the rest */
+                break;
+            }
             if (wrote)
                 deadline = 0;
             else if (!deadline)
@@ -1517,6 +1523,12 @@ void usb_dwc3_flush(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
 
     u8 ep = dev->pipe[pipe].ep_in;
     u64 deadline = timeout_calculate(USB_DWC3_STALL_US); /* nightly-9: a flush gives up after 3 s */
+    if (usb_dwc3_nonblock) { /* nightly-10: one pass, no wait */
+        usb_dwc3_handle_events(dev);
+        if (dev->pipe[pipe].ready)
+            usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
+        return;
+    }
 
     while (dev->pipe[pipe].ready &&
            (ringbuffer_get_used(device2host) != 0 || dev->endpoints[ep].xfer_in_progress) &&

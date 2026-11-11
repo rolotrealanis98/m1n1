@@ -95,6 +95,16 @@ void hv_win_system_exit(u32 reason);
 s64 hv_win_session_end(u64 code, u64 flags);
 s64 hv_win_session_heartbeat(u64 seconds);
 void hv_win_session_tick(void);
+#define HV_WIN_HEARTBEAT_BYTE 0x16 /* nightly-10: host heartbeat byte on the proxy link (SYN); '!' still interrupts */
+void hv_win_session_heartbeat_byte(void);
+/* nightly-10 stall evidence (hv_exc.c): longest bhl hold per reason, and all-vCPU stops (proxy rendezvous) */
+enum { HV_HOLD_SYNC, HV_HOLD_IRQ, HV_HOLD_FIQ, HV_HOLD_TICK, HV_HOLD_PROXY, HV_HOLD_NR };
+struct hv_stall_stats {
+    u64 hold_max[HV_HOLD_NR], hold_50ms[HV_HOLD_NR];
+    u64 hold_max_esr;           /* ESR of the longest SYNC hold */
+    u64 stops, stop_max, stop_50ms, stop_total;
+};
+extern struct hv_stall_stats hv_stall;
 void hv_win_session_after_exit(void);
 u64 hv_win_session_stat(u64 index);
 
@@ -111,6 +121,7 @@ struct hv_cpu_rec {
     u64 bhl_ra;    /* return address of this CPU's last bhl acquisition */
     u32 doing;     /* enum hv_doing */
     u32 prev;      /* doing before HV_DO_BHL_WAIT */
+    u32 reason;    /* nightly-10: HV_HOLD_* of the exception holding bhl (for the hold-time table) */
 };
 extern struct hv_cpu_rec hv_cpu_rec[];
 extern volatile s64 hv_bhl_holder_cpu;

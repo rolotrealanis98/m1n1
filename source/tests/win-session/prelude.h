@@ -51,6 +51,7 @@ s64 hv_win_progress_wdt_arm(u64 seconds);
 bool hv_win_progress_wdt_tick(void);
 s64 hv_win_session_end(u64 code, u64 flags);
 s64 hv_win_session_heartbeat(u64 seconds);
+void hv_win_session_heartbeat_byte(void);
 void hv_win_session_tick(void);
 void hv_win_session_after_exit(void);
 u64 hv_win_session_stat(u64 index);

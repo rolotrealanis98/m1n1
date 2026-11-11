@@ -298,6 +298,8 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
      * Get all the CPUs into the HV before running the proxy, to make sure they all exit to
      * the guest with a consistent time offset.
      */
+    u64 stop_t0 = mrs(CNTPCT_EL0); /* nightly-10: every vCPU is stopped from here until the proxy returns */
+    hv_cpu_rec[smp_id()].reason = HV_HOLD_PROXY;
     if (time_stealing)
         hv_rendezvous();
 
@@ -318,6 +320,15 @@ static void _hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, 
     int ret = uartproxy_run(&start);
     hv_wdt_resume();
     HV_DOING(doing_before); /* nightly-7b */
+    {   /* nightly-10: all-vCPU stop event */
+        u64 d = mrs(CNTPCT_EL0) - stop_t0;
+        hv_stall.stops++;
+        hv_stall.stop_total += d;
+        if (d > hv_stall.stop_max)
+            hv_stall.stop_max = d;
+        if (d > mrs(CNTFRQ_EL0) / 20)
+            hv_stall.stop_50ms++;
+    }
 
     switch (ret) {
         case EXC_RET_HANDLED:
@@ -1433,6 +1444,9 @@ static void hv_get_context(struct exc_info *ctx)
 u64 hv_bhl_wait_max[MAX_CPUS], hv_bhl_wait_1ms[MAX_CPUS];
 static u64 hv_bhl_tick_1ms;
 
+/* nightly-10 stall evidence (hv_win.h) */
+struct hv_stall_stats hv_stall;
+
 /* nightly-7b hang evidence (hv_win.h) */
 struct hv_cpu_rec hv_cpu_rec[MAX_CPUS];
 volatile s64 hv_bhl_holder_cpu = -1;
@@ -1549,8 +1563,20 @@ static void hv_exc_exit(struct exc_info *ctx)
     /* reenable PMU counters */
     reg_set(SYS_IMP_APL_PMCR0, PERCPU(exc_entry_pmcr0_cnt));
     msr(CNTVOFF_EL2, stolen_time);
-    if (bhl.count == 1)
+    if (bhl.count == 1) {
         hv_bhl_holder_cpu = -1; /* nightly-7b: released below (the record is advisory) */
+        /* nightly-10: how long this exception held bhl, by reason (every other vCPU that traps waits this long) */
+        struct hv_cpu_rec *r = &hv_cpu_rec[smp_id()];
+        u32 why = r->reason < HV_HOLD_NR ? r->reason : HV_HOLD_SYNC;
+        u64 held = mrs(CNTPCT_EL0) - exc_entry_time;
+        if (held > hv_stall.hold_max[why]) {
+            hv_stall.hold_max[why] = held;
+            if (why == HV_HOLD_SYNC)
+                hv_stall.hold_max_esr = r->esr;
+        }
+        if (held > mrs(CNTFRQ_EL0) / 20)
+            hv_stall.hold_50ms[why]++;
+    }
     spin_unlock(&bhl);
     hv_maybe_exit();
     __atomic_or_fetch(&hv_cpus_in_guest, BIT(smp_id()), __ATOMIC_ACQUIRE);
@@ -1947,6 +1973,7 @@ bool hv_exc_sync(struct exc_info *ctx)
     rec->ctx = ctx;
     rec->esr = hv_get_esr();
     rec->doing = HV_DO_SYNC;
+    rec->reason = HV_HOLD_SYNC; /* nightly-10 */
     u64 t0 = hv_perf_t0();
     u64 esr = t0 ? hv_get_esr() : 0;
     u32 ec = FIELD_GET(ESR_EC, esr);
@@ -1967,6 +1994,7 @@ void hv_exc_irq(struct exc_info *ctx)
 {
     hv_cpu_rec[smp_id()].ctx = ctx; /* nightly-7b */
     hv_cpu_rec[smp_id()].doing = HV_DO_IRQ;
+    hv_cpu_rec[smp_id()].reason = HV_HOLD_IRQ; /* nightly-10 */
     u64 t0 = hv_perf_t0();
     hv_exc_irq_body(ctx);
     hv_perf_t1(&hv_perf_el2_irq, t0);
@@ -1977,6 +2005,7 @@ void hv_exc_fiq(struct exc_info *ctx)
     struct hv_cpu_rec *rec = &hv_cpu_rec[smp_id()]; /* nightly-7b: progress evidence on every timer FIQ */
     rec->ctx = ctx;
     rec->doing = HV_DO_FIQ;
+    rec->reason = HV_HOLD_FIQ; /* nightly-10 (hv_tick turns it into TICK) */
     __atomic_add_fetch(&rec->heartbeat, 1, __ATOMIC_RELAXED);
     u64 t0 = hv_perf_t0();
     hv_exc_fiq_body(ctx);
@@ -2199,6 +2228,17 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
                 printf(" c%d:%s", c, hv_doing_name(hv_cpu_rec[c].doing));
         }
         printf(" guest:%d | bhl-ra 0x%lx", nguest, (unsigned long)hv_bhl_holder_ra);
+        /* nightly-10: stalls since boot: longest bhl hold per reason (us), holds > 50 ms, all-vCPU stops */
+        u64 us = freq / 1000000 ? freq / 1000000 : 1;
+        printf(" | stall hold-max-us sync %lu (esr 0x%lx) irq %lu fiq %lu tick %lu proxy %lu | >50ms sync %lu irq %lu "
+               "fiq %lu tick %lu proxy %lu | stops %lu max-us %lu >50ms %lu",
+               (unsigned long)(hv_stall.hold_max[HV_HOLD_SYNC] / us), (unsigned long)hv_stall.hold_max_esr,
+               (unsigned long)(hv_stall.hold_max[HV_HOLD_IRQ] / us), (unsigned long)(hv_stall.hold_max[HV_HOLD_FIQ] / us),
+               (unsigned long)(hv_stall.hold_max[HV_HOLD_TICK] / us), (unsigned long)(hv_stall.hold_max[HV_HOLD_PROXY] / us),
+               (unsigned long)hv_stall.hold_50ms[HV_HOLD_SYNC], (unsigned long)hv_stall.hold_50ms[HV_HOLD_IRQ],
+               (unsigned long)hv_stall.hold_50ms[HV_HOLD_FIQ], (unsigned long)hv_stall.hold_50ms[HV_HOLD_TICK],
+               (unsigned long)hv_stall.hold_50ms[HV_HOLD_PROXY], (unsigned long)hv_stall.stops,
+               (unsigned long)(hv_stall.stop_max / us), (unsigned long)hv_stall.stop_50ms);
     }
     printf("\n");
     st_prev_irq = hv_exits_irq; st_prev_fiq = hv_exits_fiq; st_prev_sync = hv_exits_sync;

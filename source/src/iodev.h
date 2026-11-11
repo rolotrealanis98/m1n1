@@ -59,6 +59,7 @@ void iodev_unlock(iodev_id_t id);
 void iodev_console_write(const void *buf, size_t length);
 void iodev_console_kick(void);
 void iodev_console_flush(void);
+extern bool iodev_console_nonblock; /* nightly-10 */
 
 iodev_usage_t iodev_get_usage(iodev_id_t id);
 void iodev_set_usage(iodev_id_t id, iodev_usage_t usage);

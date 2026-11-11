@@ -30,7 +30,7 @@
 extern bool hv_started_cpus[MAX_CPUS];
 
 static struct {
-    bool armed, autoreset;
+    bool armed, autoreset, running;
     u64 timeout_ticks, last_beat;
     u64 ends, heartbeats, deadman, self_resets, last_code;
 } sess;
@@ -75,10 +75,24 @@ s64 hv_win_session_heartbeat(u64 seconds)
     return 0;
 }
 
+/* nightly-10: the launcher's heartbeat is one byte on the proxy link (HV_WIN_HEARTBEAT_BYTE), read by hv_tick's
+ * normal USB poll: no proxy entry, no rendezvous, no vCPU stops (P_HV_WIN_HEARTBEAT through a host interrupt held
+ * bhl inside the proxy for a whole host round trip: 3 of 17 beats stalled a core ~3 s, n9bcpu runs). */
+void hv_win_session_heartbeat_byte(void)
+{
+    sess.last_beat = mrs(CNTPCT_EL0);
+    sess.heartbeats++;
+}
+
 void hv_win_session_tick(void)
 {
     if (!sess.armed || hv_win.exit_reason != HV_WIN_EXIT_NONE || !guest_running())
         return;
+    if (!sess.running) { /* nightly-10: armed before select (pre-guest): the window starts with the guest */
+        sess.running = true;
+        sess.last_beat = mrs(CNTPCT_EL0);
+        return;
+    }
     if (mrs(CNTPCT_EL0) - sess.last_beat < sess.timeout_ticks)
         return;
     sess.deadman++;
