@@ -1,0 +1,45 @@
+path	change	sha256	reason
+BUILD-NOTES.md	modified	fa03eb5aef141a1bb7408367e0793a444b3deb4b88000417b87992c911a41a92	delivery documentation/evidence
+NOTES.md	added	d9c4e45cc0c9b6c6e2f8f693e1b1bd48a6b632d21704a4e601c94fabb177cefa	delivery documentation/evidence
+REPORT.md	modified	a5b9137bce386a0f6b80955c22560c67312850c8ae419f41bb6c7ec56d45af96	delivery documentation/evidence
+REVIEW-GUIDE.md	modified	daf40cd5c499524a7dff747cd0a03a4cac1c0ea002a938c737bc954b14ee151c	delivery documentation/evidence
+SOURCE-SHA256.tsv	added	1cec7d8796c8843aa9e85ae56629fdd45f693e98e0dfff76be473672f8e1b23a	delivery documentation/evidence
+TEST-RESULTS.json	added	59f2df877fbb34963af17c13b35a852148672fc64afe2541e7ee6fb4c2e912ab	delivery documentation/evidence
+build.sh	modified	2bc57c447481274664c0a9b2460d91a3df785fe88451ce189deb453730a9e53a	r4.6 build tag
+review-tests-r3/e2e_review.c	modified	2c550d2bf57f0242d51ad01a57da398294d3d09f92c4f926fd25ed37e6079d22	READ-refusal expectation only; see NOTES.md (plus mandatory overlay where applicable)
+review-tests-r3/gpt_fuzz.c	modified	f39b9afe1fb63d2d89665f8afe6d717996253fb7e4704f833bc876c851e6dbeb	mandatory overlay, byte-identical
+review-tests-r3/run.py	modified	a2a0eb90afba068e2e2fea30afaafd965cb0a3c2a63ece856f544c580bacff62	mandatory overlay, byte-identical
+source-vs-r4.5.patch	added	5cd54481512d7743a8d9c6a85b3fec8d83dfba7d0ee32fb538b83a3eda537308	delivery documentation/evidence
+source/src/exception.c	modified	3f5d25d2750a2784fba131c24c2821d836d596fe3fa023c99e26ed8e41f603e1	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/hv_win_storage.c	modified	396ddc1ae0ba789ae1b632901feaad99f93f3cf92255e672c139b2316d6671c5	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/hv_win_storage_native.c	modified	4560f28ef4c966e6b6fa54c4a0fa92fba20832ae08bdcdf94617599a9f78ca87	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/s1/ans_ro.c	modified	d77a103357d1733a9ffabd7e6c032fc2b47e517068dbcf96df2a179e44d7c9f9	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/s1/ans_ro.h	modified	defc5555ea41a586161177e8026e0f756252183b7f33eab987021af618a71458	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/s1/hv_nvme_queue.c	modified	85eeb46387904af0385c6703eec8b3764a07cd46b7b348e43a5a0d4f42bd3bf7	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/s1/hv_nvme_queue.h	modified	e64b5d8aee0b3eeda503421cb9f7fe0e8aaa79f69cef36804ee664c150ee0042	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/s1/native_link.c	modified	a3e3be188c7324018cb70274539c917f9d677286e62078834f2b4c0af1b1b982	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/s1/native_link.h	modified	4829cbbd4aef3b431cfc574b92747366e81a657d5ca46fcb8ab8f25c9dd41f95	r4.6 source change; see REVIEW-GUIDE.md
+source/src/hv/win/s1/native_window.c	modified	726dfd7d767c063beaa1b635c38315449550a84254f896195d32e822f29858ea	r4.6 source change; see REVIEW-GUIDE.md
+source/src/mcc.c	modified	64420ee2fd9ed17ff1912522e6e1a27d06c6e8ec5164de3c6039fb23506b0ea0	r4.6 source change; see REVIEW-GUIDE.md
+source/src/mcc.h	modified	b323b442abec5953be606783d45409b736f0bc6fdfccba1e2fd5f131b0a90ba8	r4.6 source change; see REVIEW-GUIDE.md
+source/src/uartproxy.c	modified	4d7fd70077a2230a34961426c53e2d512eaa257995a7ded6f6d1c02a97648e30	r4.6 source change; see REVIEW-GUIDE.md
+source/src/uartproxy.h	modified	79393a56e257302fc107c4665a59f0d528033f7f77b27ec3d2ccd9de0000826a	r4.6 source change; see REVIEW-GUIDE.md
+tests/native/body.c	modified	ac90331b70adb093fae5172ff1d459e2882cd0bd91e7661550a799113b4148fa	additive r46 dispatch/fault hooks; inherited assertions unchanged
+tests/native/fake_ans.c	modified	438285feb4348d9da329bbe8a161a65f270e6ff0a4471b052273655f92cd2c24	additive r46 dispatch/fault hooks; inherited assertions unchanged
+tests/native/r45_cases.h	modified	658092d3d930d63fd9aab5684e97d8061702f85ce072690e2cf7a9e7ad6d2344	READ-refusal expectation only; see NOTES.md (plus mandatory overlay where applicable)
+tests/native/r46_cases.h	added	f4666358fb4aa3efef8e9da9c05c8e48cf9138c96e1985425a228c3072294a1d	added host verification/infrastructure
+tests/native/r46_context_path.py	added	3c487470fd68dbb7527cde5b4f9bd1a53f17a293872e8ca227611412c0fed401	added host verification/infrastructure
+tests/native/r46_inherited.py	added	26e30999f1b3fa4f4ee495715c5c64dc316732ab12760d1671544c557acb5fc4	added host verification/infrastructure
+tests/native/r46_mcc.py	added	849e49bf3d5604f7ccc29cf25ed5bbccd43fcba766911e2b380ff3f669f0efdd	added host verification/infrastructure
+tests/native/r46_mutant_followup.py	added	424fc6d83b96ded7bd51a9a991cf3ddab3ba4b5733037ce09be0207d7cb16a65	added host verification/infrastructure
+tests/native/r46_overlay_mutants.py	added	860366991064c56d32560c54d4002780d15dc1c67d311a549eb29534c140c01a	added host verification/infrastructure
+tests/native/r46_run.py	added	399697cbf4306df982ea44f97029967ecb23c7ae6ee9fbc7e0b963c4f87f1907	added host verification/infrastructure
+tests/native/r46_stage_inspection.py	added	888221534c98fe0dc66874749f6a2728e0977fc5f5cbda4bdf7bce848822e92b	added host verification/infrastructure
+tests/native/run.py	modified	1a05d390da48135c3c7b1bbb46db6d115e67e7e8af3d0ecf854cefdbd30a9b6d	mandatory overlay, byte-identical
+tests/native/secA_cases.h	added	968eba73451995aa7372ac3458a1925d70632a33d9fd7a86a134df084fd88375	READ-refusal expectation only; see NOTES.md (plus mandatory overlay where applicable)
+tests/native/shim/smp.h	added	c3d01ec0009ec7827631151da99b7b4092e40003ea1f462fec3221c275ba949b	added host verification/infrastructure
+tests/native/shim/uartproxy.h	added	107ea243ca50c59c102edac8eacfe07f9cb8a2223acbdafc6cd34edcf048d655	added host verification/infrastructure
+tests/storage/s0/MANIFEST.json	modified	2df07b1c442b1bef8439fa366f8d245ab04b7c9d4e682b8b59f3c9e44e656671	unchanged sync-model.py refreshed actual source mirror/hash manifest
+tests/storage/s0/src/hv_nvme_queue.c	modified	85eeb46387904af0385c6703eec8b3764a07cd46b7b348e43a5a0d4f42bd3bf7	unchanged sync-model.py refreshed actual source mirror/hash manifest
+tests/storage/s0/src/hv_nvme_queue.h	modified	e64b5d8aee0b3eeda503421cb9f7fe0e8aaa79f69cef36804ee664c150ee0042	unchanged sync-model.py refreshed actual source mirror/hash manifest
+tests/storage/s1/MANIFEST.json	modified	6c9a9e0c4c66db6ffb1b9a32483f1e0dd41e47692f64404e60c07a02d0ce7e1a	unchanged sync-model.py refreshed actual source mirror/hash manifest

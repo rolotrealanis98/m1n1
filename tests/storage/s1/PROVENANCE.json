@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/paulsmir/m1n1_windows",
+  "commit": "9cd80ac652ac404e92ae279deeaec8c629d7d184",
+  "license": "MIT; exact donor LICENSE retained",
+  "upstream": [
+    {
+      "source_path": "LICENSE",
+      "local_path": "upstream/LICENSE",
+      "git_blob": "aff0557da45ae68209934ef48887a8112663ca45"
+    },
+    {
+      "source_path": "src/hv_nvme.c",
+      "local_path": "upstream/hv_nvme.c",
+      "git_blob": "377076a8dda1b3ed6d899ef02effda359b65e41c"
+    },
+    {
+      "source_path": "src/hv_pci.c",
+      "local_path": "upstream/hv_pci.c",
+      "git_blob": "98f445026c5b6923a9c6355b8f523e6e188ca5f7"
+    }
+  ],
+  "adaptation": "Actual protocol-model extraction and hardened host adapter; no native backend, target hooks, donor LR or raw translator. S0 queue engine imported as pinned build dependency, not forked."
+}

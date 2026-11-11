@@ -19,19 +19,40 @@
 
 #define SYS_FPCR sys_reg(3, 3, 4, 4, 0)
 #define SYS_FPSR sys_reg(3, 3, 4, 4, 1)
+#include "win/s1/native_link.h"
+#include "win/hv_win_storage.h"
+#include "hv_sysreg_logic.h"
 
 #define TIME_ACCOUNTING
+
+/*
+ * r4.9 fail-soft (named build option). While the host link is locked (storage session armed), a
+ * system-register trap (EC 0x18, or Apple IMPDEF-MSR) that no EL2 handler took is absorbed in EL2
+ * instead of escalated: a READ returns 0, a WRITE is ignored, and a loud console line names it. Only that
+ * class: aborts, HVC/SMC, BRK, debug exceptions, SError, IRQ/FIQ and HV events always escalate.
+ * Risk: the guest gets 0 for a register we do not know. Alternative (option off): the escalation is
+ * refused by the locked link and the session dies. Default ON for the stage-3 (guest-write) build.
+ * r4.10: the same option also gates, while locked, reflecting debug exceptions (EC 0x30/0x32/0x34) to
+ * the guest and answering unhandled HVC/SMC with SMCCC_NOT_SUPPORTED; BRK reflection is unconditional.
+ */
+#ifndef HV_SYSREG_FAILSOFT
+#if S1N_STAGE == 3
+#define HV_SYSREG_FAILSOFT 1
+#else
+#define HV_SYSREG_FAILSOFT 0
+#endif
+#endif
 
 extern spinlock_t bhl;
 
 #define PERCPU(x) pcpu[mrs(TPIDR_EL2)].x
 
 /*
- * smp2d: per-CPU shadow of the guest debug breakpoint/watchpoint registers (DBGB{V,C}Rn_EL1,
- * DBGW{V,C}Rn_EL1), indexed (op2-4)*16 + CRm, op2 in 4..7, CRm 0..15. The host Python proxy used to
- * trap these to EL1->EL2->USB (MDCR_EL2.TDA/TDE) and rewrite the whole ExcInfo for every access
- * (2618 of them on CPU 1 in run 20261110-084028-smp2c); handling them per CPU in EL2 keeps the host
- * from ever touching another vCPU's saved register frame (bugcheck-0A suspect #1, secondary fix).
+ * smp2d (ported to r4.9 from s1-resident-smp2g): per-CPU shadow of the guest debug
+ * breakpoint/watchpoint registers (DBGB{V,C}Rn_EL1, DBGW{V,C}Rn_EL1), indexed (op2-4)*16 + CRm, op2 in
+ * 4..7, CRm 0..15. The host Python proxy used to trap these to EL1->EL2->USB (MDCR_EL2.TDA/TDE) and
+ * rewrite the whole ExcInfo for every access; handling them in EL2 keeps them off the host link (which
+ * r4.5+ locks while a storage session is armed).
  */
 #define HV_DBG_SHADOW_N 64
 
@@ -79,6 +100,14 @@ struct hv_pcpu_data {
     u64 integ_sp0, integ_sp1, integ_tpidr;
     u64 integ_mismatch; /* exits (async or WFI wait) where x19..x28, SP_EL0/1 or TPIDR_EL1 changed */
 } ALIGNED(64);
+
+/* r4.9: escalations to the host (all reasons) and fail-soft absorptions */
+static u64 hv_esc_count, hv_failsoft_count;
+/* r4.11 diagnostics: fail-soft sites, exits by kind, synchronous traps by EC with their last PC/FAR */
+static struct hv_site hv_fs_sites[HV_SITE_N];
+static u64 hv_fs_overflow;
+static u64 hv_exits_irq, hv_exits_fiq, hv_exits_sync;
+static u64 hv_trap_ec[64], hv_trap_ec_pc[64], hv_trap_ec_far[64];
 
 struct hv_pcpu_data pcpu[MAX_CPUS];
 
@@ -254,8 +283,42 @@ static void hv_maybe_switch_cpu(struct exc_info *ctx, uartproxy_boot_reason_t re
     }
 }
 
+/*
+ * r4.9: one console line per escalation, printed and flushed BEFORE the host round-trip, through the
+ * resident's console (iodev; the host shows it as "TTY>"), which is output-only and not gated by the
+ * locked host link. So the next run names any register or fault that still leaves EL2, even when the
+ * round-trip itself is refused. Format (one line):
+ *   HV/win r4.9 ESC #<n> cpu<c> reason <r> type <t> EC 0x<ec> ESR 0x<esr> PC 0x<elr> link <locked|open>
+ *     + sysreg: " SYSREG <mrs|msr> s<op0>_<op1>_c<CRn>_c<CRm>_<op2> x<rt> (op0 o op1 o CRn n CRm m op2 o)"
+ *     + abort:  " FAR 0x<far>"
+ * The first 4096 are all printed, then every 4096th (with the running count).
+ */
+#define HV_ESC_LOG_ALL 4096
+
+static void hv_esc_log(struct exc_info *ctx, const char *what, u64 n, u32 reason, u32 type)
+{
+    struct hv_esc_info e;
+    hv_esc_decode(ctx->esr, ctx->afsr1, &e);
+
+    printf("HV/win r4.14 %s #%ld cpu%ld reason %u type %u EC 0x%02x ESR 0x%lx PC 0x%lx link %s", what,
+           (long)n, (long)ctx->cpu_id, reason, type, e.ec, ctx->esr, ctx->elr,
+           s1n_link_locked() ? "locked" : "open");
+    if (e.is_sysreg)
+        printf(" SYSREG %s s%u_%u_c%u_c%u_%u x%u (op0 %u op1 %u CRn %u CRm %u op2 %u)",
+               e.is_read ? "mrs" : "msr", e.op0, e.op1, e.crn, e.crm, e.op2, e.rt, e.op0, e.op1, e.crn,
+               e.crm, e.op2);
+    if (e.is_abort)
+        printf(" FAR 0x%lx", ctx->far);
+    printf("\n");
+    iodev_console_flush();
+}
+
 void hv_exc_proxy(struct exc_info *ctx, uartproxy_boot_reason_t reason, u32 type, void *extra)
 {
+    hv_esc_count++;
+    if (hv_esc_count <= HV_ESC_LOG_ALL || !(hv_esc_count % HV_ESC_LOG_ALL))
+        hv_esc_log(ctx, "ESC", hv_esc_count, reason, type);
+
     /*
      * Wait while another CPU is pinned or being switched to.
      * If a CPU switch is requested, handle it before actually handling the
@@ -939,6 +1002,13 @@ int hv_win_smp_dump(const char *why)
     return 0;
 }
 
+/* r4.9: read passed through at EL2, write ignored (read-only registers; the proxy's "ro" set) */
+#define SYSREG_PASS_RO(sr)                                                                         \
+    case SYSREG_ISS(sr):                                                                           \
+        if (is_read)                                                                               \
+            regs[rt] = _mrs(sr_tkn(sr));                                                           \
+        return true;
+
 #define SYSREG_MAP(sr, to)                                                                         \
     case SYSREG_ISS(sr):                                                                           \
         if (is_read)                                                                               \
@@ -1006,6 +1076,27 @@ static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)
         SYSREG_PASS(SYS_OSLAR_EL1);
         /* smp2d: the guest's OS-lock status read reaches EL2 directly, not the host proxy */
         SYSREG_PASS(SYS_OSLSR_EL1);
+        /*
+         * r4.9: the rest of the MDCR_EL2 TDE/TDA/TDOSA/TDRA debug-register class, with the host proxy's
+         * semantics for them (pass-through at EL2; read-only ones: write ignored). One row each in
+         * hv_sysreg_logic.h hv_sr_extra[] (tests/sysreg-r49 checks both lists agree).
+         */
+        SYSREG_PASS(SYS_OSDTRRX_EL1)
+        SYSREG_PASS(SYS_MDCCINT_EL1)
+        SYSREG_PASS(SYS_OSDTRTX_EL1)
+        SYSREG_PASS(SYS_OSECCR_EL1)
+        SYSREG_PASS_RO(SYS_MDRAR_EL1)
+        SYSREG_PASS(SYS_OSDLR_EL1)
+        SYSREG_PASS(SYS_DBGPRCR_EL1)
+        SYSREG_PASS(SYS_DBGCLAIMSET_EL1)
+        SYSREG_PASS(SYS_DBGCLAIMCLR_EL1)
+        SYSREG_PASS_RO(SYS_DBGAUTHSTATUS_EL1)
+        SYSREG_PASS_RO(SYS_MDCCSR_EL0)
+        SYSREG_PASS(SYS_DBGDTR_EL0)
+        SYSREG_PASS(SYS_DBGDTRRXTX_EL0)
+        /* r4.9: HACR_EL2.TRAP_ACC; the proxy reads these through and skips writes */
+        SYSREG_PASS_RO(SYS_IMP_APL_ACC_CFG)
+        SYSREG_PASS_RO(SYS_IMP_APL_ACC_OVRD)
         SYSREG_PASS(SYS_SMPRI_EL1);
         /* We don't normally trap these, but if we do, they're noisy */
         SYSREG_PASS(SYS_IMP_APL_GXF_STATUS_EL1)
@@ -1302,6 +1393,57 @@ static void hv_dump_serror(struct exc_info *ctx)
     iodev_console_flush();
 }
 
+/*
+ * r4.10/r4.11: one line per reflected/answered exception. r4.11: the first 20 of each class, PLUS the
+ * first occurrence of every new (class, ISS[15:0], PC) site, always; every event is counted per site
+ * and the periodic status report prints the busiest sites (no blind spot after the first 20).
+ */
+#define HV_CLASS_LOG_FIRST 20
+static u64 hv_class_count[64];
+static struct hv_site hv_refl_sites[HV_SITE_N];
+static u64 hv_refl_overflow;
+
+static void hv_exc_class_log(struct exc_info *ctx, u32 ec, const char *what, u64 vbar, u32 off)
+{
+    u64 n = ++hv_class_count[ec & 63];
+    bool fresh = hv_site_note(hv_refl_sites, HV_SITE_N, &hv_refl_overflow,
+                              (ec << 16) | (u32)(ctx->esr & 0xffff), ctx->elr);
+    if (n > HV_CLASS_LOG_FIRST && !fresh)
+        return;
+    static const char *const mname[16] = {"EL0t", "?", "?", "?", "EL1t", "EL1h"};
+    u32 m = ctx->spsr & 0xf;
+    printf("HV/win r4.14 EC 0x%02x #%ld%s %s: cpu%ld ESR 0x%lx PC 0x%lx FAR 0x%lx from %s", ec, (long)n,
+           fresh ? " NEW-SITE" : "", what, (long)ctx->cpu_id, ctx->esr, ctx->elr, ctx->far,
+           (ctx->spsr & 0x10) ? "AArch32" : (mname[m] ? mname[m] : "?"));
+    if (vbar)
+        printf(" -> VBAR_EL1 0x%lx +0x%x", vbar, off);
+    printf("\n");
+    iodev_console_flush();
+}
+
+/*
+ * r4.10: deliver the trapped lower-EL synchronous exception to the guest's own EL1 vector, as the host
+ * Python HV._lower() does (hv_sysreg_logic.h hv_reflect_compute has the exact semantics). The guest's
+ * EL1 registers are written through the _EL12 accessors (HCR_EL2.E2H = 1 here, as hv_handle_nested_eret
+ * reads SPSR_EL12/ELR_EL12); the new PC/PSTATE go back through ctx (hv_exc_exit sets ELR/SPSR_EL2).
+ */
+static bool hv_reflect_sync(struct exc_info *ctx, u32 ec)
+{
+    struct hv_reflect r;
+    u64 vbar = mrs(SYS_VBAR_EL12);
+    if (!hv_reflect_compute(ctx->elr, ctx->spsr, ctx->esr, ctx->far, vbar, mrs(SYS_SCTLR_EL12),
+                            0 /* EXC_SYNC */, &r))
+        return false; /* EL2/AArch32 origin: escalate, as _lower refuses it */
+    hv_exc_class_log(ctx, ec, "reflected to guest EL1 (NOT escalated)", vbar, r.offset);
+    msr(SYS_ELR_EL12, r.elr_el1);
+    msr(SYS_SPSR_EL12, r.spsr_el1);
+    msr(SYS_ESR_EL12, r.esr_el1);
+    msr(SYS_FAR_EL12, r.far_el1);
+    ctx->elr = r.new_elr;
+    ctx->spsr = r.new_spsr;
+    return true;
+}
+
 bool hv_exc_sync(struct exc_info *ctx)
 {
     hv_wdt_breadcrumb('S');
@@ -1309,6 +1451,11 @@ bool hv_exc_sync(struct exc_info *ctx)
     hv_win_diag_note(HV_WIN_DIAG_TRAP, ctx, 0);
     bool handled = false;
     u32 ec = FIELD_GET(ESR_EC, ctx->esr);
+    /* r4.11 diagnostics (lock-free counters; 1 vCPU) */
+    hv_exits_sync++;
+    hv_trap_ec[ec]++;
+    hv_trap_ec_pc[ec] = ctx->elr;
+    hv_trap_ec_far[ec] = ctx->far;
 
     bool do_gexit = false;
 
@@ -1412,6 +1559,47 @@ bool hv_exc_sync(struct exc_info *ctx)
             break;
     }
 
+    if (!handled) {
+        /*
+         * r4.9/r4.10: what the resident does itself instead of escalating (hv_sysreg_logic.h
+         * hv_unhandled_action): BRK always reflected (= host handle_brk -> _lower); while the link is
+         * locked, sysreg RAZ/WI, debug exceptions reflected, HVC/SMC answered with an SMCCC error.
+         */
+        struct hv_esc_info e;
+        hv_esc_decode(ctx->esr, ctx->afsr1, &e);
+        switch (hv_unhandled_action(HV_SYSREG_FAILSOFT, s1n_link_locked(), &e)) {
+            case HV_ACT_SYSREG_RAZWI: {
+                hv_failsoft_count++;
+                if (e.is_read && e.rt != 31)
+                    ctx->regs[e.rt] = 0;
+                /* r4.11: every new (register, direction, PC) printed at once; first 20 overall */
+                u32 key = (u32)HV_SR_ENC(e.op0, e.op1, e.crn, e.crm, e.op2) << 1 | e.is_read;
+                bool fresh = hv_site_note(hv_fs_sites, HV_SITE_N, &hv_fs_overflow, key, ctx->elr);
+                if (fresh || hv_failsoft_count <= 20)
+                    hv_esc_log(ctx, e.is_read ? "FAILSOFT read-as-zero (NOT escalated)"
+                                              : "FAILSOFT write-ignored (NOT escalated)",
+                               hv_failsoft_count, START_EXCEPTION_LOWER, EXC_SYNC);
+                handled = true;
+                protect_elr = false;
+                break;
+            }
+            case HV_ACT_REFLECT:
+                if (hv_reflect_sync(ctx, e.ec)) {
+                    handled = true;
+                    protect_elr = true; /* ELR/SPSR now point at the guest's EL1 vector */
+                }
+                break;
+            case HV_ACT_SMCCC_ERR:
+                hv_exc_class_log(ctx, e.ec, "answered x0=SMCCC_NOT_SUPPORTED (NOT escalated)", 0, 0);
+                ctx->regs[0] = HV_SMCCC_NOT_SUPPORTED;
+                handled = true;
+                protect_elr = e.ec == ESR_EC_HVC; /* HVC: ELR already past; SMC trap: ELR at the SMC */
+                break;
+            case HV_ACT_ESCALATE:
+                break;
+        }
+    }
+
     if (handled) {
         hv_wdt_breadcrumb('+');
         if (!protect_elr)
@@ -1442,6 +1630,7 @@ bool hv_exc_sync(struct exc_info *ctx)
 void hv_exc_irq(struct exc_info *ctx)
 {
     hv_wdt_breadcrumb('I');
+    hv_exits_irq++;
     hv_get_context(ctx);
     hv_integ_snapshot(ctx, 1); /* smp2d: IRQ */
     hv_exc_entry();
@@ -1460,6 +1649,7 @@ void hv_exc_fiq(struct exc_info *ctx)
 {
     bool tick = false;
 
+    hv_exits_fiq++;
     /* smp2f: publish this CPU's interface/timer state as the FIQ found it (before maintenance) */
     if (hv_win_wfi_trapping())
         hv_win_wfi_snap(HV_SNAP_FIQ, ctx, 0);
@@ -1549,4 +1739,118 @@ void hv_exc_serr(struct exc_info *ctx)
     hv_exc_proxy(ctx, START_EXCEPTION_LOWER, EXC_SERROR, NULL);
     hv_exc_exit(ctx);
     hv_wdt_breadcrumb('e');
+}
+
+/*
+ * r4.11 diagnostics: periodic status report, called from hv_tick() (1 kHz hypervisor tick, boot CPU).
+ * The tick is a physical FIQ routed to EL2, taken even while the guest runs with DAIF masked, so ctx is
+ * a fresh sample of the guest's own state every report. Printed on the resident console (iodev; "TTY>"
+ * on the host), which the locked host link does not gate. Every ~5 s:
+ *   ST  #n t  PC/LR/SP0/SP1/PSTATE, exits (irq/fiq/sync) and sync traps by EC since the last report with
+ *       the last PC/FAR of each, escalations, fail-soft, reflections
+ *   RF  busiest reflection sites (class/imm/PC) and fail-soft registers since the last report
+ *   TM  guest timers (EL02 views), virtual counter, EL2 IMASK holds
+ *   VG  vGIC (hv_vgic3_status_line)
+ *   NV  emulated NVMe + native backend (hv_win_storage_status_lines, two lines)
+ *   PU  PL011 bytes, PMU rewrite counters
+ * Storage events (fatal, refusal, error, ANS state change) are printed on the tick they happen.
+ */
+#define HV_STATUS_PERIOD_S 5
+extern u64 hv_win_pl011_stats(void);
+static u64 st_last_t, st_n, st_t0;
+static u64 st_prev_ec[64], st_prev_irq, st_prev_fiq, st_prev_sync, st_prev_esc, st_prev_fs;
+static u64 st_prev_pmu[HV_WIN_PMU_NR_STATS];
+
+static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
+{
+    static const char *const mname[16] = {"EL0t", "?", "?", "?", "EL1t", "EL1h"};
+    const char *P = "HV/win r4.14";
+    u32 m = ctx->spsr & 0xf;
+    st_n++;
+    printf("%s ST #%lu t+%lus PC 0x%lx LR 0x%lx SP0 0x%lx SP1 0x%lx PSTATE 0x%lx (%s DAIF %lx) | exits irq +%lu "
+           "fiq +%lu sync +%lu | esc +%lu failsoft +%lu refl %lu ovf %lu | EC",
+           P, (unsigned long)st_n, (unsigned long)((now - st_t0) / freq), ctx->elr, ctx->regs[30], ctx->sp[0],
+           ctx->sp[1], ctx->spsr, (ctx->spsr & 0x10) ? "AArch32" : (mname[m] ? mname[m] : "?"),
+           (ctx->spsr >> 6) & 0xf, (unsigned long)(hv_exits_irq - st_prev_irq),
+           (unsigned long)(hv_exits_fiq - st_prev_fiq), (unsigned long)(hv_exits_sync - st_prev_sync),
+           (unsigned long)(hv_esc_count - st_prev_esc), (unsigned long)(hv_failsoft_count - st_prev_fs),
+           (unsigned long)hv_class_count[0x3c], (unsigned long)(hv_refl_overflow + hv_fs_overflow));
+    for (int ec = 0; ec < 64; ec++) {
+        u64 d = hv_trap_ec[ec] - st_prev_ec[ec];
+        if (d)
+            printf(" %02x:+%lu@0x%lx/0x%lx", ec, (unsigned long)d, hv_trap_ec_pc[ec], hv_trap_ec_far[ec]);
+        st_prev_ec[ec] = hv_trap_ec[ec];
+    }
+    printf("\n");
+    st_prev_irq = hv_exits_irq; st_prev_fiq = hv_exits_fiq; st_prev_sync = hv_exits_sync;
+    st_prev_esc = hv_esc_count; st_prev_fs = hv_failsoft_count;
+
+    /* busiest reflection / fail-soft sites since the last report */
+    bool taken[HV_SITE_N] = {false}, any = false;
+    for (int k = 0; k < 4; k++) {
+        int i = hv_site_top(hv_refl_sites, HV_SITE_N, taken);
+        if (i < 0) break;
+        if (!any) printf("%s RF refl", P);
+        any = true;
+        taken[i] = true;
+        printf(" ec%02x/imm%04x@0x%lx +%lu (=%lu)", hv_refl_sites[i].key >> 16, hv_refl_sites[i].key & 0xffff,
+               hv_refl_sites[i].pc, (unsigned long)(hv_refl_sites[i].count - hv_refl_sites[i].reported),
+               (unsigned long)hv_refl_sites[i].count);
+    }
+    for (int i = 0; i < HV_SITE_N; i++) hv_refl_sites[i].reported = hv_refl_sites[i].count;
+    bool taken2[HV_SITE_N] = {false};
+    for (int k = 0; k < 4; k++) {
+        int i = hv_site_top(hv_fs_sites, HV_SITE_N, taken2);
+        if (i < 0) break;
+        if (!any) printf("%s RF", P);
+        any = true;
+        taken2[i] = true;
+        u32 enc = hv_fs_sites[i].key >> 1;
+        printf(" failsoft %s s%u_%u_c%u_c%u_%u@0x%lx +%lu", (hv_fs_sites[i].key & 1) ? "mrs" : "msr", enc >> 14,
+               (enc >> 11) & 7, (enc >> 7) & 15, (enc >> 3) & 15, enc & 7, hv_fs_sites[i].pc,
+               (unsigned long)(hv_fs_sites[i].count - hv_fs_sites[i].reported));
+    }
+    for (int i = 0; i < HV_SITE_N; i++) hv_fs_sites[i].reported = hv_fs_sites[i].count;
+    if (any) printf("\n");
+
+    /* guest timers as the guest sees them (EL02 views), virtual counter, our IMASK holds */
+    u64 voff = mrs(CNTVOFF_EL2);
+    printf("%s TM cntv ctl 0x%lx cval 0x%lx | cntp ctl 0x%lx cval 0x%lx | vcnt 0x%lx pcnt 0x%lx voff 0x%lx | "
+           "hv-masked 0x%x guest-imask 0x%x\n", P, mrs(SYS_CNTV_CTL_EL02), mrs(SYS_CNTV_CVAL_EL02),
+           mrs(SYS_CNTP_CTL_EL02), mrs(SYS_CNTP_CVAL_EL02), now - voff, now, voff, PERCPU(tmr_hv_masked),
+           PERCPU(tmr_guest_imask));
+    hv_vgic3_status_line("HV/win r4.14 VG");
+    hv_win_storage_status_lines("HV/win r4.14 NV");
+    u64 pl = hv_win_pl011_stats();
+    printf("%s PU pl011 tx %lu rx %lu drop %lu | pmu", P, (unsigned long)(pl & 0xffffffff),
+           (unsigned long)((pl >> 32) & 0xffff), (unsigned long)(pl >> 48));
+    static const struct { int idx; const char *name; } pk[] = {
+        {HV_WIN_PMU_SCANS, "scan"}, {HV_WIN_PMU_PAGES_REWRITTEN, "rewr"}, {HV_WIN_PMU_WRITE_FLIPS, "wflip"},
+        {HV_WIN_PMU_WALK_FLIPS, "walk"}, {HV_WIN_PMU_PINS, "pin"}, {HV_WIN_PMU_SWEEPS, "sweep"},
+        {HV_WIN_PMU_SPURIOUS, "spur"}, {HV_WIN_PMU_IPA_FAIL, "ipafail"}, {HV_WIN_PMU_NOT_OURS, "notours"},
+        {HV_WIN_PMU_STUCK, "stuck"}, {HV_WIN_PMU_DMA_RESETS, "dma"}};
+    for (unsigned i = 0; i < sizeof(pk) / sizeof(pk[0]); i++) {
+        u64 v = hv_win_pmu_stat(pk[i].idx);
+        printf(" %s %lu(+%lu)", pk[i].name, (unsigned long)v, (unsigned long)(v - st_prev_pmu[pk[i].idx]));
+        st_prev_pmu[pk[i].idx] = v;
+    }
+    printf("\n");
+    iodev_console_flush();
+}
+
+void hv_status_tick(struct exc_info *ctx)
+{
+    if (!hv_win_enabled())
+        return;
+    if (hv_win_storage_watch())
+        iodev_console_flush();
+    u64 now = mrs(CNTPCT_EL0), freq = mrs(CNTFRQ_EL0);
+    if (!st_t0) {
+        st_t0 = st_last_t = now;
+        return;
+    }
+    if (!hv_status_due(now, st_last_t, freq, HV_STATUS_PERIOD_S))
+        return;
+    st_last_t = now;
+    hv_status_report(ctx, now, freq);
 }

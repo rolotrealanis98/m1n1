@@ -12,6 +12,8 @@
 #include "s1/ans_ro.h"
 #include "string.h"
 #include "utils.h"
+#include "s1/native_link.h"
+#include "heapblock.h"
 
 extern bool hv_started_cpus[];
 #define NATIVE_MAX_CPUS 24 /* smp_asm.h MAX_CPUS */
@@ -21,12 +23,37 @@ static s64 last_result = 1; /* 1 = never called */
 
 static const u32 ans_lines[] = {1347, 1348, 1349, 1350, 2338};
 
+static void native_abort(void) { ans_ro_abort(ANS_RO_E_ABORT); }
+
 static const struct s1_backend native_backend = {
     .name = "native read-only window (internal SSD GPT entry)",
     .blocks = s1n_blocks,
     .read = s1n_read,
     .poll = s1n_poll,
     .retire = s1n_close,
+    .abort = native_abort,
+};
+
+/* r4: read-write window. Selected only when the contract set S1N_RW and the GPT verified. */
+static void rw_caps(struct vnvme_caps *caps)
+{
+    caps->max_blocks = 256;   /* MDTS 8 = 1 MiB = device MDTS */
+    caps->writable = true;
+    caps->vwc = true;         /* the device has a volatile write cache; FLUSH is real */
+    caps->native = true;
+}
+static const struct s1_backend native_rw_backend = {
+    .name = "native read-write window (internal SSD GPT entry)",
+    .blocks = s1n_blocks,
+    .read = s1n_read,
+    .poll = s1n_poll,
+    .retire = s1n_close,
+    .abort = native_abort,
+    .write = s1n_write,
+    .flush = s1n_flush,
+    .xfer_buffer = s1n_xfer_buffer,
+    .caps = rw_caps,
+    .canary = s1n_canary,
 };
 
 static s64 refuse(void)
@@ -39,6 +66,8 @@ static s64 refuse(void)
 
 s64 hv_win_storage_native_select(u64 data, u64 size)
 {
+    if (!s1n_storage_context()) { ans_ro_abort(ANS_RO_E_CONTEXT); return -1; }
+    s1n_link_lock(); /* one-way even when select fails */
     if (tried)
         return -1;
     tried = true;
@@ -49,10 +78,6 @@ s64 hv_win_storage_native_select(u64 data, u64 size)
         return -1;
     }
     if (!hv_win_vgic_enabled())
-        return refuse();
-    /* smp2: the S1 frontend is single-vCPU only (hv_win_storage.c PREP); never open ANS for a
-     * guest that PREP will refuse anyway, so the internal SSD stays untouched with N > 1 vCPUs. */
-    if (hv_win.nr_vcpus != 1)
         return refuse();
     if (!data || (data & 7) || size != sizeof(struct s1n_window))
         return refuse();
@@ -66,14 +91,14 @@ s64 hv_win_storage_native_select(u64 data, u64 size)
         s1n_close(); /* clean stage-1 quiesce if ANS came up; no-op if refused/frozen */
         return refuse();
     }
-    if (!s1_select_backend(&native_backend)) {
+    if (!s1_select_backend(s1n_writable() ? &native_rw_backend : &native_backend)) {
         s1n_close();
         return refuse();
     }
     selected = true;
     last_result = 0;
-    printf("HV/win S1 native: window LBA %lu + %lu verified against live GPT\n",
-           (unsigned long)w.start_lba, (unsigned long)w.blocks);
+    printf("HV/win S1 native: window LBA %lu + %lu verified against live GPT (%s)\n",
+           (unsigned long)w.start_lba, (unsigned long)w.blocks, s1n_writable() ? "read-write" : "read-only");
     return 0;
 }
 
@@ -82,6 +107,7 @@ s64 hv_win_storage_native_select(u64 data, u64 size)
  * never touched (returns -1: recover by platform reset). */
 s64 hv_win_storage_native_quiesce(void)
 {
+    if (!s1n_storage_context()) { ans_ro_abort(ANS_RO_E_CONTEXT); return -1; }
     if (!selected)
         return -1;
     for (unsigned i = 0; i < NATIVE_MAX_CPUS; i++)
@@ -95,6 +121,7 @@ u64 hv_win_storage_native_stat(u64 index)
 {
     const struct s1n_status *s = s1n_status();
     const struct ans_ro_stats *a = ans_ro_stats();
+    if (index >= 64 && index < 112) return ans_ro_sart_reg((index - 64) / 16, (index - 64) % 16);
     switch (index) {
     case 0: return ((u64)tried << 2) | ((u64)selected << 1) | (last_result == 0);
     case 1: return s->reason;
@@ -109,9 +136,41 @@ u64 hv_win_storage_native_stat(u64 index)
     case 10: return a->mailbox_msgs;
     case 11: return ((u64)a->sart_protected << 32) | a->sart_free;
     case 12: return a->nsze;
-    /* r3.2 */
-    case 13: return a->identify_nsze;      /* Identify-NS NSZE (diagnostic; expect 0 on this ANS) */
-    case 14: return a->identity_confirmed; /* Identify Controller model+fw matched (advisory) */
+    /* r4 */
+    case 13: return ((u64)s->rw << 32) | s->max_xfer;
+    case 14: return s->writes;
+    case 15: return s->flushes;
+    case 16: return a->w_abs_min_first;
+    case 17: return a->w_abs_max_last;
+    case 18: return a->ans_writes;
+    case 19: return a->window_refusals;
+    case 20: return a->write_errors;
+    /* r4.1 (= r3.2) diagnostics */
+    case 21: return a->identify_nsze;      /* r4.2+: not attempted, always UINT64_MAX */
+    case 22: return a->identity_confirmed; /* r4.2+: not attempted, always 0 */
+    /* r4.4 (= r3.5 15/16) */
+    case 23: return a->rtkit_timeouts;     /* RTKIT_TIMEOUT_* bits: which RTKit wait timed out */
+    case 24: return ((u64)a->tcb_alias_nonzero << 32) | a->tcb_alias_last; /* reg9+0x29120 diag */
+    case 25: return a->ioq_regs_cleared;   /* +0x1200/+0x1208 zeroed at teardown */
+    case 26: return S1N_PIN_START;
+    case 27: return S1N_PIN_BLOCKS;
+    case 28: return S1N_PIN_ENTRY;
+    case 29: return S1N_STAGE;
+    case 30: return s1n_link_refusals();
+    case 31: return (u64)heapblock_peek();
+    case 32: return heapblock_remaining();
+    case 33: return a->cmd_reads;
+    case 34: return a->cmd_writes;
+    case 35: return a->cmd_flushes;
+    case 36: return a->cmd_admin;
+    case 37: return a->io_submitted;
+    case 38: return a->io_completed;
+    case 39: return a->blocks_written;
+    case 40: return a->lowest_written;
+    case 41: return a->highest_written;
+    case 42: return a->cqe_anomalies;
+    case 43: return a->aborts;
+    case 44: return a->io_tags_used;
     default: return UINT64_MAX;
     }
 }

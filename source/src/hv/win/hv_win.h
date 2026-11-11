@@ -217,6 +217,8 @@ int hv_vgic3_stall_check(u64 now, u64 period);               /* smp2f: boot CPU 
 int hv_win_smp_dump(const char *why);                         /* smp2f (hv_exc.c): boot CPU only */
 void hv_win_tick(void);                         /* smp2: boot CPU hv_tick */
 void hv_vgic3_maintenance(void);
+void hv_vgic3_status_line(const char *prefix); /* r4.11 diagnostics */
+void hv_vgic3_tick(void); /* r4.12: hv_tick, ends the NVMe SPI re-presentation hold-off */
 
 /*
  * First thing in hv_exc_fiq(): on Apple cores the vGIC maintenance interrupt is a FIQ with no AIC
@@ -275,6 +277,7 @@ enum hv_win_pmu_stat {
     HV_WIN_PMU_IPA_FAIL,        /* AT could not translate the fault address: access retried */
     HV_WIN_PMU_NOT_OURS,        /* permission faults on untracked IPAs, left to the stock path */
     HV_WIN_PMU_STUCK,           /* faults handed to the stock path after too many retries */
+    HV_WIN_PMU_DMA_RESETS,      /* CODE/PINNED -> DIRTY because EL2 filled the page (device DMA) */
     HV_WIN_PMU_NR_STATS,
 };
 #define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */
@@ -290,5 +293,8 @@ bool hv_win_handle_iabort(struct exc_info *ctx);          /* true: re-execute th
 bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr); /* true: re-execute the access */
 void hv_win_pmu_tick(void);                               /* hv_tick(), under the big HV lock */
 void hv_win_pmu_report(void);                             /* printf summary (guest exit) */
+/* EL2 is about to store into guest RAM for a device (DMA write): re-arm the scan of every CODE or
+ * PINNED page in the range. Under the big HV lock, before the copy. Returns pages reset. */
+u32 hv_win_pmu_dma_write(u64 ipa, u64 size);
 
 #endif

@@ -7,6 +7,18 @@
 #include "utils.h"
 
 extern spinlock_t bhl;
+
+struct hv_sm_refusal hv_sm_last_refusal;
+static void *sm_refuse(u64 why, u64 ipa, u64 length, u64 detail)
+{
+    hv_sm_last_refusal.why = why;
+    hv_sm_last_refusal.ipa = ipa;
+    hv_sm_last_refusal.length = length;
+    hv_sm_last_refusal.detail = detail;
+    if (why < HV_SM_WHY_NR)
+        hv_sm_last_refusal.count[why]++;
+    return NULL;
+}
 extern u64 hv_cpus_in_guest;
 extern bool hv_started_cpus[MAX_CPUS];
 
@@ -115,15 +127,17 @@ void hv_storage_mem_retire(struct hv_storage_mem *m)
 void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write)
 {
     struct hv_storage_mem *m = opaque;
-    (void)write; /* Both directions deliberately require RW: stricter than read permission. */
+    /* Both directions deliberately require RW: stricter than read permission. An execute-tracked
+     * leaf counts as RW in every PMU-rewrite state but SCANNING: only RW pages are ever tracked,
+     * and CODE's read-only S2AP is the rewrite's write trap, not an ownership statement. */
     if (!m || m->state != HV_SM_LEASED)
-        return NULL;
+        return sm_refuse(HV_SM_WHY_STATE, ipa, length, m ? m->state : 0);
     if (!sm_dispatch_context(m)) {
         m->state = HV_SM_DEAD;
-        return NULL;
+        return sm_refuse(HV_SM_WHY_CONTEXT, ipa, length, 0);
     }
     if (!ipa || !length || length > HV_SM_MAX_SPAN || ipa > UINT64_MAX - length)
-        return NULL;
+        return sm_refuse(HV_SM_WHY_ARGS, ipa, length, 0);
     bool owned = false;
     for (size_t i = 0; i < m->nr_ram; i++)
         if (sm_contains(m->ram[i], ipa, length)) {
@@ -131,13 +145,13 @@ void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write)
             break;
         }
     if (!owned)
-        return NULL;
+        return sm_refuse(HV_SM_WHY_NOT_RAM, ipa, length, 0);
     struct hv_sm_range span = {ipa, length};
     if (sm_overlap(span, m->resident))
-        return NULL;
+        return sm_refuse(HV_SM_WHY_RESIDENT, ipa, length, m->resident.base);
     for (size_t i = 0; i < m->nr_protected; i++)
         if (sm_overlap(span, m->protected[i]))
-            return NULL;
+            return sm_refuse(HV_SM_WHY_PROTECTED, ipa, length, m->protected[i].base);
 
     u64 end = ipa + length;
     /* At most nine 16 KiB leaves for an unaligned 128 KiB request. */
@@ -145,22 +159,34 @@ void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write)
     for (u64 a = ipa; a < end;) {
         struct hv_s2_leaf leaf;
         if (++walked > 9 || !hv_pt_resolve_leaf(a, &leaf))
-            return NULL;
+            return sm_refuse(HV_SM_WHY_LEAF_WALK, ipa, length, a);
         u64 d = leaf.descriptor;
         const u64 address = GENMASK(49, 14);
         const u64 tracked = BIT(55), flips = GENMASK(58, 56), xn = BIT(54);
+        const u64 s2ap_w = BIT(7); /* S2AP 0b11 RW, 0b01 RO */
         const u64 expected = BIT(10) | (3UL << 8) | (3UL << 6) | (15UL << 2) | 1;
+        /* pmu-reads: tracked DIRTY (RW+XN), CODE (RO+X) and PINNED (RW+X) are admitted;
+         * SCANNING (RO+XN) is refused. A write re-arms CODE/PINNED below. */
+        u64 g = (d & tracked) ? d | s2ap_w : d;
         /* Ordinary m1n1 normal-memory leaves only, no Device/NC/traces or unknown
          * attributes. L2 type0/L3 type1 is checked separately by the resolver. */
-        if ((d & ~(address | tracked | flips | xn | BIT(1))) != expected ||
+        if ((g & ~(address | tracked | flips | xn | BIT(1))) != expected ||
             (leaf.size != HV_SM_PAGE && leaf.size != (1UL << 25)) ||
             leaf.ipa_base != leaf.pa_base || a < leaf.ipa_base ||
             a - leaf.ipa_base >= leaf.size ||
-            ((d & tracked) && (!(d & xn) || leaf.size != HV_SM_PAGE)) ||
+            ((d & tracked) && (((d & xn) && !(d & s2ap_w)) || leaf.size != HV_SM_PAGE)) ||
             (!(d & tracked) && (d & flips)))
-            return NULL;
+            return sm_refuse(((d & tracked) && (d & xn) && !(d & s2ap_w)) ? HV_SM_WHY_SCANNING
+                                                                          : HV_SM_WHY_LEAF_ATTR,
+                             ipa, length, d);
         u64 n = leaf.size - (a - leaf.ipa_base);
         a += n < end - a ? n : end - a;
     }
+    /* pmu-reads: EL2 is about to store device data here through its own mapping, which stage 2
+     * does not check. Re-arm the PMU rewrite on these pages first (no-op when it is off), so
+     * code paged in from disk is rescanned at its first execution. Every write-direction
+     * admission precedes the copy (hv_nvme_queue.c plan_prps/post_completion, ANSM). */
+    if (write)
+        hv_win_pmu_dma_write(ipa, length);
     return (void *)ipa;
 }

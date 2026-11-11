@@ -6,6 +6,8 @@
 #include "iodev.h"
 
 extern iodev_id_t uartproxy_iodev;
+extern bool uartproxy_guest_exception;
+extern u32 uartproxy_storage_exceptions;
 
 typedef enum _uartproxy_start_reason_t {
     START_BOOT,

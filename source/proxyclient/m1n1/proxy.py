@@ -692,7 +692,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_STORAGE_NATIVE = 0xc22
     P_HV_WIN_STORAGE_NATIVE_STAT = 0xc23
     P_HV_WIN_STORAGE_NATIVE_QUIESCE = 0xc24
-    P_HV_WIN_SMP_DUMP = 0xc25
+    P_HV_WIN_SMP_DUMP = 0xc29  # u1: was 0xc25 (clashed with the storage line CANARY)
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01

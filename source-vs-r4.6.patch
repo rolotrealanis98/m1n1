@@ -1,0 +1,351 @@
+diff -ru -x b s1-resident-r4.6-native-rw-20261110/source/proxyclient/tools/run_windows.py s1-resident-r4.7-native-rw-20261110/source/proxyclient/tools/run_windows.py
+--- s1-resident-r4.6-native-rw-20261110/source/proxyclient/tools/run_windows.py	2026-11-09 12:35:06
++++ s1-resident-r4.7-native-rw-20261110/source/proxyclient/tools/run_windows.py	2026-11-10 16:50:16
+@@ -107,7 +107,8 @@
+ HV_WIN_PMU_MAGIC = 0x504d5552          # "PMUR", P_HV_WIN_PMU_STATS(0) >> 32
+ HV_WIN_PMU_STATS = ("id", "pages", "ranges", "tables", "scans", "pages_rewritten", "insns", "insns_pmccntr",
+                     "insns_mrs", "insns_msr", "write_flips", "walk_flips", "pins", "pin_full", "sweeps",
+-                    "unpins", "spurious", "ipa_fail", "not_ours", "stuck")   # src/hv/win/hv_win.h order
++                    "unpins", "spurious", "ipa_fail", "not_ours", "stuck",
++                    "dma_resets")   # src/hv/win/hv_win.h order (dma_resets: pmu-reads; ~0 on older residents)
+ HV_WIN_PMU_LOG_SIZE = 256
+ HV_WIN_PMU_STAT_LOG_IPA, HV_WIN_PMU_STAT_LOG_OP, HV_WIN_PMU_STAT_LOG_ELR = 0x100, 0x200, 0x300
+ GIC_SPI_MIN, GIC_SPI_MAX = 32, 1019  # GICD_TYPER.ITLinesNumber 31 (hv_vgic3.c)
+@@ -761,7 +762,8 @@
+            f"{st['pages_rewritten']} pages rewritten, {st['insns']} words (PMCCNTR {st['insns_pmccntr']}, "
+            f"other mrs {st['insns_mrs']}, msr {st['insns_msr']}); flips write {st['write_flips']} walker "
+            f"{st['walk_flips']}; pinned {st['pins']} (list full {st['pin_full']}), sweeps {st['sweeps']}; "
+-           f"spurious {st['spurious']}, AT failures {st['ipa_fail']}, not ours {st['not_ours']}, stuck {st['stuck']}")
++           f"spurious {st['spurious']}, AT failures {st['ipa_fail']}, not ours {st['not_ours']}, stuck {st['stuck']}; "
++           f"device refills {st['dma_resets'] if st['dma_resets'] != (1 << 64) - 1 else 'n/a'}")
+     lines = [f"{k} {v}" for k, v in st.items() if k != "id"]
+     first = max(0, st["insns"] - HV_WIN_PMU_LOG_SIZE)
+     lines.append(f"last {st['insns'] - first} rewrite(s): seq IPA old new fetch-PC")
+diff -ru -x b s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win.h s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win.h
+--- s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win.h	2026-11-09 17:40:41
++++ s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win.h	2026-11-10 16:50:16
+@@ -234,6 +234,7 @@
+     HV_WIN_PMU_IPA_FAIL,        /* AT could not translate the fault address: access retried */
+     HV_WIN_PMU_NOT_OURS,        /* permission faults on untracked IPAs, left to the stock path */
+     HV_WIN_PMU_STUCK,           /* faults handed to the stock path after too many retries */
++    HV_WIN_PMU_DMA_RESETS,      /* CODE/PINNED -> DIRTY because EL2 filled the page (device DMA) */
+     HV_WIN_PMU_NR_STATS,
+ };
+ #define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */
+@@ -249,5 +250,8 @@
+ bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr); /* true: re-execute the access */
+ void hv_win_pmu_tick(void);                               /* hv_tick(), under the big HV lock */
+ void hv_win_pmu_report(void);                             /* printf summary (guest exit) */
++/* EL2 is about to store into guest RAM for a device (DMA write): re-arm the scan of every CODE or
++ * PINNED page in the range. Under the big HV lock, before the copy. Returns pages reset. */
++u32 hv_win_pmu_dma_write(u64 ipa, u64 size);
+ 
+ #endif
+diff -ru -x b s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win_pmu.c s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win_pmu.c
+--- s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win_pmu.c	2026-11-09 12:34:37
++++ s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win_pmu.c	2026-11-10 16:50:16
+@@ -14,6 +14,7 @@
+  *   DIRTY (RW, XN)  --first fetch-->  SCANNING (RO, XN), PMUv3 words rewritten  -->  CODE (RO, X)
+  *   CODE  --write or walker update-->  DIRTY, or PINNED (RW, X) at the PMU_FLIP_CAP-th flip
+  *   PINNED  --sweep, every PMU_SWEEP_TICKS hypervisor ticks-->  DIRTY
++ *   CODE, PINNED  --EL2 device write into the page (hv_win_pmu_dma_write)-->  DIRTY
+  *
+  * Everything runs under the big HV lock (the locked half of hv_exc_sync() and hv_tick()). The
+  * rewrite happens only in SCANNING: no CPU can write the page (write permission revoked, broadcast
+@@ -378,6 +379,52 @@
+     return pmu_write_fault(ctx, ipa, walker);
+ }
+ 
++/*
++ * EL2 is about to fill guest RAM [ipa, ipa + size) on the guest's behalf (an emulated device's DMA
++ * write: an NVMe READ's data, a mediated-storage reply). EL2 stores through its own identity
++ * mapping, which stage 2 does not check, so a CODE page would keep its execute permission while
++ * its contents change: an installed Windows pages code back in from disk into frames that held
++ * scanned code before, and that code would run with its PMUv3 accesses unrewritten. Every CODE or
++ * PINNED 16 KiB page the range touches (partial pages included: a 4 KiB guest page re-arms the
++ * whole 16 KiB leaf) goes back to DIRTY, so the next instruction fetch rescans it, as after a
++ * guest store (pmu_write_fault); the flips counter is kept (a refill is not a write-after-execute
++ * by the guest). DIRTY pages need nothing; SCANNING exists only inside pmu_exec_fault under the
++ * same lock. Call before the first byte is stored, under the big HV lock (the storage dispatch
++ * holds it for the whole command). One broadcast TLBI per call, only if a page changed state, so
++ * execute permission is gone on every CPU before EL2 writes. O(pages touched), no allocation, one
++ * test when the rewrite is off. Returns the number of pages reset.
++ */
++u32 hv_win_pmu_dma_write(u64 ipa, u64 size)
++{
++    if (!pmu.armed || !size)
++        return 0;
++
++    u64 last = ipa + (size - 1);
++    if (last < ipa)
++        last = ~0UL;
++    last &= ~(PMU_PAGE - 1);
++    u32 n = 0;
++
++    for (u64 page = ipa & ~(PMU_PAGE - 1);; page += PMU_PAGE) {
++        u32 flips;
++        enum hv_xt_state st = hv_xt_get(page, NULL, &flips);
++        if (st == HV_XT_CODE || st == HV_XT_PINNED) {
++            /* hv_xt_set: leaf store, then DSB ISHST before the TLBI below */
++            hv_xt_set(page, HV_XT_DIRTY, flips);
++            n++;
++        }
++        if (page == last)
++            break;
++    }
++
++    if (n) {
++        /* DSB ISHST; TLBI VMALLS12E1IS; DSB ISH; ISB (hv_vm.c) */
++        hv_xt_tlbi(true);
++        pmu.stats[HV_WIN_PMU_DMA_RESETS] += n;
++    }
++    return n;
++}
++
+ void hv_win_pmu_tick(void)
+ {
+     if (!pmu.armed || !pmu.nr_pinned || ++pmu.ticks < PMU_SWEEP_TICKS)
+@@ -405,13 +452,13 @@
+         "HV/win: PMU rewrite: %lu pages tracked, %lu scans, %lu pages rewritten, %lu words "
+         "(PMCCNTR %lu, other mrs %lu, msr %lu); flips: write %lu, walker %lu; pinned %lu (list "
+         "full %lu), sweeps %lu, unpinned %lu; spurious %lu, AT failures %lu, not ours %lu, stuck "
+-        "%lu\n",
++        "%lu, device refills %lu\n",
+         s[HV_WIN_PMU_PAGES], s[HV_WIN_PMU_SCANS], s[HV_WIN_PMU_PAGES_REWRITTEN],
+         s[HV_WIN_PMU_INSNS], s[HV_WIN_PMU_INSNS_PMCCNTR], s[HV_WIN_PMU_INSNS_MRS],
+         s[HV_WIN_PMU_INSNS_MSR], s[HV_WIN_PMU_WRITE_FLIPS], s[HV_WIN_PMU_WALK_FLIPS],
+         s[HV_WIN_PMU_PINS], s[HV_WIN_PMU_PIN_FULL], s[HV_WIN_PMU_SWEEPS], s[HV_WIN_PMU_UNPINS],
+         s[HV_WIN_PMU_SPURIOUS], s[HV_WIN_PMU_IPA_FAIL], s[HV_WIN_PMU_NOT_OURS],
+-        s[HV_WIN_PMU_STUCK]);
++        s[HV_WIN_PMU_STUCK], s[HV_WIN_PMU_DMA_RESETS]);
+ }
+ 
+ #ifdef PMU_REWRITE_HOST_TEST
+diff -ru -x b s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.c s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.c
+--- s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.c	2026-11-09 14:40:39
++++ s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.c	2026-11-10 16:50:16
+@@ -115,7 +115,9 @@
+ void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write)
+ {
+     struct hv_storage_mem *m = opaque;
+-    (void)write; /* Both directions deliberately require RW: stricter than read permission. */
++    /* Both directions deliberately require RW: stricter than read permission. An execute-tracked
++     * leaf counts as RW in every PMU-rewrite state but SCANNING: only RW pages are ever tracked,
++     * and CODE's read-only S2AP is the rewrite's write trap, not an ownership statement. */
+     if (!m || m->state != HV_SM_LEASED)
+         return NULL;
+     if (!sm_dispatch_context(m)) {
+@@ -149,18 +151,28 @@
+         u64 d = leaf.descriptor;
+         const u64 address = GENMASK(49, 14);
+         const u64 tracked = BIT(55), flips = GENMASK(58, 56), xn = BIT(54);
++        const u64 s2ap_w = BIT(7); /* S2AP 0b11 RW, 0b01 RO */
+         const u64 expected = BIT(10) | (3UL << 8) | (3UL << 6) | (15UL << 2) | 1;
++        /* pmu-reads: tracked DIRTY (RW+XN), CODE (RO+X) and PINNED (RW+X) are admitted;
++         * SCANNING (RO+XN) is refused. A write re-arms CODE/PINNED below. */
++        u64 g = (d & tracked) ? d | s2ap_w : d;
+         /* Ordinary m1n1 normal-memory leaves only, no Device/NC/traces or unknown
+          * attributes. L2 type0/L3 type1 is checked separately by the resolver. */
+-        if ((d & ~(address | tracked | flips | xn | BIT(1))) != expected ||
++        if ((g & ~(address | tracked | flips | xn | BIT(1))) != expected ||
+             (leaf.size != HV_SM_PAGE && leaf.size != (1UL << 25)) ||
+             leaf.ipa_base != leaf.pa_base || a < leaf.ipa_base ||
+             a - leaf.ipa_base >= leaf.size ||
+-            ((d & tracked) && (!(d & xn) || leaf.size != HV_SM_PAGE)) ||
++            ((d & tracked) && (((d & xn) && !(d & s2ap_w)) || leaf.size != HV_SM_PAGE)) ||
+             (!(d & tracked) && (d & flips)))
+             return NULL;
+         u64 n = leaf.size - (a - leaf.ipa_base);
+         a += n < end - a ? n : end - a;
+     }
++    /* pmu-reads: EL2 is about to store device data here through its own mapping, which stage 2
++     * does not check. Re-arm the PMU rewrite on these pages first (no-op when it is off), so
++     * code paged in from disk is rescanned at its first execution. Every write-direction
++     * admission precedes the copy (hv_nvme_queue.c plan_prps/post_completion, ANSM). */
++    if (write)
++        hv_win_pmu_dma_write(ipa, length);
+     return (void *)ipa;
+ }
+diff -ru -x b s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.h s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.h
+--- s1-resident-r4.6-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.h	2026-11-09 14:40:39
++++ s1-resident-r4.7-native-rw-20261110/source/src/hv/win/hv_win_storage_mem.h	2026-11-10 16:50:16
+@@ -42,8 +42,12 @@
+ bool hv_storage_mem_end(struct hv_storage_mem *m);
+ void hv_storage_mem_retire(struct hv_storage_mem *m);
+ /* Exact S0/S1 guest_span ABI. Reads and writes both require actual RW pages;
+- * execute-tracked pages additionally must be DIRTY (RW+XN). Never changes S2,
+- * PMU state or cache attributes. No guest VA translation. Identity IPA == PA
+- * prevents distinct admitted IPAs aliasing the same physical bytes. */
++ * an execute-tracked page counts as RW in the PMU rewrite's DIRTY, CODE and
++ * PINNED states (never SCANNING). pmu-reads: a write admission resets the
++ * admitted pages' rewrite state (CODE/PINNED -> DIRTY, permissions only, same
++ * output address, broadcast TLBI; hv_win_pmu_dma_write) so code EL2 copies in is
++ * rescanned before it runs; nothing else in S2, no cache attributes, no scans.
++ * No guest VA translation. Identity IPA == PA prevents distinct admitted IPAs
++ * aliasing the same physical bytes. */
+ void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write);
+ #endif
+diff -ru -x b s1-resident-r4.6-native-rw-20261110/source/tests/win-pmu-rewrite/test_pmu_rewrite.c s1-resident-r4.7-native-rw-20261110/source/tests/win-pmu-rewrite/test_pmu_rewrite.c
+--- s1-resident-r4.6-native-rw-20261110/source/tests/win-pmu-rewrite/test_pmu_rewrite.c	2026-11-09 12:34:37
++++ s1-resident-r4.7-native-rw-20261110/source/tests/win-pmu-rewrite/test_pmu_rewrite.c	2026-11-10 16:50:16
+@@ -866,6 +866,152 @@
+     CHECK(strstr(last_line, "71 pages rewritten") != NULL, "report: %s", last_line);
+ }
+ 
++/* ---- pmu-reads: EL2 device writes into guest RAM (NVMe READ data, mediated storage) -------------
++ * EL2 stores through its own mapping, so stage 2 never sees the write: the copy path must re-arm
++ * the pages first (hv_storage_guest_span -> hv_win_pmu_dma_write). dev_read() is that path: the
++ * reset, then the copy; it checks that no destination page is executable when the bytes land.
++ * Build with -DPMU_READS_NOFIX against the unpatched hv_win_pmu.c to see these checks fail.
++ */
++#ifdef PMU_READS_NOFIX
++/* the unpatched resident: nothing resets the rewrite state on a device write */
++u32 hv_win_pmu_dma_write(u64 ipa, u64 size);
++u32 hv_win_pmu_dma_write(u64 ipa, u64 size)
++{
++    (void)ipa;
++    (void)size;
++    return 0;
++}
++#define HV_WIN_PMU_DMA_RESETS HV_WIN_PMU_NR_STATS
++#endif
++
++static bool dev_exec_window; /* a destination page was executable while EL2 wrote it */
++
++static u32 dev_read(u64 ipa, const u32 *src, u64 size)
++{
++    nev = 0;
++    u32 n = hv_win_pmu_dma_write(ipa, size);
++    for (u64 a = ipa & ~(HV_XT_PAGE_SIZE - 1); a < ipa + size; a += HV_XT_PAGE_SIZE) {
++        int p = m_page_of(a);
++        if (p >= 0 && m_pg[p].tracked && (m_pg[p].st == HV_XT_CODE || m_pg[p].st == HV_XT_PINNED))
++            dev_exec_window = true;
++    }
++    memcpy((u8 *)m_mem + (ipa - M_BASE), src, size);
++    return n;
++}
++
++static void test_dma_refill(void)
++{
++    static u32 img[3 * M_WORDS];
++
++    /* 1. a scanned page is refilled by a device read with code holding PMU accesses */
++    arm_all();
++    dev_exec_window = false;
++    words_of(50)[7] = 0xd53b9d01; /* mrs x1, PMCCNTR_EL0 */
++    CHECK(iabort(50, 7, FSC_PERM_L3, 0x1000) && m_pg[50].st == HV_XT_CODE &&
++              words_of(50)[7] == 0xd53be041,
++          "first scan");
++    u64 scans = hv_win_pmu_stat(HV_WIN_PMU_SCANS);
++    for (u32 i = 0; i < M_WORDS; i++)
++        img[i] = 0xd503201f;
++    img[100] = 0xd53b9d03;  /* mrs x3, PMCCNTR_EL0 */
++    img[1000] = 0xd51b9c02; /* msr PMCR_EL0, x2 */
++    /* one 4 KiB guest page (the second of the 16 KiB leaf) refilled by an NVMe READ */
++    CHECK(dev_read(ipa_of(50, 1024), img, 4096) == 1, "refill reset count");
++    CHECK(m_pg[50].st == HV_XT_DIRTY, "refilled page still executable (state %d)", m_pg[50].st);
++    CHECK(nev == 2 && ev_is(0, EV_SET, 50, HV_XT_DIRTY) && ev_is(1, EV_TLBI_BCAST, 0, 0),
++          "refill events (%d): reset, then one broadcast TLBI", nev);
++    CHECK(!dev_exec_window, "EL2 wrote a page that was still executable");
++    CHECK(hv_win_pmu_stat(HV_WIN_PMU_DMA_RESETS) == 1, "dma reset stat %lu",
++          hv_win_pmu_stat(HV_WIN_PMU_DMA_RESETS));
++    /* the next execution traps and the new PMU words are rewritten */
++    bool trapped = iabort(50, 1024 + 100, FSC_PERM_L3, 0x2000);
++    CHECK(trapped && hv_win_pmu_stat(HV_WIN_PMU_SCANS) == scans + 1, "no rescan after the refill");
++    CHECK(words_of(50)[1024 + 100] == 0xd53be043 && words_of(50)[1024 + 1000] == 0xd503201f,
++          "refilled PMU words not rewritten: %08x %08x", words_of(50)[1024 + 100],
++          words_of(50)[1024 + 1000]);
++    CHECK(words_of(50)[7] == 0xd53be041, "untouched part of the leaf");
++    CHECK(m_pg[50].flips == 0, "a device refill counted as a guest flip (%u)", m_pg[50].flips);
++
++    /* 2. ranges: crossing 16 KiB leaves, partial pages, DIRTY and untracked neighbours */
++    arm_all();
++    dev_exec_window = false;
++    for (int p = 60; p <= 63; p++)
++        iabort(p, 0, FSC_PERM_L3, 0x1000);
++    iabort(6, 0, FSC_PERM_L3, 0x1000); /* page 6 CODE; 7 is a hole, 8 read-only (untracked) */
++    CHECK(dev_read(ipa_of(60, M_WORDS - 4), img, 32) == 2, "16 bytes either side of a boundary");
++    CHECK(m_pg[60].st == HV_XT_DIRTY && m_pg[61].st == HV_XT_DIRTY && m_pg[62].st == HV_XT_CODE,
++          "boundary: %d %d %d", m_pg[60].st, m_pg[61].st, m_pg[62].st);
++    CHECK(nev == 3 && ev_is(2, EV_TLBI_BCAST, 0, 0), "one TLBI for two pages (%d events)", nev);
++    CHECK(dev_read(ipa_of(62, 0), img, HV_XT_PAGE_SIZE) == 1 && m_pg[62].st == HV_XT_DIRTY &&
++              m_pg[63].st == HV_XT_CODE,
++          "exactly one leaf: the next leaf left alone");
++    CHECK(dev_read(ipa_of(61, 0), img, 2 * HV_XT_PAGE_SIZE + 4) == 1 &&
++              m_pg[61].st == HV_XT_DIRTY && m_pg[63].st == HV_XT_DIRTY,
++          "DIRTY 61/62 skipped, 4 bytes into 63 reset");
++    CHECK(dev_read(ipa_of(61, 0), img, 4096) == 0 && nev == 0, "all DIRTY: no TLBI (%d)", nev);
++    CHECK(dev_read(ipa_of(6, 512), img, 3 * HV_XT_PAGE_SIZE - 4096) == 1 &&
++              m_pg[6].st == HV_XT_DIRTY && !m_pg[7].tracked && !m_pg[8].tracked,
++          "untracked pages in the range");
++    CHECK(hv_win_pmu_dma_write(ipa_of(9, 0), 0) == 0, "empty range");
++    CHECK(hv_win_pmu_dma_write(~0UL - 100, 1000) == 0, "range wrapping the address space");
++    CHECK(!dev_exec_window, "EL2 wrote an executable page (ranges)");
++    /* every word of a refill spanning three leaves is rewritten at the next fetches */
++    iabort(70, 0, FSC_PERM_L3, 0x1000);
++    iabort(71, 0, FSC_PERM_L3, 0x1000);
++    iabort(72, 0, FSC_PERM_L3, 0x1000);
++    for (u32 i = 0; i < 3 * M_WORDS; i++)
++        img[i] = (i % 7) ? 0xd503201f : (0xd53b9d00 | (i & 31));
++    dev_read(ipa_of(70, 0), img, 3 * HV_XT_PAGE_SIZE);
++    for (int p = 70; p <= 72; p++)
++        CHECK(iabort(p, 1, FSC_PERM_L3, 0x1000) && m_pg[p].st == HV_XT_CODE, "rescan %d", p);
++    u32 left = 0;
++    for (u32 i = 0; i < 3 * M_WORDS; i++)
++        left += pmu_rw_classify(words_of(70)[i]) != PMU_RW_NONE;
++    CHECK(left == 0, "%u PMU words left unrewritten across three refilled leaves", left);
++
++    /* 3. PINNED (RWX) pages are re-armed as well; the sweep does not count them */
++    arm_all();
++    for (int i = 0; i < 4; i++) {
++        iabort(80, 0, FSC_PERM_L3, 0x1000);
++        dabort(80, ISS_WNR | FSC_PERM_L3, 0x2000);
++    }
++    CHECK(m_pg[80].st == HV_XT_PINNED, "pinned");
++    img[0] = 0xd53b9d04;
++    CHECK(dev_read(ipa_of(80, 0), img, 4) == 1 && m_pg[80].st == HV_XT_DIRTY &&
++              m_pg[80].flips == 4,
++          "PINNED reset: %d/%u", m_pg[80].st, m_pg[80].flips);
++    CHECK(iabort(80, 0, FSC_PERM_L3, 0x1000) && words_of(80)[0] == 0xd53be044, "PINNED rescan");
++    for (int t = 0; t < 100; t++)
++        hv_win_pmu_tick();
++    CHECK(m_pg[80].st == HV_XT_CODE && hv_win_pmu_stat(HV_WIN_PMU_UNPINS) == 0,
++          "sweep after a reset: state %d", m_pg[80].st);
++
++    /* 4. rewrite off: nothing tracked, one test, no TLBI, no state */
++    reset_world();
++    nev = 0;
++    CHECK(hv_win_pmu_dma_write(ipa_of(50, 0), 128 * 1024) == 0 && nev == 0, "off: %d events",
++          nev);
++    CHECK(hv_win_pmu_stat(HV_WIN_PMU_DMA_RESETS) == 0, "off: stat");
++
++    /* 5. two vCPUs: CPU 1 executed the page, CPU 0 services the read; the reset is broadcast */
++    arm_all();
++    dev_exec_window = false;
++    host_cpu = 1;
++    words_of(90)[3] = 0xd53b9d05;
++    CHECK(iabort(90, 3, FSC_PERM_L3, 0x1000) && m_pg[90].st == HV_XT_CODE, "CPU 1 scan");
++    host_cpu = 0;
++    img[0] = 0xd53b9d06;
++    CHECK(dev_read(ipa_of(90, 3), img, 4) == 1 && ev_is(1, EV_TLBI_BCAST, 0, 0) &&
++              !dev_exec_window,
++          "CPU 0 refill: broadcast invalidation before the copy");
++    host_cpu = 1;
++    CHECK(iabort(90, 3, FSC_PERM_L3, 0x1000) && words_of(90)[3] == 0xd53be046,
++          "CPU 1 fetch after the refill: %08x", words_of(90)[3]);
++    host_cpu = 0;
++    hv_win_pmu_report();
++    CHECK(strstr(last_line, "device refills 1") != NULL, "report: %s", last_line);
++}
++
+ /* ---- llvm-objdump listings ----------------------------------------------------------------------
+  */
+ 
+@@ -1112,6 +1258,7 @@
+     test_pinning();
+     test_stuck();
+     test_log_ring();
++    test_dma_refill();
+ 
+     free(m_mem);
+     printf("win-pmu-rewrite: %lu checks, %lu failed\n", checks, failures);

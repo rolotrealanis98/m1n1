@@ -338,6 +338,9 @@ static inline enum wfi_wake wfi_wait(const struct wfi_ops *o, int max, int *idle
  * shadowed per CPU in EL2. MDCCINT (op2 0), OSDTR (op2 2), MDSCR (CRm=2 op2=2) and the OS-lock/status
  * registers (CRn=1) are not breakpoint registers and are handled elsewhere.
  */
+/* u1: identical copy in hv_sysreg_logic.h (storage line); whichever header comes first defines them */
+#ifndef HV_BP_REG_LOGIC_DEFINED
+#define HV_BP_REG_LOGIC_DEFINED
 static inline bool wfi_is_bp_reg(u32 op0, u32 op1, u32 crn, u32 op2)
 {
     return op0 == 2 && op1 == 0 && crn == 0 && op2 >= 4 && op2 <= 7;
@@ -348,5 +351,6 @@ static inline u32 wfi_bp_index(u32 op2, u32 crm)
 {
     return (op2 - 4) * 16 + crm;
 }
+#endif
 
 #endif

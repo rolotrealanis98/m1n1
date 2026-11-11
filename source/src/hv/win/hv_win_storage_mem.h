@@ -42,8 +42,27 @@ bool hv_storage_mem_begin(struct hv_storage_mem *m, u64 epoch);
 bool hv_storage_mem_end(struct hv_storage_mem *m);
 void hv_storage_mem_retire(struct hv_storage_mem *m);
 /* Exact S0/S1 guest_span ABI. Reads and writes both require actual RW pages;
- * execute-tracked pages additionally must be DIRTY (RW+XN). Never changes S2,
- * PMU state or cache attributes. No guest VA translation. Identity IPA == PA
- * prevents distinct admitted IPAs aliasing the same physical bytes. */
+ * an execute-tracked page counts as RW in the PMU rewrite's DIRTY, CODE and
+ * PINNED states (never SCANNING). pmu-reads: a write admission resets the
+ * admitted pages' rewrite state (CODE/PINNED -> DIRTY, permissions only, same
+ * output address, broadcast TLBI; hv_win_pmu_dma_write) so code EL2 copies in is
+ * rescanned before it runs; nothing else in S2, no cache attributes, no scans.
+ * No guest VA translation. Identity IPA == PA prevents distinct admitted IPAs
+ * aliasing the same physical bytes. */
 void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write);
+
+/* r4.13 diagnostics: why hv_storage_guest_span last refused (reason, address, length, the offending range
+ * or leaf) and per-reason counts. Pure bookkeeping, no behaviour change. */
+enum hv_sm_why {
+    HV_SM_WHY_NONE = 0, HV_SM_WHY_STATE, HV_SM_WHY_CONTEXT, HV_SM_WHY_ARGS, HV_SM_WHY_NOT_RAM,
+    HV_SM_WHY_RESIDENT, HV_SM_WHY_PROTECTED, HV_SM_WHY_LEAF_WALK, HV_SM_WHY_LEAF_ATTR, HV_SM_WHY_SCANNING,
+    HV_SM_WHY_NR,
+};
+struct hv_sm_refusal {
+    u64 why;
+    u64 ipa, length, detail; /* detail: protected range base, or the leaf descriptor */
+    u64 count[HV_SM_WHY_NR];
+};
+extern struct hv_sm_refusal hv_sm_last_refusal;
+
 #endif

@@ -1,0 +1,82 @@
+--- ../s1-resident-r4.6-native-rw-20261110/check-memory.py	2026-11-09 16:55:25
++++ check-memory.py	2026-11-10 16:50:16
+@@ -47,6 +47,9 @@
+ #define mrs(x) fake_daif
+ static u64 *hv_Ltop;
+ u64 vaddr_bits;
++/* pmu-reads: the provider re-arms the PMU rewrite for write spans (hv_win_pmu.c, tested there) */
++static u64 dma_calls, dma_ipa, dma_len;
++__attribute__((unused)) static unsigned hv_win_pmu_dma_write(u64 ipa, u64 size){dma_calls++;dma_ipa=ipa;dma_len=size;return 0;}
+ static unsigned checks;
+ #define CHECK(x) do {checks++;if(!(x)){fprintf(stderr,"failed line %d: %s\n",__LINE__,#x);abort();}}while(0)
+ '''
+@@ -90,7 +93,8 @@
+  setup();vaddr_bits=36;hv_Ltop=l2;l2[0]=(u64)l3|3;l3[0]=ATTR;CHECK(hv_pt_resolve_leaf(23,&out));CHECK(out.ipa_base==0&&out.pa_base==0);
+  vaddr_bits=31;CHECK(!hv_pt_resolve_leaf(0,&out));vaddr_bits=45;CHECK(!hv_pt_resolve_leaf(0,&out));
+  setup();hv_Ltop=NULL;CHECK(!hv_pt_resolve_leaf(IPA,&out));
+- registered();CHECK(hv_storage_guest_span(&mem,IPA+1,0x20000,true)==(void*)(IPA+1));CHECK(hv_storage_guest_span(&mem,IPA+1,0x20000,false)==(void*)(IPA+1));
++ registered();dma_calls=0;CHECK(hv_storage_guest_span(&mem,IPA+1,0x20000,true)==(void*)(IPA+1));CHECK(dma_calls==1&&dma_ipa==IPA+1&&dma_len==0x20000);
++ CHECK(hv_storage_guest_span(&mem,IPA+1,0x20000,false)==(void*)(IPA+1));CHECK(dma_calls==1); /* reads never re-arm */
+  CHECK(!hv_storage_guest_span(&mem,IPA,0x20001,true));CHECK(!hv_storage_guest_span(&mem,IPA,0,true));CHECK(!hv_storage_guest_span(&mem,0,1,true));CHECK(!hv_storage_guest_span(&mem,UINT64_MAX-4,8,true));
+  CHECK(!hv_storage_guest_span(&mem,IPA-1,2,true));CHECK(!hv_storage_guest_span(&mem,IPA+0x2000000-1,2,true));
+  CHECK(!hv_storage_guest_span(&mem,IPA+0x100000,1,true));CHECK(!hv_storage_guest_span(&mem,IPA+0xfffff,2,true));
+@@ -99,6 +103,7 @@
+  CHECK(!hv_storage_mem_begin(&mem,55));CHECK(hv_storage_mem_end(&mem));CHECK(!hv_storage_guest_span(&mem,IPA,1,true));CHECK(!hv_storage_mem_begin(&mem,54));CHECK(hv_storage_mem_begin(&mem,55));
+  hv_storage_mem_retire(&mem);CHECK(!hv_storage_guest_span(&mem,IPA,1,true));CHECK(!hv_storage_mem_end(&mem));CHECK(!hv_storage_mem_register(&mem,&cfg));
+  /* Reject each unknown/unsupported attribute, device/NC, AF/SH/AP restrictions, aliases. */
++ dma_calls=0;
+  for(unsigned i=0;i<64;i++){u64 d=(IPA+0x4000)|ATTR;u64 bit=1UL<<i;
+    if(bit&~(PTE_TARGET_MASK|ATTR|BIT(54)|BIT(55)|GENMASK(58,56)))reject_leaf(d|bit);
+  }
+@@ -106,9 +111,23 @@
+  for(unsigned attr=0;attr<15;attr++)reject_leaf(((IPA+0x4000)|ATTR)&~(15UL<<2)|(u64)attr<<2);
+  reject_leaf(((IPA+0x4000)|ATTR)&~BIT(10));reject_leaf(((IPA+0x4000)|ATTR)&~BIT(8));
+  reject_leaf((IPA+0x8000)|ATTR);reject_leaf(((IPA+0x4000)|ATTR)|BIT(56));
+- reject_leaf(((IPA+0x4000)|ATTR)|BIT(55)); /* PINNED RW+X */
+- reject_leaf((((IPA+0x4000)|ATTR)|BIT(55))&~BIT(7)); /* CODE RO+X */
+  reject_leaf((((IPA+0x4000)|ATTR)|BIT(55)|BIT(54))&~BIT(7)); /* SCANNING RO+XN */
++ reject_leaf((((IPA+0x4000)|ATTR)|BIT(55)|BIT(54))&~(3UL<<6)); /* tracked, S2AP none */
++ reject_leaf((((IPA+0x4000)|ATTR)|BIT(55))&~(3UL<<6)|BIT(7)); /* tracked, S2AP WO */
++ reject_leaf(((((IPA+0x4000)|ATTR)|BIT(55))&~BIT(7))|BIT(52)); /* CODE with the contiguous bit */
++ reject_leaf(((IPA+0x4000)|ATTR)&~BIT(7)); /* untracked RO: still refused both ways */
++ CHECK(dma_calls==0); /* a refused span never reaches the PMU reset */
++ /* pmu-reads: PINNED RW+X and CODE RO+X are admitted both ways (only RW pages are ever tracked;
++  * CODE's RO is the rewrite's write trap). A write re-arms exactly the admitted span, after every
++  * check; the provider itself leaves the descriptor alone (the PMU helper owns that change). */
++ for(int st=0;st<2;st++){
++  registered();l3[1]=st?(((IPA+0x4000)|ATTR)|BIT(55)):((((IPA+0x4000)|ATTR)|BIT(55))&~BIT(7));
++  u64 saved=l3[1];dma_calls=0;
++  CHECK(hv_storage_guest_span(&mem,IPA+0x4000,32,false));CHECK(dma_calls==0);
++  CHECK(hv_storage_guest_span(&mem,IPA+0x3ff0,32,true));CHECK(dma_calls==1&&dma_ipa==IPA+0x3ff0&&dma_len==32);
++  CHECK(!hv_storage_guest_span(&mem,IPA+0x3ff0,0x20001,true));CHECK(dma_calls==1);
++  CHECK(l3[1]==saved);
++ }
+  registered();l3[1]|=BIT(55)|BIT(54)|GENMASK(58,56);u64 saved=l3[1];CHECK(hv_storage_guest_span(&mem,IPA+0x4000,32,true));CHECK(l3[1]==saved);CHECK(hv_storage_guest_span(&mem,IPA+0x4000,32,false));
+  registered();l3[8]&=~BIT(7);CHECK(!hv_storage_guest_span(&mem,IPA+1,0x20000,true));
+  registered();l2[(IPA>>25)&2047]=IPA|(ATTR&~2UL);CHECK(hv_storage_guest_span(&mem,IPA+1,0x20000,true));
+--- ../s1-resident-r4.6-native-rw-20261110/build.sh	2026-11-10 15:34:31
++++ build.sh	2026-11-10 16:50:24
+@@ -1,5 +1,5 @@
+ #!/bin/bash
+-# r4.6 clean build (offline). Deletes every object/output except the prebuilt librust.a and
++# r4.7 clean build (offline). Deletes every object/output except the prebuilt librust.a and
+ # build_cfg.h (Rust is not rebuilt, as for r3.1-r4.3), builds in the pinned container with this
+ # tree mounted at its own absolute path, and copies the outputs to $1 (default artifacts/).
+ set -euo pipefail
+@@ -7,13 +7,13 @@
+ STAGE=${S1N_STAGE:?set S1N_STAGE to 0, 1, 2 or 3}
+ case "$STAGE" in 0|1|2|3) ;; *) exit 2 ;; esac
+ case "$OUT" in "$HERE"/*) ;; *) echo 'Output must be inside this directory' >&2; exit 2 ;; esac
+-TAG=v2.0.0-169-g868807f9-dirty-s1r4.6-stage$STAGE
++TAG=v2.0.0-169-g868807f9-dirty-s1r4.7-stage$STAGE
+ find "$SRC/build" -name '*.o' -delete
+ rm -rf "$SRC/build/.deps" "$SRC/build/build_tag.h" "$SRC"/build/m1n1*
+ echo "librust.a $(shasum -a 256 "$SRC/build/librust.a" | cut -d' ' -f1)"
+ container run --rm -v "$SRC:$SRC" -w "$SRC" m5pro-windows/mu-build:f43 \
+   make -j8 S1N_STAGE="$STAGE" CHAINLOADING=0 TOOLCHAIN=/usr/sbin/ M1N1_VERSION_TAG=$TAG
+ mkdir -p "$OUT"
+-cp "$SRC/build/m1n1.bin" "$OUT/m1n1-win-s1-r4.6-stage$STAGE.bin"
++cp "$SRC/build/m1n1.bin" "$OUT/m1n1-win-s1-r4.7-stage$STAGE.bin"
+ cp "$SRC/build/m1n1-raw.elf" "$SRC/build/m1n1.elf" "$SRC/build/build_tag.h" "$SRC/build/build_cfg.h" "$OUT/"
+-(cd "$OUT" && shasum -a 256 m1n1-win-s1-r4.6-stage$STAGE.bin m1n1-raw.elf m1n1.elf build_tag.h build_cfg.h)
++(cd "$OUT" && shasum -a 256 m1n1-win-s1-r4.7-stage$STAGE.bin m1n1-raw.elf m1n1.elf build_tag.h build_cfg.h)

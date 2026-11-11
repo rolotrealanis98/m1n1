@@ -1,0 +1,536 @@
+{
+  "firmware_binaries": "not built",
+  "hardware": "unverified",
+  "acceptance": "BLOCKED: retained inherited scenario failures and invalid legacy mutant anchors",
+  "source_manifest": "SOURCE-SHA256.tsv",
+  "source_manifest_sha256": "1cec7d8796c8843aa9e85ae56629fdd45f693e98e0dfff76be473672f8e1b23a",
+  "baseline_r45_overlay": {
+    "0": {
+      "status": "pass",
+      "passed": 48,
+      "scenarios": 48,
+      "checks": 11811,
+      "mutants_caught": null,
+      "mutants_total": null
+    },
+    "1": {
+      "status": "pass",
+      "passed": 54,
+      "scenarios": 54,
+      "checks": 2105563,
+      "mutants_caught": null,
+      "mutants_total": null
+    },
+    "2": {
+      "status": "pass",
+      "passed": 54,
+      "scenarios": 54,
+      "checks": 67006171,
+      "mutants_caught": null,
+      "mutants_total": null
+    },
+    "3": {
+      "status": "pass",
+      "passed": null,
+      "scenarios": 196,
+      "checks": 33781950,
+      "mutants_caught": 86,
+      "mutants_total": 86
+    }
+  },
+  "r46_inherited_stages": {
+    "0": {
+      "scenarios": 48,
+      "passed": 47,
+      "checks": 11658,
+      "failed": [
+        {
+          "scenario": "r45_stage",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/r45_cases.h:156 ans_ro_flush()"
+        }
+      ]
+    },
+    "1": {
+      "scenarios": 54,
+      "passed": 51,
+      "checks": 7546,
+      "failed": [
+        {
+          "scenario": "r45_stage",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/r45_cases.h:164 ok"
+        },
+        {
+          "scenario": "r45_link",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/r45_cases.h:101 s1n_link_proxy(op, false) == want"
+        },
+        {
+          "scenario": "r45_stage_corrupt",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/r45_cases.h:163 !ok && ans_ro_stats()->reason == ANS_RO_E_CANARY"
+        }
+      ]
+    },
+    "2": {
+      "scenarios": 54,
+      "passed": 51,
+      "checks": 7546,
+      "failed": [
+        {
+          "scenario": "r45_stage",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/r45_cases.h:164 ok"
+        },
+        {
+          "scenario": "r45_link",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/r45_cases.h:101 s1n_link_proxy(op, false) == want"
+        },
+        {
+          "scenario": "r45_stage_corrupt",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/r45_cases.h:163 !ok && ans_ro_stats()->reason == ANS_RO_E_CANARY"
+        }
+      ]
+    },
+    "3": {
+      "scenarios": 196,
+      "passed": 186,
+      "checks": 31939711,
+      "failed": [
+        {
+          "scenario": "e2e_reads",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/scratch/r46-inherited-a4sz_zlv/stage3/test.c:548 (F.cpu_control & 0x10) == 0 && F.cpu_stops == 1"
+        },
+        {
+          "scenario": "allowlist",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/scratch/r46-inherited-a4sz_zlv/stage3/test.c:762 ans_ro_test_submit(false, io_bad[i]) == -1"
+        },
+        {
+          "scenario": "rw_basic",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/scratch/r46-inherited-a4sz_zlv/stage3/test.c:1006 F.io_writes == 4"
+        },
+        {
+          "scenario": "rw_requires_flag",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/scratch/r46-inherited-a4sz_zlv/stage3/test.c:1140 ans_ro_test_submit(false, 0x01) == -1 && ans_ro_test_submit(false, 0x"
+        },
+        {
+          "scenario": "secA_rw_write_0",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/secA_cases.h:71 F.io_writes == 4"
+        },
+        {
+          "scenario": "secA_rw_write_1",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/secA_cases.h:71 F.io_writes == 4"
+        },
+        {
+          "scenario": "secA_rw_write_2",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/secA_cases.h:71 F.io_writes == 4"
+        },
+        {
+          "scenario": "secA_rw_write_3",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/secA_cases.h:71 F.io_writes == 4"
+        },
+        {
+          "scenario": "secA_rw_write_4",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/secA_cases.h:71 F.io_writes == 4"
+        },
+        {
+          "scenario": "secA_rw_write_5",
+          "ok": false,
+          "detail": "FAIL:/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/tests/native/secA_cases.h:71 F.io_writes == 4"
+        }
+      ]
+    }
+  },
+  "new_scenarios": {
+    "0": {
+      "total": 28,
+      "passed": 28
+    },
+    "1": {
+      "total": 31,
+      "passed": 31
+    },
+    "2": {
+      "total": 31,
+      "passed": 31
+    },
+    "3": {
+      "total": 50,
+      "passed": 50
+    }
+  },
+  "new_mutants": {
+    "caught": 23,
+    "total": 23
+  },
+  "inherited_native_mutants": {
+    "caught_by_original_passing_cases": 81,
+    "caught_with_added_followups": 84,
+    "total": 86,
+    "uncaught_or_invalid": [
+      {
+        "name": "ans_frozen_still_shuts_down",
+        "compiled": false,
+        "caught": false,
+        "error": "('mut_ans_frozen_still_shuts_down', 's1/ans_ro.c', 0)"
+      },
+      {
+        "name": "r4_flush_timeout_1s",
+        "compiled": false,
+        "caught": false,
+        "error": "('mut_r4_flush_timeout_1s', 's1/ans_ro.c', 0)"
+      }
+    ]
+  },
+  "inherited_r45_mutants": {
+    "caught_by_original_passing_cases": 38,
+    "caught_with_added_followups": 44,
+    "total": 44
+  },
+  "overlay_mutants": {
+    "caught": 7,
+    "total": 7
+  },
+  "twin": {
+    "status": "pass",
+    "resident": "/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110",
+    "table": [
+      {
+        "variant": "r4.5 (unmodified)",
+        "maxxfer": 256,
+        "legacy_v1": false,
+        "verdict": "PASS",
+        "D1_image": true,
+        "D2_log_outside_writes": 0,
+        "D3_fake_counter": 0,
+        "v1_audit_pass": null
+      },
+      {
+        "variant": "r4.5 (unmodified)",
+        "maxxfer": 1,
+        "legacy_v1": false,
+        "verdict": "PASS",
+        "D1_image": true,
+        "D2_log_outside_writes": 0,
+        "D3_fake_counter": 0,
+        "v1_audit_pass": null
+      },
+      {
+        "variant": "M1 window check disabled",
+        "maxxfer": 256,
+        "legacy_v1": false,
+        "verdict": "FAIL",
+        "D1_image": false,
+        "D2_log_outside_writes": 24,
+        "D3_fake_counter": 24,
+        "v1_audit_pass": null
+      },
+      {
+        "variant": "M2 off-by-one at the end",
+        "maxxfer": 256,
+        "legacy_v1": false,
+        "verdict": "FAIL",
+        "D1_image": false,
+        "D2_log_outside_writes": 7,
+        "D3_fake_counter": 7,
+        "v1_audit_pass": null
+      },
+      {
+        "variant": "M3 off-by-one at the start",
+        "maxxfer": 256,
+        "legacy_v1": false,
+        "verdict": "FAIL",
+        "D1_image": false,
+        "D2_log_outside_writes": 2,
+        "D3_fake_counter": 2,
+        "v1_audit_pass": null
+      },
+      {
+        "variant": "M4 wrapped LBA",
+        "maxxfer": 256,
+        "legacy_v1": false,
+        "verdict": "FAIL",
+        "D1_image": false,
+        "D2_log_outside_writes": 6,
+        "D3_fake_counter": 6,
+        "v1_audit_pass": null
+      }
+    ]
+  },
+  "stage_twin": {
+    "status": "pass",
+    "results": [
+      {
+        "stage": 0,
+        "variant": "baseline",
+        "case": -1,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 0,
+          "case": -1,
+          "operation_ok": 1,
+          "writes": 0,
+          "blocks": 0,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 0,
+        "variant": "baseline",
+        "case": 0,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 0,
+          "case": 0,
+          "operation_ok": 0,
+          "writes": 0,
+          "blocks": 0,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 1,
+        "variant": "baseline",
+        "case": -1,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 1,
+          "case": -1,
+          "operation_ok": 1,
+          "writes": 1024,
+          "blocks": 1024,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 1,
+        "variant": "baseline",
+        "case": 0,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 1,
+          "case": 0,
+          "operation_ok": 0,
+          "writes": 0,
+          "blocks": 0,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 1,
+        "variant": "baseline",
+        "case": 1,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 1,
+          "case": 1,
+          "operation_ok": 0,
+          "writes": 0,
+          "blocks": 0,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 1,
+        "variant": "broken-edge-0",
+        "case": 0,
+        "verdict": "FAIL",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 1,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 1,
+          "case": 0,
+          "operation_ok": 1,
+          "writes": 1,
+          "blocks": 1,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 1,
+        "variant": "broken-edge-1",
+        "case": 1,
+        "verdict": "FAIL",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 1,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 1,
+          "case": 1,
+          "operation_ok": 1,
+          "writes": 1,
+          "blocks": 1,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 2,
+        "variant": "baseline",
+        "case": -1,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 2,
+          "case": -1,
+          "operation_ok": 1,
+          "writes": 256,
+          "blocks": 32768,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 2,
+        "variant": "baseline",
+        "case": 0,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 2,
+          "case": 0,
+          "operation_ok": 0,
+          "writes": 0,
+          "blocks": 0,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 2,
+        "variant": "baseline",
+        "case": 1,
+        "verdict": "PASS",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 0,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 2,
+          "case": 1,
+          "operation_ok": 0,
+          "writes": 0,
+          "blocks": 0,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 2,
+        "variant": "broken-edge-0",
+        "case": 0,
+        "verdict": "FAIL",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 1,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 2,
+          "case": 0,
+          "operation_ok": 1,
+          "writes": 1,
+          "blocks": 1,
+          "outside": 0,
+          "file_errors": 0
+        }
+      },
+      {
+        "stage": 2,
+        "variant": "broken-edge-1",
+        "case": 1,
+        "verdict": "FAIL",
+        "D1_outside": "PASS",
+        "D2_stage_violations": 1,
+        "D3_outside": 0,
+        "restored": true,
+        "receipt": {
+          "stage": 2,
+          "case": 1,
+          "operation_ok": 1,
+          "writes": 1,
+          "blocks": 1,
+          "outside": 0,
+          "file_errors": 0
+        }
+      }
+    ],
+    "evidence_directory": "/Users/rolo/Work/agents/win-el2/storage/s1-resident-r4.6-native-rw-20261110/scratch/r45-stage-twin-7xw9w0bv",
+    "scope": "host model using actual driver; test-only entry simulates canary origin for adversarial zone writes"
+  },
+  "broad_host_suite": {
+    "receipt": "scratch/full-host-final.log",
+    "status": "pass",
+    "native_suite_run_separately": true,
+    "static_firmware_ELF_gate": "unverified: not built",
+    "inherited_gap_mutants": "16/19 killed; 3 known survivors"
+  },
+  "other_checks": {
+    "platform_context": "scratch/context-path-final.json",
+    "mcc": "scratch/mcc-final.json",
+    "stage_inspection_new": "scratch/stage-inspection-final.json",
+    "stage_inspection_original": "FAIL: old function-location assertion; scratch/stage-inspection.json",
+    "review_r4": "build failure (also on r4.5-with-overlay baseline): missing s1_stage.h; scratch/review-r4.log, scratch/baseline/scratch/review-r4.log",
+    "review_r3": "PASS including 60000 fuzz cases; scratch/review-r3-final.log"
+  },
+  "receipts": [
+    "scratch/inherited-final.json",
+    "scratch/r46-release-final.json",
+    "scratch/mutant-followup-final.json",
+    "scratch/overlay-mutants.json",
+    "scratch/twin-final.json",
+    "scratch/twin-stages-final.json",
+    "scratch/full-host-final.log"
+  ],
+  "expectation_changes": [
+    "tests/native/r45_cases.h:r45_boundary guest READ only",
+    "tests/native/secA_cases.h:secA_rw_random invalid READ child only",
+    "review-tests-r3/e2e_review.c:guest_fuzz invalid READ only"
+  ]
+}

@@ -165,6 +165,15 @@ void vnvme_init(struct vnvme_ctrl *ctrl, u64 namespace_blocks, const struct vnvm
     ctrl->ops = ops;
     ctrl->opaque = opaque;
     ctrl->temp_over = VNVME_WCTEMP;
+    /* r4: defaults are the r2.2 fixture behaviour; a backend may widen them. */
+    ctrl->caps.max_blocks = VNVME_MAX_BLOCKS;
+    if (ops && ops->caps)
+        ops->caps(opaque, &ctrl->caps);
+    if (!ctrl->caps.max_blocks || ctrl->caps.max_blocks > VNVME_MAX_XFER_BLOCKS)
+        ctrl->caps.max_blocks = VNVME_MAX_BLOCKS;
+    if (!ctrl->caps.writable)
+        ctrl->caps.vwc = false;
+    ctrl->wce = ctrl->caps.vwc;
 }
 
 bool vnvme_set_admin_queue(struct vnvme_ctrl *ctrl, u64 sq_addr, u64 cq_addr, u16 sq_size,
@@ -207,42 +216,81 @@ bool vnvme_set_admin_queue(struct vnvme_ctrl *ctrl, u64 sq_addr, u64 cq_addr, u1
  * This host-only experiment assumes mappings remain stable during a command. */
 #define VNVME_MAX_LIST_FRAGS 2
 struct prp_plan {
-    u8 *ptr[VNVME_MAX_BLOCKS + 1];
-    u64 addr[VNVME_MAX_BLOCKS + 1];
-    size_t len[VNVME_MAX_BLOCKS + 1];
+    u8 *ptr[VNVME_MAX_XFER_BLOCKS + 1];
+    u64 addr[VNVME_MAX_XFER_BLOCKS + 1];
+    size_t len[VNVME_MAX_XFER_BLOCKS + 1];
     size_t count;
+    bool dup_dest; /* r4.14: a destination segment repeats an earlier one (to_guest only) */
 };
+/* r4: data buffer for READ/WRITE: the backend's private transfer buffer when it has one
+ * (single copy), else the 128 KiB frontend bounce (fixture, r2.2 behaviour). */
+static u8 *data_buffer(struct vnvme_ctrl *ctrl, size_t *capacity)
+{
+    size_t cap = 0;
+    u8 *b = ctrl->ops->xfer_buffer ? ctrl->ops->xfer_buffer(ctrl->opaque, &cap) : NULL;
+    if (!b || !cap) {
+        *capacity = sizeof(ctrl->bounce);
+        return ctrl->bounce;
+    }
+    *capacity = cap;
+    return b;
+}
+/* r4: `to_guest` is true when data is written into guest memory (READ, Identify, logs) and
+ * false when it is read from guest memory (WRITE); `capacity` bounds the transfer. */
+static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
+                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest);
 static bool plan_prps(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
                       size_t total, struct prp_plan *plan)
 {
+    return plan_prps_dir(ctrl, cmd, total, plan, sizeof(ctrl->bounce), true);
+}
+/* r4.14: the rule each check below enforces is noted just before it (PRP_AT), so a refusal can be
+ * reported by rule; plan_prps_dir records it. Static: single-threaded under bhl, like the plan. */
+static struct {
+    u8 rule;
+    u16 index;
+    u64 addr, len, other;
+} prp_at;
+#define PRP_AT(r, i, a, l, o)                                                                       \
+    (prp_at.rule = (r), prp_at.index = (u16)(i), prp_at.addr = (u64)(a), prp_at.len = (u64)(l),     \
+     prp_at.other = (u64)(o))
+static bool plan_prps_body(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
+                           size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
+{
     memset(plan, 0, sizeof(*plan));
-    if (!total || total > sizeof(ctrl->bounce) || !cmd->prp1)
+    PRP_AT(VNVME_PRP_SIZE, 0, cmd->prp1, total, capacity);
+    if (!total || total > capacity || !cmd->prp1)
         return false;
     size_t first = VNVME_PAGE_SIZE - (cmd->prp1 & (VNVME_PAGE_SIZE - 1));
     if (first > total) first = total;
     u64 addr = cmd->prp1;
     size_t remaining = total;
-    u64 entries[VNVME_MAX_BLOCKS] = {0};
+    static u64 entries[VNVME_MAX_XFER_BLOCKS]; /* r4: static (single-threaded under bhl) */
+    memset(entries, 0, sizeof(entries));
     size_t rest = total - first;
     u64 frag_addr[VNVME_MAX_LIST_FRAGS] = {0};
     size_t frag_len[VNVME_MAX_LIST_FRAGS] = {0};
     size_t frags = 0;
     if (rest) {
-        size_t count = (rest + VNVME_PAGE_SIZE - 1) / VNVME_PAGE_SIZE; /* <= 32 */
-        if (!cmd->prp2 || count > VNVME_MAX_BLOCKS) return false;
+        size_t count = (rest + VNVME_PAGE_SIZE - 1) / VNVME_PAGE_SIZE; /* <= 256 */
+        PRP_AT(VNVME_PRP_PRP2, 1, cmd->prp2, count, 0);
+        if (!cmd->prp2 || count > VNVME_MAX_XFER_BLOCKS) return false;
         if (count == 1) {
+            PRP_AT(VNVME_PRP_PRP2_ALIGN, 1, cmd->prp2, VNVME_PAGE_SIZE, 0);
             if (cmd->prp2 & (VNVME_PAGE_SIZE - 1)) return false; /* data pointer */
             entries[0] = cmd->prp2;
         } else {
             u64 list = cmd->prp2;
             size_t got = 0;
             while (got < count) {
+                PRP_AT(VNVME_PRP_LIST_PTR, frags, list, 0, frags);
                 if (!list || (list & 7) || frags == VNVME_MAX_LIST_FRAGS) return false;
                 if (frags && (list & (VNVME_PAGE_SIZE - 1))) return false; /* chained: page aligned */
                 size_t in_page = (VNVME_PAGE_SIZE - (size_t)(list & (VNVME_PAGE_SIZE - 1))) / sizeof(u64);
                 size_t need = count - got;
                 bool last = need <= in_page;
                 size_t n = last ? need : in_page;          /* 1..512 entries, <= 4096 bytes */
+                PRP_AT(VNVME_PRP_LIST_ADMIT, frags, list, n * sizeof(u64), 0);
                 const u8 *src = guest_span(ctrl, list, n * sizeof(u64), false);
                 if (!src) return false;
                 frag_addr[frags] = list;
@@ -262,21 +310,68 @@ static bool plan_prps(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
         size_t n = plan->count ? (remaining < VNVME_PAGE_SIZE ? remaining : VNVME_PAGE_SIZE) : first;
         if (plan->count) {
             addr = entries[plan->count - 1];
+            PRP_AT(VNVME_PRP_ENTRY_ALIGN, plan->count, addr, n, 0);
             if (!addr || (addr & (VNVME_PAGE_SIZE - 1))) return false;
         }
-        if (plan->count >= VNVME_MAX_BLOCKS + 1) return false;
-        u8 *ptr = guest_span(ctrl, addr, n, true);
+        PRP_AT(VNVME_PRP_COUNT, plan->count, addr, n, 0);
+        if (plan->count >= VNVME_MAX_XFER_BLOCKS + 1) return false;
+        PRP_AT(VNVME_PRP_DATA_ADMIT, plan->count, addr, n, 0);
+        u8 *ptr = guest_span(ctrl, addr, n, to_guest);
+        if (ptr) PRP_AT(VNVME_PRP_DATA_QUEUE, plan->count, addr, n, 0);
         if (!ptr || overlaps_queue(ctrl, addr, n)) return false;
+        PRP_AT(VNVME_PRP_DATA_LIST, plan->count, addr, n, frags ? frag_addr[0] : 0);
         for (size_t i = 0; i < frags; i++)
             if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;
+        /* r4.14: in the device-to-guest direction (READ, Identify, log pages) a data segment may be
+         * an exact repeat of an earlier whole, page-aligned segment. Windows' memory manager does this
+         * for clustered in-page reads: pages of the cluster that are already resident are pointed at
+         * one system-wide dummy page, so one PRP list names that page several times (and a later read
+         * can start on it). Every segment has been admitted (guest_span, write) on its own above and
+         * still may not touch a queue or a list fragment; a repeated destination only means the last
+         * copy wins, as on a real controller. r2.1-r4.13 refused this with 0x04 (31 READs in RUN B
+         * 20261110-211000, 248 in 20261110-212026). Any other overlap (partial, unaligned PRP1) and
+         * every overlap between WRITE source segments keep the r2.1 refusal. */
         for (size_t i = 0; i < plan->count; i++)
-            if (overlaps(addr, n, plan->addr[i], plan->len[i])) return false;
+            if (overlaps(addr, n, plan->addr[i], plan->len[i])) {
+                if (!to_guest || n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i]) {
+                    PRP_AT(VNVME_PRP_DATA_DATA, plan->count, addr, n, plan->addr[i]);
+                    return false;
+                }
+                plan->dup_dest = true;
+            }
         plan->addr[plan->count] = addr;
         plan->ptr[plan->count] = ptr;
         plan->len[plan->count++] = n;
         remaining -= n;
     }
     return true;
+}
+/* r4.14: plan_prps_body, recording which rule refused (count by rule, last VNVME_PRP_LOG refusals),
+ * and READs that repeat a destination page. Same result as plan_prps_body. */
+static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
+                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
+{
+    if (plan_prps_body(ctrl, cmd, total, plan, capacity, to_guest)) {
+        if (plan->dup_dest && cmd->opcode == VNVME_IO_READ) {
+            ctrl->prp_dup_dest_reads++;
+            ctrl->prp_dup_dest_last = cmd->prp1;
+        }
+        return true;
+    }
+    u8 rule = prp_at.rule < VNVME_PRP_RULES ? prp_at.rule : VNVME_PRP_NONE;
+    ctrl->prp_refusals[rule]++;
+    struct vnvme_prp_refusal *r = &ctrl->prp_log[ctrl->prp_refusal_total++ % VNVME_PRP_LOG];
+    r->ordinal = ctrl->prp_refusal_total;
+    r->command = ctrl->stats.commands;
+    r->addr = prp_at.addr;
+    r->len = prp_at.len;
+    r->other = prp_at.other;
+    r->cid = cmd->cid;
+    r->index = prp_at.index;
+    r->opcode = cmd->opcode;
+    r->rule = rule;
+    r->to_guest = to_guest;
+    return false;
 }
 static void copy_to_plan(const struct prp_plan *plan, const u8 *buffer)
 {
@@ -285,10 +380,17 @@ static void copy_to_plan(const struct prp_plan *plan, const u8 *buffer)
         buffer += plan->len[i];
     }
 }
+static void copy_from_plan(const struct prp_plan *plan, u8 *buffer)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        memcpy(buffer, plan->ptr[i], plan->len[i]);
+        buffer += plan->len[i];
+    }
+}
 static bool prp_copy(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
                      size_t total, const void *buffer)
 {
-    struct prp_plan plan;
+    static struct prp_plan plan; /* r4: static (single-threaded under bhl) */
     if (!plan_prps(ctrl, cmd, total, &plan)) return false;
     copy_to_plan(&plan, buffer);
     return true;
@@ -300,16 +402,21 @@ static const u8 ns1_eui64[8] = { 0x02, 0x4d, 0x35, 0x57, 0x53, 0x31, 0x00, 0x01 
 static const u8 ns1_nguid[16] = { 0x4d, 0x35, 0x57, 0x2d, 0x53, 0x31, 0x4e, 0x53,
                                   0x02, 0x4d, 0x35, 0x57, 0x53, 0x31, 0x00, 0x01 };
 
-static void identify_controller(u8 *data)
+static void identify_controller(const struct vnvme_ctrl *ctrl, u8 *data)
 {
     memset(data, 0, VNVME_PAGE_SIZE);
     put_le16(data + 0, 0x1b36);
     put_le16(data + 2, 0x1b36);
     put_ascii(data + 4, 20, "M1N1NVME000000000001");
-    put_ascii(data + 24, 40, "S0 immutable RAM disk (NO ANS)");
+    put_ascii(data + 24, 40, !ctrl->caps.native ? "S0 immutable RAM disk (NO ANS)"
+                             : ctrl->caps.writable ? "M5W native window (read-write)"
+                                                   : "M5W native window (read-only)");
     put_ascii(data + 64, 8, "0.1");
     data[72] = 4; /* Recommended arbitration burst. */
-    data[77] = 5; /* MDTS = 2^5 4 KiB pages = 128 KiB. */
+    /* MDTS = 2^n 4 KiB pages: 5 (128 KiB) for the fixture, 8 (1 MiB) for native rw. */
+    u8 mdts = 0;
+    while ((1u << (mdts + 1)) <= ctrl->caps.max_blocks) mdts++;
+    data[77] = mdts;
     put_le32(data + 80, 0x00010300);
     put_le16(data + 256, 0);      /* No optional admin command sets. */
     data[258] = 0;                /* One outstanding Abort command. */
@@ -323,7 +430,7 @@ static void identify_controller(u8 *data)
     data[513] = 0x44;             /* Required/max CQE size = 16 bytes. */
     put_le32(data + 516, 1);      /* One namespace. */
     put_le16(data + 520, 0);      /* No Dataset Management support. */
-    data[525] = 0;               /* No volatile write cache: immutable RAM. */
+    data[525] = ctrl->caps.vwc ? 1 : 0; /* r4: honest VWC (device cache in rw mode) */
     data[526] = 0;               /* AWUN zero-based. */
 }
 
@@ -333,7 +440,7 @@ static void identify_namespace(struct vnvme_ctrl *ctrl, u8 *data)
     put_le64(data + 0, ctrl->namespace_blocks);
     put_le64(data + 8, ctrl->namespace_blocks);
     put_le64(data + 16, ctrl->namespace_blocks);
-    data[99] = 1;                         /* r2 NSATTR: write protected. */
+    data[99] = ctrl->caps.writable ? 0 : 1; /* r2 NSATTR: write protected unless rw (r4) */
     memcpy(data + 104, ns1_nguid, sizeof(ns1_nguid)); /* r2 NGUID */
     memcpy(data + 120, ns1_eui64, sizeof(ns1_eui64)); /* r2 EUI64 */
     data[25] = 0;       /* One LBA format. */
@@ -358,7 +465,7 @@ static u16 identify(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd)
     u8 cns = cmd->cdw10 & 0xff;
     switch (cns) {
         case VNVME_IDENTIFY_CONTROLLER:
-            identify_controller(ctrl->bounce);
+            identify_controller(ctrl, ctrl->bounce);
             break;
         case VNVME_IDENTIFY_NAMESPACE:
             /* r2.1 ruling: OACS.NMS=0, so NSID FFFFFFFFh is Invalid Namespace (0Bh). */
@@ -482,7 +589,13 @@ static u16 feature(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd, u32
             return VNVME_SC_SUCCESS;
         }
         case NVME_FID_VOLATILE_WC:
-            return VNVME_SC_INVALID_FIELD; /* r2: VWC not present (Identify VWC=0) */
+            if (!ctrl->caps.vwc)
+                return VNVME_SC_INVALID_FIELD; /* r2: VWC not present (Identify VWC=0) */
+            /* r4: WCE=0 is honoured as write-through: every WRITE is followed by FLUSH. */
+            if (set)
+                ctrl->wce = cmd->cdw11 & 1;
+            *result = set ? 0 : ctrl->wce;
+            return VNVME_SC_SUCCESS;
         case NVME_FID_POWER_MANAGEMENT:
             if (set && (cmd->cdw11 & 0x1f))
                 return VNVME_SC_INVALID_FIELD; /* NPSS=0: only PS0 */
@@ -556,33 +669,112 @@ static u16 process_admin(struct vnvme_ctrl *ctrl, const struct vnvme_command *cm
     }
 }
 
+/* r4: backend flush (rw only). */
+static bool backend_flush(struct vnvme_ctrl *ctrl)
+{
+    if (!ctrl->ops->flush || !ctrl->ops->flush(ctrl->opaque))
+        return false;
+    ctrl->backend_flushes++;
+    return true;
+}
+bool vnvme_backend_flush(struct vnvme_ctrl *ctrl)
+{
+    return !ctrl->caps.writable || backend_flush(ctrl);
+}
+
+/* r4: WRITE into a writable backend. Same bounds as READ, data gathered from the guest
+ * PRPs into the backend's private transfer buffer (single copy), FUA = write then flush. */
+static u16 process_write(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd)
+{
+    /* FUA (30) and LR (31) accepted; PRINFO, directives and reserved bits must be zero. */
+    const u32 write_cdw12_ok = 0xffffu | BIT(31) | BIT(30);
+    if ((cmd->cdw12 & ~write_cdw12_ok) || (cmd->cdw13 & 0xffffff00u))
+        return VNVME_SC_INVALID_FIELD;
+    u32 blocks = (cmd->cdw12 & 0xffff) + 1;
+    if (blocks > ctrl->caps.max_blocks) {
+        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
+        return VNVME_SC_INVALID_FIELD;
+    }
+    u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
+    if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) {
+        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
+        return VNVME_SC_INVALID_FIELD;
+    }
+    size_t total = (size_t)blocks * VNVME_LBA_SIZE, capacity;
+    u8 *buffer = data_buffer(ctrl, &capacity);
+    static struct prp_plan plan;
+    if (!plan_prps_dir(ctrl, cmd, total, &plan, capacity, false)) return VNVME_SC_DATA_TRANSFER_ERROR;
+    if (!ctrl->ops->write_blocks) return VNVME_SC_INTERNAL;
+    copy_from_plan(&plan, buffer);
+    for (u32 done = 0; done < blocks;) {
+        u32 n = blocks - done;
+        if (n > 32) n = 32;
+        if (!ctrl->ops->write_blocks(ctrl->opaque, lba + done, n,
+                                     buffer + (size_t)done * VNVME_LBA_SIZE))
+            return VNVME_SC_INTERNAL;
+        done += n;
+    }
+    ctrl->backend_writes++;
+    if ((cmd->cdw12 & BIT(30)) || !ctrl->wce) {
+        ctrl->fua_flushes++; /* FUA or write-through (WCE=0): write then flush */
+        if (!backend_flush(ctrl)) return VNVME_SC_INTERNAL;
+    }
+    return VNVME_SC_SUCCESS;
+}
+
 static u16 process_io(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd)
 {
-    /* r2: FLUSH is mandatory; with an immutable backend and VWC=0 it is a no-op. */
-    if (cmd->opcode == VNVME_IO_FLUSH)
-        return (cmd->nsid == 1 || cmd->nsid == 0xffffffffu) ? VNVME_SC_SUCCESS
-                                                            : VNVME_SC_INVALID_NAMESPACE;
+    /* r2: FLUSH is mandatory; with an immutable backend and VWC=0 it is a no-op.
+     * r4: with a writable backend it is passed to the device (post-M4: always). */
+    if (cmd->opcode == VNVME_IO_FLUSH) {
+        if (cmd->nsid != 1 && cmd->nsid != 0xffffffffu) return VNVME_SC_INVALID_NAMESPACE;
+        if (!ctrl->caps.writable) return VNVME_SC_SUCCESS;
+        return backend_flush(ctrl) ? VNVME_SC_SUCCESS : VNVME_SC_INTERNAL;
+    }
     if (cmd->nsid != 1) return VNVME_SC_INVALID_NAMESPACE;
     /* r2: WRITE is mandatory; the namespace is write protected (NSATTR bit 0).
      * Write Zeroes/DSM/others are not advertised (ONCS=0): Invalid Opcode.
-     * No write/discard path exists, whatever the backend supplies. */
-    if (cmd->opcode == VNVME_IO_WRITE) return VNVME_SC_NS_WRITE_PROTECTED;
+     * r4: only a writable (native rw) backend accepts WRITE; DSM stays rejected. */
+    if (cmd->opcode == VNVME_IO_WRITE && !ctrl->caps.writable) {
+        u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
+        u32 blocks = (cmd->cdw12 & 0xffff) + 1;
+        (void)lba;
+        (void)blocks;
+        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
+    }
+    if (cmd->opcode == VNVME_IO_WRITE)
+        return ctrl->caps.writable ? process_write(ctrl, cmd) : VNVME_SC_NS_WRITE_PROTECTED;
     if (cmd->opcode != VNVME_IO_READ) return VNVME_SC_INVALID_OPCODE;
     /* r2: READ accepts FUA (30) and LR (31) and DSM hints (CDW13 7:0). PRINFO,
      * directives/STC and reserved bits must be zero; no PI so CDW14/15 ignored. */
     if ((cmd->cdw12 & ~(0xffffu | BIT(30) | BIT(31))) || (cmd->cdw13 & 0xffffff00u))
         return VNVME_SC_INVALID_FIELD;
     u32 blocks = (cmd->cdw12 & 0xffff) + 1;
-    if (blocks > VNVME_MAX_BLOCKS) return VNVME_SC_INVALID_FIELD;
     u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
-    if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba)
+    if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) {
+        ctrl->refused_reads++;
+        return VNVME_SC_LBA_OUT_OF_RANGE; /* r4.13: was Invalid Field (0x02); NVMe 1.4 Fig. 129 */
+    }
+    if (blocks > ctrl->caps.max_blocks) {
+        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
         return VNVME_SC_INVALID_FIELD;
-    size_t total = (size_t)blocks * VNVME_LBA_SIZE;
-    struct prp_plan plan;
-    if (!plan_prps(ctrl, cmd, total, &plan)) return VNVME_SC_DATA_TRANSFER_ERROR;
-    if (!ctrl->ops->read_blocks || !ctrl->ops->read_blocks(ctrl->opaque, lba, blocks, ctrl->bounce))
-        return VNVME_SC_INTERNAL;
-    copy_to_plan(&plan, ctrl->bounce);
+    }
+    size_t total = (size_t)blocks * VNVME_LBA_SIZE, capacity;
+    u8 *buffer = data_buffer(ctrl, &capacity);
+    static struct prp_plan plan; /* r4: 257-entry plan, static (single-threaded under bhl) */
+    if (!plan_prps_dir(ctrl, cmd, total, &plan, capacity, true)) return VNVME_SC_DATA_TRANSFER_ERROR;
+    static u8 read_result[256 * VNVME_LBA_SIZE];
+    if (!ctrl->ops->read_blocks) return VNVME_SC_INTERNAL;
+    for (u32 done = 0; done < blocks;) {
+        u32 n = blocks - done;
+        if (n > 32) n = 32;
+        if (!ctrl->ops->read_blocks(ctrl->opaque, lba + done, n, buffer))
+            return VNVME_SC_INTERNAL;
+        memcpy(read_result + (size_t)done * VNVME_LBA_SIZE, buffer,
+               (size_t)n * VNVME_LBA_SIZE);
+        done += n;
+    }
+    copy_to_plan(&plan, read_result);
     return VNVME_SC_SUCCESS;
 }
 

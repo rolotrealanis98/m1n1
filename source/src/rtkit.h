@@ -37,6 +37,13 @@ void rtkit_mtp_mode(rtkit_dev_t *rtk, u64 sram_base, size_t sram_size);
 void rtkit_set_boot_timeout(u64 us);
 /* r3: bound for the power-state waits in microseconds; 0 (default) = unbounded, as before */
 void rtkit_set_power_timeout(u64 us);
+/* r3.5: bits of the bounded waits that timed out since the last call; reading clears them */
+#define RTKIT_TIMEOUT_HELLO           (1u << 0) /* rtkit_boot: HELLO (boot timeout) */
+#define RTKIT_TIMEOUT_EPMAP           (1u << 1) /* rtkit_boot: endpoint map (boot timeout) */
+#define RTKIT_TIMEOUT_IOP_POWER_ON    (1u << 2) /* rtkit_boot: IOP power ON (power timeout) */
+#define RTKIT_TIMEOUT_AP_QUIESCE      (1u << 3) /* sleep/quiesce: AP power QUIESCED (power timeout) */
+#define RTKIT_TIMEOUT_IOP_POWER_STATE (1u << 4) /* sleep/quiesce: IOP target state (power timeout) */
+u32 rtkit_take_timeouts(void);
 
 bool rtkit_can_recv(rtkit_dev_t *rtk);
 

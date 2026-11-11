@@ -168,9 +168,11 @@ typedef enum {
     P_HV_WIN_STORAGE_NATIVE, /* 0xc22, r3: select+verify native RO window (before PREP) */
     P_HV_WIN_STORAGE_NATIVE_STAT, /* 0xc23 */
     P_HV_WIN_STORAGE_NATIVE_QUIESCE, /* 0xc24, r3.1: stage-1 quiesce, no guest running */
-    P_HV_WIN_SMP_DUMP, /* 0xc25, smp2f: print the SMP/WFI/timer/vGIC dump (boot CPU; -1 elsewhere) */
-
-    P_HV_WIN_HIDM_CONFIGURE = 0xc28, /* 0xc26/27 reserved for ANSM branch */
+    P_HV_WIN_STORAGE_NATIVE_CANARY = 0xc25, /* r4: storage line (launcher-visible, kept) */
+    /* 0xc26/27 reserved for ANSM branch */
+    P_HV_WIN_HIDM_CONFIGURE = 0xc28,
+    /* u1: was 0xc25 on the smp line, which clashed with the storage line's CANARY */
+    P_HV_WIN_SMP_DUMP = 0xc29, /* smp2f: print the SMP/WFI/timer/vGIC dump (boot CPU; -1 elsewhere) */
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

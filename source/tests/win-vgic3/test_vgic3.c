@@ -1187,6 +1187,82 @@ static void test_emulated_level_spi(void)
     CHECK_EQ(find_lr(4, 91), lr_bits(91, 0, 1, false));
 }
 
+/*
+ * r4.12: hardware run 20261110-200708 - Windows' stornvme INTx ISR declines (no INTMS) while its
+ * completion DPC is in flight, so the guest EOIs the S1 NVMe SPI (66) with the line still high. A
+ * GIC that re-presents it at once starves the DPC on one vCPU (interrupt storm, CQE never acked).
+ * The vGIC holds the re-presentation until the next hypervisor tick; a claimed interrupt (line
+ * dropped before EOI) and a new rising edge are presented at once.
+ */
+static void test_nvme_spi_holdoff(void)
+{
+    const int cpu = BOOT_CPU, v = 0;
+    (void)v;
+    bring_up();
+    grp1_on();
+    spi_route(66, 0);
+    spi_enable(66);
+    host_cpu = cpu;
+
+    /* a completion is posted: line high, delivered */
+    hv_vgic3_set_spi_level(66, true);
+    exit_on(cpu);
+    CHECK(find_lr(cpu, 66) & ICH_LR_PENDING_BIT);
+
+    /* ISR declines: ack + EOI with the line still high -> NOT re-presented before the tick */
+    CHECK_EQ(guest_ack(cpu), 66);
+    guest_eoi(cpu, 66);
+    maint_on(cpu);
+    exit_on(cpu);
+    CHECK_EQ(find_lr(cpu, 66), 0);
+    exit_on(cpu); /* any number of exits (the DPC's MMIO traps) before the tick */
+    CHECK_EQ(find_lr(cpu, 66), 0);
+
+    /* next hypervisor tick: still high -> re-presented */
+    hv_vgic3_tick();
+    exit_on(cpu);
+    CHECK(find_lr(cpu, 66) & ICH_LR_PENDING_BIT);
+
+    /* claimed: ISR masks (line drops) before EOI -> no hold-off, clean */
+    CHECK_EQ(guest_ack(cpu), 66);
+    hv_vgic3_set_spi_level(66, false);
+    exit_on(cpu);
+    guest_eoi(cpu, 66);
+    maint_on(cpu);
+    exit_on(cpu);
+    CHECK_EQ(nr_valid_lrs(cpu), 0);
+
+    /* a new completion (rising edge) is presented at once, no tick needed */
+    hv_vgic3_set_spi_level(66, true);
+    exit_on(cpu);
+    CHECK(find_lr(cpu, 66) & ICH_LR_PENDING_BIT);
+
+    /* declined again, then the line drops (DPC acked + INTMS) before the tick: next edge at once */
+    CHECK_EQ(guest_ack(cpu), 66);
+    guest_eoi(cpu, 66);
+    maint_on(cpu);
+    exit_on(cpu);
+    CHECK_EQ(find_lr(cpu, 66), 0);
+    hv_vgic3_set_spi_level(66, false);
+    hv_vgic3_set_spi_level(66, true);
+    exit_on(cpu);
+    CHECK(find_lr(cpu, 66) & ICH_LR_PENDING_BIT);
+
+    /* other level SPIs (e.g. 90) keep immediate re-presentation */
+    spi_route(90, 0);
+    spi_enable(90);
+    hv_vgic3_set_spi_level(90, true);
+    exit_on(cpu);
+    u32 got = guest_ack(cpu);
+    CHECK(got == 66 || got == 90);
+    guest_eoi(cpu, got);
+    maint_on(cpu);
+    exit_on(cpu);
+    if (got == 90)
+        CHECK(find_lr(cpu, 90) & ICH_LR_PENDING_BIT);
+    CHECK_EQ(bad_sysreg, 0);
+}
+
 static void test_pl011_resample(void)
 {
     const int cpu = 1; /* vCPU 2 */
@@ -1815,6 +1891,7 @@ int main(int argc, char **argv)
     RUN(test_active_overflow_eoicount);
     RUN(test_emulated_level_spi);
     RUN(test_pl011_resample);
+    RUN(test_nvme_spi_holdoff);
     RUN(test_cpu_off_on);
     RUN(test_stuck_maintenance_guard);
     RUN(test_smp2_j716s_two_vcpus);

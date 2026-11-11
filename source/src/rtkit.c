@@ -586,6 +586,18 @@ static bool rtkit_power_wait_expired(u64 deadline)
 }
 
 static bool rtkit_boot_inner(rtkit_dev_t *rtk);
+/* r3.5: which bounded wait timed out (RTKIT_TIMEOUT_* bits), so a caller can tell the HELLO,
+ * endpoint-map and power-state waits apart without a serial log. Cleared by
+ * rtkit_take_timeouts(); never read by the original m1n1 users. */
+static u32 rtkit_timeouts;
+
+u32 rtkit_take_timeouts(void)
+{
+    u32 t = rtkit_timeouts;
+    rtkit_timeouts = 0;
+    return t;
+}
+
 bool rtkit_boot(rtkit_dev_t *rtk)
 {
     /* MTP: boot-time diagnostics only (preguest); runtime stays silent. */
@@ -614,6 +626,7 @@ static bool rtkit_boot_inner(rtkit_dev_t *rtk)
     }
 
     if (!asc_recv_timeout(rtk->asc, &msg, rtk->mtp ? 1000000 : rtkit_boot_timeout)) {
+        rtkit_timeouts |= RTKIT_TIMEOUT_HELLO;
         rtkit_printf("did not receive HELLO\n");
         return false;
     }
@@ -667,6 +680,7 @@ static bool rtkit_boot_inner(rtkit_dev_t *rtk)
             return false;
         }
         if (!asc_recv_timeout(rtk->asc, &msg, rtk->mtp ? 1000000 : rtkit_boot_timeout)) {
+            rtkit_timeouts |= RTKIT_TIMEOUT_EPMAP;
             rtkit_printf("couldn't receive message while waiting for endpoint map\n");
             return false;
         }
@@ -710,7 +724,12 @@ static bool rtkit_boot_inner(rtkit_dev_t *rtk)
                     case RTKIT_EP_MGMT:
                         break;
                     case 0xa:
-                        has_analytics = rtk->mtp;
+                        /* u1: non-MTP IOPs (ANS) keep the original "unknown system endpoint" line */
+                        if (!rtk->mtp) {
+                            rtkit_printf("unknown system endpoint 0x%02x\n", ep_idx);
+                            break;
+                        }
+                        has_analytics = true;
                         break;
                     default:
                         rtkit_printf("unknown system endpoint 0x%02x\n", ep_idx);
@@ -736,9 +755,10 @@ static bool rtkit_boot_inner(rtkit_dev_t *rtk)
         }
     }
 
-    rtkit_printf("endpoint map: crashlog=%d syslog=%d debug=%d ioreport=%d oslog=%d 0xa=%d\n",
-                 has_crashlog, has_syslog, has_debug, has_ioreport, has_oslog, has_analytics);
     if (rtk->mtp) {
+        /* u1: MTP-only diagnostics, so the ANS (storage) boot prints exactly what r4.14 printed */
+        rtkit_printf("endpoint map: crashlog=%d syslog=%d debug=%d ioreport=%d oslog=%d 0xa=%d\n",
+                     has_crashlog, has_syslog, has_debug, has_ioreport, has_oslog, has_analytics);
         /* Linux rtkit.c starts system endpoints in ascending order: 1,2,3,4,8,0xa. */
         if ((has_crashlog && !rtkit_start_ep(rtk, RTKIT_EP_CRASHLOG)) ||
             (has_syslog && !rtkit_start_ep(rtk, RTKIT_EP_SYSLOG)) ||
@@ -766,6 +786,7 @@ static bool rtkit_boot_inner(rtkit_dev_t *rtk)
     while (rtk->iop_power != RTKIT_POWER_ON) {
         struct rtkit_message rtk_msg;
         if ((rtk->mtp && timeout_expired(power_deadline)) || rtkit_power_wait_expired(power_deadline)) {
+            rtkit_timeouts |= RTKIT_TIMEOUT_IOP_POWER_ON;
             rtkit_printf("timed out waiting for IOP power on\n");
             return false;
         }
@@ -777,7 +798,8 @@ static bool rtkit_boot_inner(rtkit_dev_t *rtk)
             return false;
     }
 
-    rtkit_printf("IOP power ON\n");
+    if (rtk->mtp)
+        rtkit_printf("IOP power ON\n");
     /* this enables syslog */
     msg.msg0 =
         FIELD_PREP(MGMT_TYPE, MGMT_MSG_AP_PWR_STATE) | FIELD_PREP(MGMT_PWR_STATE, RTKIT_POWER_ON);
@@ -820,6 +842,7 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
     while (rtk->ap_power != RTKIT_POWER_QUIESCED) {
         struct rtkit_message rtk_msg;
         if ((rtk->mtp && timeout_expired(power_deadline)) || rtkit_power_wait_expired(power_deadline)) {
+            rtkit_timeouts |= RTKIT_TIMEOUT_AP_QUIESCE;
             rtkit_printf("timed out waiting for AP power quiesce\n");
             return false;
         }
@@ -845,6 +868,7 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
     while (rtk->iop_power != target) {
         struct rtkit_message rtk_msg;
         if ((rtk->mtp && timeout_expired(power_deadline)) || rtkit_power_wait_expired(power_deadline)) {
+            rtkit_timeouts |= RTKIT_TIMEOUT_IOP_POWER_STATE;
             rtkit_printf("timed out waiting for IOP power state\n");
             return false;
         }

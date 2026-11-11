@@ -39,6 +39,9 @@ void s1dg_init(struct s1_model *m)
     memset(g,0,sizeof(*g));
     g->magic=S1DG_MAGIC;g->version=S1DG_VERSION;g->ring_entries=S1DG_RING;
     g->entry_size=sizeof(struct s1dg_entry);g->struct_size=sizeof(*g);
+    struct s1_wcanary *w=&m->wcanary;
+    memset(w,0,sizeof(*w));
+    w->magic=S1WC_MAGIC;w->version=S1WC_VERSION;w->abs_min_first=UINT64_MAX;
 }
 void s1dg_event(struct s1_model *m,u8 type,u8 width,u8 qid,u8 opcode,u16 cid,u16 status,
                 u64 a,u64 b,u32 c,u32 d)
@@ -155,6 +158,42 @@ static bool backend_read(void *opaque,u64 lba,u32 blocks,void *buffer)
     m->backend_reads++;
     return active_backend->read(lba,blocks,buffer);
 }
+/* r4: native rw backend hooks (absent for the fixture and native-ro: frontend stays r2.2). */
+static void canary_sync(struct s1_model *m)
+{
+    struct s1_wcanary *w=&m->wcanary;
+    w->fua_flushes=m->queue.fua_flushes;
+    if (active_backend->canary)
+        active_backend->canary(&w->abs_min_first,&w->abs_max_last,&w->ans_write_cmds,&w->window_refusals);
+}
+static bool backend_write(void *opaque,u64 lba,u32 blocks,const void *buffer)
+{
+    struct s1_model *m=opaque;
+    if (!active_backend->write) return false;
+    bool ok=active_backend->write(lba,blocks,buffer);
+    if (ok) {m->wcanary.write_cmds++;m->wcanary.write_blocks+=blocks;}
+    canary_sync(m);
+    return ok;
+}
+static bool backend_flush(void *opaque)
+{
+    struct s1_model *m=opaque;
+    if (!active_backend->flush) return false;
+    bool ok=active_backend->flush();
+    if (ok) m->wcanary.flushes++; else m->wcanary.flush_failures++;
+    canary_sync(m);
+    return ok;
+}
+static void *backend_xfer(void *opaque,size_t *capacity)
+{
+    (void)opaque;
+    return active_backend->xfer_buffer ? active_backend->xfer_buffer(capacity) : NULL;
+}
+static void backend_caps(void *opaque,struct vnvme_caps *caps)
+{
+    (void)opaque;
+    if (active_backend->caps) active_backend->caps(caps);
+}
 static void publish(void *opaque)
 {
     struct s1_model *m=opaque;
@@ -177,9 +216,16 @@ static void backend_irq(void *opaque,bool asserted)
     (void)asserted; /* actual queue state is updated before the callback */
     s1_recompute_irq(opaque);
 }
+static void backend_abort(void *opaque)
+{
+    (void)opaque;
+    if (active_backend->abort) active_backend->abort();
+}
 static const struct vnvme_backend_ops backend_ops={
+    .abort=backend_abort,
     .guest_span=guest_span,.read_blocks=backend_read,.publish=publish,.irq=backend_irq,
     .trace=s1dg_trace,
+    .write_blocks=backend_write,.flush=backend_flush,.xfer_buffer=backend_xfer,.caps=backend_caps, /* r4 */
 };
 void s1_reset_controller(struct s1_model *m)
 {
@@ -270,10 +316,17 @@ static bool cc_write(struct s1_model *m,u32 value)
         bool was=m->queue.shutdown;
         /* Immutable synchronous backend: no write cache or in-flight DMA. Normal
          * shutdown aborts unexecuted entries (and the held AER) with completions;
-         * abrupt discards them and drops the queues. */
+         * abrupt discards them and drops the queues.
+         * r4: a writable backend is flushed first, so written data is durable before
+         * SHST reports complete; a failed flush is reported as CFS. */
+        bool flushed=true;
+        if (!was && m->queue.caps.writable) {
+            flushed=vnvme_backend_flush(&m->queue);
+            m->wcanary.shutdown_flushes++;
+        }
         vnvme_shutdown(&m->queue,shn==0x8000u);
         m->regs.csts|=CSTS_SHST_COMPLETE;
-        if (m->queue.fatal) m->regs.csts|=CSTS_CFS;
+        if (m->queue.fatal || !flushed) m->regs.csts|=CSTS_CFS;
         if (!was) {
             if (shn==0x8000u) g->shutdowns_abrupt++; else g->shutdowns_normal++;
             g->aborted+=m->queue.aborted_commands-ab;g->discarded+=m->queue.discarded_commands-di;

@@ -426,6 +426,21 @@
 #define SYS_MDSCR_EL1 sys_reg(2, 0, 0, 2, 2)
 #define SYS_OSLAR_EL1 sys_reg(2, 0, 1, 0, 4)
 #define SYS_OSLSR_EL1 sys_reg(2, 0, 1, 1, 4)
+/* r4.9: further debug registers the Windows guest's debug-register traps (MDCR_EL2 TDE/TDA/TDOSA/TDRA)
+ * reach EL2 with; all mandatory ARMv8.0, so an EL2 access never UNDEFs. */
+#define SYS_OSDTRRX_EL1       sys_reg(2, 0, 0, 0, 2)
+#define SYS_MDCCINT_EL1       sys_reg(2, 0, 0, 2, 0)
+#define SYS_OSDTRTX_EL1       sys_reg(2, 0, 0, 3, 2)
+#define SYS_OSECCR_EL1        sys_reg(2, 0, 0, 6, 2)
+#define SYS_MDRAR_EL1         sys_reg(2, 0, 1, 0, 0)
+#define SYS_OSDLR_EL1         sys_reg(2, 0, 1, 3, 4)
+#define SYS_DBGPRCR_EL1       sys_reg(2, 0, 1, 4, 4)
+#define SYS_DBGCLAIMSET_EL1   sys_reg(2, 0, 7, 8, 6)
+#define SYS_DBGCLAIMCLR_EL1   sys_reg(2, 0, 7, 9, 6)
+#define SYS_DBGAUTHSTATUS_EL1 sys_reg(2, 0, 7, 14, 6)
+#define SYS_MDCCSR_EL0        sys_reg(2, 3, 0, 1, 0)
+#define SYS_DBGDTR_EL0        sys_reg(2, 3, 0, 4, 0)
+#define SYS_DBGDTRRXTX_EL0    sys_reg(2, 3, 0, 5, 0) /* read: DBGDTRRX_EL0, write: DBGDTRTX_EL0 */
 
 #define SYS_TPIDR2_EL0 sys_reg(3, 3, 13, 0, 5)
 

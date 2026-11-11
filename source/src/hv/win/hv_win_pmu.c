@@ -14,6 +14,7 @@
  *   DIRTY (RW, XN)  --first fetch-->  SCANNING (RO, XN), PMUv3 words rewritten  -->  CODE (RO, X)
  *   CODE  --write or walker update-->  DIRTY, or PINNED (RW, X) at the PMU_FLIP_CAP-th flip
  *   PINNED  --sweep, every PMU_SWEEP_TICKS hypervisor ticks-->  DIRTY
+ *   CODE, PINNED  --EL2 device write into the page (hv_win_pmu_dma_write)-->  DIRTY
  *
  * Everything runs under the big HV lock (the locked half of hv_exc_sync() and hv_tick()). The
  * rewrite happens only in SCANNING: no CPU can write the page (write permission revoked, broadcast
@@ -378,6 +379,52 @@ bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr)
     return pmu_write_fault(ctx, ipa, walker);
 }
 
+/*
+ * EL2 is about to fill guest RAM [ipa, ipa + size) on the guest's behalf (an emulated device's DMA
+ * write: an NVMe READ's data, a mediated-storage reply). EL2 stores through its own identity
+ * mapping, which stage 2 does not check, so a CODE page would keep its execute permission while
+ * its contents change: an installed Windows pages code back in from disk into frames that held
+ * scanned code before, and that code would run with its PMUv3 accesses unrewritten. Every CODE or
+ * PINNED 16 KiB page the range touches (partial pages included: a 4 KiB guest page re-arms the
+ * whole 16 KiB leaf) goes back to DIRTY, so the next instruction fetch rescans it, as after a
+ * guest store (pmu_write_fault); the flips counter is kept (a refill is not a write-after-execute
+ * by the guest). DIRTY pages need nothing; SCANNING exists only inside pmu_exec_fault under the
+ * same lock. Call before the first byte is stored, under the big HV lock (the storage dispatch
+ * holds it for the whole command). One broadcast TLBI per call, only if a page changed state, so
+ * execute permission is gone on every CPU before EL2 writes. O(pages touched), no allocation, one
+ * test when the rewrite is off. Returns the number of pages reset.
+ */
+u32 hv_win_pmu_dma_write(u64 ipa, u64 size)
+{
+    if (!pmu.armed || !size)
+        return 0;
+
+    u64 last = ipa + (size - 1);
+    if (last < ipa)
+        last = ~0UL;
+    last &= ~(PMU_PAGE - 1);
+    u32 n = 0;
+
+    for (u64 page = ipa & ~(PMU_PAGE - 1);; page += PMU_PAGE) {
+        u32 flips;
+        enum hv_xt_state st = hv_xt_get(page, NULL, &flips);
+        if (st == HV_XT_CODE || st == HV_XT_PINNED) {
+            /* hv_xt_set: leaf store, then DSB ISHST before the TLBI below */
+            hv_xt_set(page, HV_XT_DIRTY, flips);
+            n++;
+        }
+        if (page == last)
+            break;
+    }
+
+    if (n) {
+        /* DSB ISHST; TLBI VMALLS12E1IS; DSB ISH; ISB (hv_vm.c) */
+        hv_xt_tlbi(true);
+        pmu.stats[HV_WIN_PMU_DMA_RESETS] += n;
+    }
+    return n;
+}
+
 void hv_win_pmu_tick(void)
 {
     if (!pmu.armed || !pmu.nr_pinned || ++pmu.ticks < PMU_SWEEP_TICKS)
@@ -405,13 +452,13 @@ void hv_win_pmu_report(void)
         "HV/win: PMU rewrite: %lu pages tracked, %lu scans, %lu pages rewritten, %lu words "
         "(PMCCNTR %lu, other mrs %lu, msr %lu); flips: write %lu, walker %lu; pinned %lu (list "
         "full %lu), sweeps %lu, unpinned %lu; spurious %lu, AT failures %lu, not ours %lu, stuck "
-        "%lu\n",
+        "%lu, device refills %lu\n",
         s[HV_WIN_PMU_PAGES], s[HV_WIN_PMU_SCANS], s[HV_WIN_PMU_PAGES_REWRITTEN],
         s[HV_WIN_PMU_INSNS], s[HV_WIN_PMU_INSNS_PMCCNTR], s[HV_WIN_PMU_INSNS_MRS],
         s[HV_WIN_PMU_INSNS_MSR], s[HV_WIN_PMU_WRITE_FLIPS], s[HV_WIN_PMU_WALK_FLIPS],
         s[HV_WIN_PMU_PINS], s[HV_WIN_PMU_PIN_FULL], s[HV_WIN_PMU_SWEEPS], s[HV_WIN_PMU_UNPINS],
         s[HV_WIN_PMU_SPURIOUS], s[HV_WIN_PMU_IPA_FAIL], s[HV_WIN_PMU_NOT_OURS],
-        s[HV_WIN_PMU_STUCK]);
+        s[HV_WIN_PMU_STUCK], s[HV_WIN_PMU_DMA_RESETS]);
 }
 
 #ifdef PMU_REWRITE_HOST_TEST

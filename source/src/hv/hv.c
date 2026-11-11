@@ -706,6 +706,10 @@ void hv_tick(struct exc_info *ctx)
     /* r3: native read-only storage keeps the ANS mailbox drained; no-op otherwise */
     hv_win_storage_tick();
     hv_win_hidm_tick();
+    /* r4.12: re-present a declined, still-high NVMe INTx line (vGIC hold-off) */
+    hv_vgic3_tick();
+    /* r4.11 diagnostics: periodic guest/trap/vGIC/NVMe status on the console */
+    hv_status_tick(ctx);
 }
 
 bool hv_is_nested(void)

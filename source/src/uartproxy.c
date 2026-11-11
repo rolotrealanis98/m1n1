@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "uartproxy.h"
+#include "hv/win/s1/native_link.h"
 #include "assert.h"
 #include "exception.h"
 #include "iodev.h"
@@ -121,8 +122,30 @@ static u64 data_checksum(void *start, u32 length)
 }
 
 iodev_id_t uartproxy_iodev;
+bool uartproxy_guest_exception;
+u32 uartproxy_storage_exceptions;
+static ssize_t discard_read(void *buf, size_t n)
+{
+    return iodev_read(uartproxy_iodev, buf, n);
+}
 
+static int uartproxy_run_inner(struct uartproxy_msg_start *start);
 int uartproxy_run(struct uartproxy_msg_start *start)
+{
+    bool exception = start && start->reason != START_BOOT;
+    if (exception) __atomic_add_fetch(&uartproxy_storage_exceptions, 1, __ATOMIC_ACQ_REL);
+    /* r4.8: expose only THIS exception's context block to the locked host link for the session. */
+    if (exception)
+        s1n_link_exc_ctx((u64)start->info, sizeof(struct exc_info));
+    int ret = uartproxy_run_inner(start);
+    if (exception) {
+        s1n_link_exc_ctx(0, 0);
+        __atomic_sub_fetch(&uartproxy_storage_exceptions, 1, __ATOMIC_ACQ_REL);
+    }
+    return ret;
+}
+
+static int uartproxy_run_inner(struct uartproxy_msg_start *start)
 {
     int ret;
     int running = 1;
@@ -212,13 +235,18 @@ int uartproxy_run(struct uartproxy_msg_start *start)
                 reply.features = enabled_features;
                 break;
             case REQ_PROXY:
+                uartproxy_guest_exception = start &&
+                    (start->reason == START_EXCEPTION_LOWER || start->reason == START_HV);
                 ret = proxy_process(&request.prequest, &reply.preply);
+                uartproxy_guest_exception = false;
                 if (ret != 0)
                     running = 0;
                 if (ret < 0)
                     printf("Proxy req error: %d\n", ret);
                 break;
             case REQ_MEMREAD:
+                if (!s1n_link_mem_ok(request.mrequest.addr, request.mrequest.size)) {
+                    reply.status = ST_BADCMD; break; }
                 if (request.mrequest.size == 0)
                     break;
                 exc_count = 0;
@@ -230,6 +258,12 @@ int uartproxy_run(struct uartproxy_msg_start *start)
                 reply.mreply.dchecksum = checksum_val;
                 break;
             case REQ_MEMWRITE:
+                if (!s1n_link_mem_ok(request.mrequest.addr, request.mrequest.size)) {
+                    if (!s1n_link_discard(request.mrequest.size, disable_data_csums, discard_read))
+                        return -1; /* truncated stream cannot safely resume parsing */
+                    reply.status = ST_BADCMD;
+                    break;
+                }
                 exc_count = 0;
                 exc_guard = GUARD_SKIP;
                 if (request.mrequest.size != 0) {

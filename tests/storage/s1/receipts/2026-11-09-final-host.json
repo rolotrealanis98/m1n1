@@ -1,0 +1,373 @@
+{
+  "schema": 1,
+  "status": "pass",
+  "hardware_access": false,
+  "physical_backend": false,
+  "started_unix": 1794252796.625709,
+  "commands": [
+    {
+      "argv": [
+        "clang",
+        "--version"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "ce403379b194079b66c357f092406ba3c976e92f75e4a332c2580339788ba1b1",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "clang",
+        "-std=c11",
+        "-DVNVME_HOST_TEST",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-O1",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s1/src",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s0/src",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/src/hv_pci.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/src/hv_nvme.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/hv_nvme_queue.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/ram_disk.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/guest_memory.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/test_s1.c",
+        "-o",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/s1-test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "nm",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/s1-test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "ea9bb00078bc773f05a8a7920c93a0d826ad84c6c9083c96c83008ff30fe583b",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/s1-test"
+      ],
+      "timeout_seconds": 15,
+      "returncode": 0,
+      "stdout_sha256": "637282a3c1d46c369d21fc8a89647a3c2bde5ea4b8670f568fd28065580f582b",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "clang",
+        "-std=c11",
+        "-DVNVME_HOST_TEST",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-O1",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s1/src",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s0/src",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bar_bounds/hv_pci.c",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bar_bounds/hv_nvme.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/hv_nvme_queue.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/ram_disk.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/guest_memory.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/test_s1.c",
+        "-o",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bar_bounds/test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bar_bounds/test"
+      ],
+      "timeout_seconds": 15,
+      "returncode": 1,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "0f0e2b8db700a98cdffc82bb252e64315a55d720a4c24be9ea7c1cab4d771722"
+    },
+    {
+      "argv": [
+        "clang",
+        "-std=c11",
+        "-DVNVME_HOST_TEST",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-O1",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s1/src",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s0/src",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bus_master/hv_pci.c",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bus_master/hv_nvme.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/hv_nvme_queue.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/ram_disk.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/guest_memory.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/test_s1.c",
+        "-o",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bus_master/test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-bus_master/test"
+      ],
+      "timeout_seconds": 15,
+      "returncode": 1,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "1ad263eeff89dc51566ebecdc00baf9561743f9f13387ac2ead1d6f1456f75d9"
+    },
+    {
+      "argv": [
+        "clang",
+        "-std=c11",
+        "-DVNVME_HOST_TEST",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-O1",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s1/src",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s0/src",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-interrupt_mask/hv_pci.c",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-interrupt_mask/hv_nvme.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/hv_nvme_queue.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/ram_disk.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/guest_memory.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/test_s1.c",
+        "-o",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-interrupt_mask/test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-interrupt_mask/test"
+      ],
+      "timeout_seconds": 15,
+      "returncode": 1,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "add70f9736e5476d0e03dabe294cd83d6505396ed6098432c7ba09b3edb18e02"
+    },
+    {
+      "argv": [
+        "clang",
+        "-std=c11",
+        "-DVNVME_HOST_TEST",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-O1",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s1/src",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s0/src",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-doorbell_truncation/hv_pci.c",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-doorbell_truncation/hv_nvme.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/hv_nvme_queue.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/ram_disk.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/guest_memory.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/test_s1.c",
+        "-o",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-doorbell_truncation/test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-doorbell_truncation/test"
+      ],
+      "timeout_seconds": 15,
+      "returncode": 1,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "d56d0b816da6b508674468ba601c300714551fd60a9d22640a4f3e9bdf2201c9"
+    },
+    {
+      "argv": [
+        "clang",
+        "-std=c11",
+        "-DVNVME_HOST_TEST",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-O1",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s1/src",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s0/src",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-reset_irq/hv_pci.c",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-reset_irq/hv_nvme.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/hv_nvme_queue.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/ram_disk.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/guest_memory.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/test_s1.c",
+        "-o",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-reset_irq/test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-reset_irq/test"
+      ],
+      "timeout_seconds": 15,
+      "returncode": 1,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "f2096ce3c0094f21771c99fcf3a96d1016ba7dd2a0ef87ee47ae35f30744626e"
+    },
+    {
+      "argv": [
+        "clang",
+        "-std=c11",
+        "-DVNVME_HOST_TEST",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-O1",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s1/src",
+        "-I/Users/rolo/Work/m5pro-windows/tools/storage/s0/src",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-shutdown_pending/hv_pci.c",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-shutdown_pending/hv_nvme.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/hv_nvme_queue.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/ram_disk.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s0/src/guest_memory.c",
+        "/Users/rolo/Work/m5pro-windows/tools/storage/s1/test_s1.c",
+        "-o",
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-shutdown_pending/test"
+      ],
+      "timeout_seconds": 60,
+      "returncode": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final/mutant-shutdown_pending/test"
+      ],
+      "timeout_seconds": 15,
+      "returncode": 1,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "179267616685a6b12419ffd06963963b464827284f164e58e2d0bd179cd5b2d3"
+    }
+  ],
+  "manifest_sha256": "8bd50740be91020f22376ad6f4a251d5574ca0d0120b89f113d118cee8edb6d5",
+  "host": {
+    "system": "Darwin",
+    "machine": "arm64"
+  },
+  "output": "/Users/rolo/Work/agents/win-el2/storage/s1-20261109-final",
+  "sanitizer_environment": {
+    "ASAN_OPTIONS": "abort_on_error=1:detect_leaks=0",
+    "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"
+  },
+  "source_files": {
+    "PROVENANCE.json": "3558927b15f416c6e2f6f7c714c2771b00baed77f28d3ba8ba43be69b1f9ba4e",
+    "README.md": "a027b7db5ec16b6e32ad42fd00f30c85598c901c31f6415cd9d02fbab38df4de",
+    "adaptation.patch": "83d01383697a6548c7af6f69ef10de6d85b1888d12122746fea5d4e7440feed0",
+    "run.py": "a34fbefe885f6da715f900906d94709088161a1cfa875aaf48a08c1a7de656a7",
+    "src/hv_nvme.c": "6e0df21ba38ac9793a3d9ff4f1729d124c9e3979dcfc48782734efdc754f1eb1",
+    "src/hv_pci.c": "c9e15cdba495bb58a81be471bb02fc4804c5edc19cb889033388a67e5534a0eb",
+    "src/model.h": "99b1d89fcebdeefde54cda2f3abe58b2f5e4577824103060cb4bd7a093b268b0",
+    "test_s1.c": "91da8353c2143fd3194c2a9336638f8856357ceebf77ff6a915b06874dc743ac",
+    "upstream/LICENSE": "11ca423a564b52d3b7f260398baa20d016c25ae180fbdd0067c27b7d1ed7b420",
+    "upstream/hv_nvme.c": "353854d24b6aa0c63e734c069622d54a816ba95c0531a9a219b089936faaa890",
+    "upstream/hv_pci.c": "9ab55c0505a07957e6f87fc4d6a91998eb39d66bc2cd85ecc577152acb7bf58f"
+  },
+  "s0_dependencies": {
+    "MANIFEST.json": "ec582e48234e4ddcf3e24dafcd15e93e9c3ab56b86a139b119e29288c1b30fff",
+    "src/hv_nvme_queue.c": "0a539dd9e9fe2f91ff29ba4c0dee4cf92c5ea6742c82d0384e0ae987302f2a51",
+    "src/hv_nvme_queue.h": "052259459a883730f3b63df6c335199fd2c3c0b44de3e48ad16ab0446652cc35",
+    "src/ram_disk.c": "b2e96d255d4691d7e27407d6f9f48a4ad3e5ac5b5c6f136288f09f023ad60078",
+    "src/ram_disk.h": "d42a06974a23e6f680ed99e612983f7f8daa53953596078d2a512d896578b66e",
+    "src/guest_memory.c": "9c03edcd440e0838dd07e64bef49eefb5d346c290b4eeca27c2c65ccd9d5d36c",
+    "src/guest_memory.h": "1a30526fd36587e81fcd0930526463b613d9f022604b06cf07ccb22c0015f73f"
+  },
+  "compiler": "Apple clang version 21.0.0 (clang-2100.4.1.1)",
+  "mutations": [
+    {
+      "name": "bar_bounds",
+      "caught_by_assertion": true,
+      "changed_source_sha256": "e8252bf19af68a1bf6ec4eb294f4199dc6bad58c07216714997d9e048535f9d4"
+    },
+    {
+      "name": "bus_master",
+      "caught_by_assertion": true,
+      "changed_source_sha256": "b24e6711ba8e05ef03b8d135535363dc2e4a85e6491e271dda729b2552c05274"
+    },
+    {
+      "name": "interrupt_mask",
+      "caught_by_assertion": true,
+      "changed_source_sha256": "ffffba3a51290ab812b7136e0867444906113e9f5bf5990e4fb49789f762dbd3"
+    },
+    {
+      "name": "doorbell_truncation",
+      "caught_by_assertion": true,
+      "changed_source_sha256": "3e5a43ed334ac39aec54cd7cf37dee9be6a2bda9d8eb1a7749abf06f429b1c52"
+    },
+    {
+      "name": "reset_irq",
+      "caught_by_assertion": true,
+      "changed_source_sha256": "a8d989dc36012b29e7c56c6d89fc3ca4ab69c26b6827f41d396a17f49b459585"
+    },
+    {
+      "name": "shutdown_pending",
+      "caught_by_assertion": true,
+      "changed_source_sha256": "db1c28589d9f8646b006eb1b35c72616e8048778d2a440945bf7292d4b8c5fe1"
+    }
+  ],
+  "s1": {
+    "status": "pass",
+    "checks": 13216,
+    "fixture_resets": 12,
+    "read_scenarios": 6,
+    "map_calls": 17,
+    "unmap_calls": 8,
+    "irq_edges": 56,
+    "physical_backend": false
+  },
+  "binary_sha256": "269050e90b51a1a833ae756d44cbb6ce5f0c809b9d37ed19aefed606b37230fe",
+  "forbidden_backend_symbols_absent": true,
+  "finished_unix": 1794252800.5515141
+}

@@ -62,3 +62,8 @@ void *heapblock_alloc_aligned(size_t size, size_t align)
 
     return (void *)block;
 }
+
+void *heapblock_peek(void)
+{
+    return (void *)(((uintptr_t)heap_base + 63) & ~(uintptr_t)63);
+}

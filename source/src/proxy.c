@@ -33,6 +33,8 @@
 #include "hv/win/hv_win.h"
 #include "hv/win/hv_win_storage.h"
 #include "hv_win_hidm.h"
+#include "hv/win/s1/native_link.h"
+#include "hv/win/s1/ans_ro.h"
 #include "minilzlib/minlzma.h"
 #include "tinf/tinf.h"
 
@@ -66,6 +68,11 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
     reply->opcode = request->opcode;
     reply->status = S_OK;
     reply->retval = 0;
+    if (!s1n_link_proxy(request->opcode, uartproxy_guest_exception)) {
+        reply->status = S_BADCMD;
+        reply->retval = (u64)-1;
+        return 0;
+    }
     switch (request->opcode) {
         case P_NOP:
             break;
@@ -631,6 +638,9 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_STORAGE_NATIVE_STAT:
             reply->retval = hv_win_storage_native_stat(request->args[0]);
+            break;
+        case P_HV_WIN_STORAGE_NATIVE_CANARY:
+            reply->retval = ans_ro_run_canary() ? 0 : (u64)-1;
             break;
         case P_HV_WIN_STORAGE_NATIVE_QUIESCE:
             reply->retval = hv_win_storage_native_quiesce();

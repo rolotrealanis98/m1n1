@@ -136,6 +136,29 @@ def s1dg_offset_from_elf(path):
     return value - base + MODEL_OFFSET
 
 
+# r4: S1WC write canary, immediately after S1DG (&controller + MODEL_OFFSET + SIZE), 88 bytes.
+S1WC_MAGIC = 0x43573153
+S1WC_SIZE = 88
+S1WC_FIELDS = ['write_cmds', 'write_blocks', 'abs_min_first', 'abs_max_last', 'ans_write_cmds',
+               'flushes', 'fua_flushes', 'shutdown_flushes', 'flush_failures', 'window_refusals']
+
+
+def decode_s1wc(data, window_start=None, window_blocks=None):
+    """Decode the S1WC block; with a window, also report whether every ANS write was inside it."""
+    if len(data) < S1WC_SIZE:
+        raise DecodeError('S1WC block too short')
+    magic, version = struct.unpack_from('<II', data, 0)
+    if magic != S1WC_MAGIC or version != 1:
+        raise DecodeError('not an S1WC v1 block (magic %#x version %d)' % (magic, version))
+    vals = struct.unpack_from('<10Q', data, 8)
+    out = dict(zip(S1WC_FIELDS, vals))
+    out['any_write'] = out['abs_min_first'] != 0xffffffffffffffff
+    if window_start is not None and window_blocks is not None:
+        out['all_writes_inside_window'] = (not out['any_write']) or (
+            out['abs_min_first'] >= window_start and out['abs_max_last'] < window_start + window_blocks)
+    return out
+
+
 def main(argv):
     if len(argv) == 3 and argv[1] == '--elf':
         print(json.dumps({'s1dg_offset_from_base': s1dg_offset_from_elf(argv[2])}))

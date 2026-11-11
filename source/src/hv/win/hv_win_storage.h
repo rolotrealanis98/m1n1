@@ -30,6 +30,13 @@ s64 hv_win_storage_native_select(u64 data, u64 size);
 s64 hv_win_storage_native_quiesce(void);
 u64 hv_win_storage_native_stat(u64 index);
 bool hv_win_storage_claims_spi(u32 gsiv);
+bool hv_win_storage_guest_ram_contains(u64 addr, u64 size);
+/* r4.11 diagnostics: periodic NVMe/backend status lines; per-tick change watch (prints at once).
+ * The two printers live in hv_win_status.c (firmware only); the model view in hv_win_storage.c. */
+struct s1_model;
+const struct s1_model *hv_win_storage_model(bool *is_attempted, bool *is_ready);
+void hv_win_storage_status_lines(const char *prefix);
+bool hv_win_storage_watch(void); /* true: printed (caller flushes the console) */
 /* Existing-device ownership queries, no mutation. */
 bool hv_vgic3_spi_unassigned(u32 intid);
 u32 hv_win_pl011_gsiv(void);

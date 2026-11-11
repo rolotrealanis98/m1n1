@@ -99,6 +99,26 @@ struct s1_ops {
     void (*irq)(void *opaque, bool asserted);
     void (*publish)(void *opaque);
 };
+/* r4: write canary. Lives immediately after S1DG (S1DG v1 layout and offset unchanged), at
+ * &controller + S1DG_MODEL_OFFSET + S1DG_SIZE. Absolute LBAs are the ones the native driver
+ * actually placed in ANS write SQEs, so a hardware run can prove nothing outside the window
+ * was addressed. Recorded from model-local / backend values only. */
+#define S1WC_MAGIC 0x43573153u /* "S1WC" */
+#define S1WC_VERSION 1u
+struct s1_wcanary {
+    u32 magic, version;
+    u64 write_cmds;          /* guest WRITE commands that reached the backend */
+    u64 write_blocks;
+    u64 abs_min_first;       /* min absolute first LBA of any ANS write (UINT64_MAX: none) */
+    u64 abs_max_last;        /* max absolute last LBA of any ANS write */
+    u64 ans_write_cmds;      /* ANS WRITE commands issued */
+    u64 flushes;             /* backend flushes (guest FLUSH, FUA, write-through, shutdown) */
+    u64 fua_flushes;
+    u64 shutdown_flushes;
+    u64 flush_failures;
+    u64 window_refusals;     /* second (pre-doorbell) window check refusals */
+};
+
 struct s1_model {
     struct vnvme_ctrl queue;
     const struct s1_ops *ops;
@@ -110,7 +130,8 @@ struct s1_model {
     bool initialized, mapped, faulted, external_irq;
     struct { u32 intms, cc, csts, aqa; u64 asq, acq; } regs;
     u64 backend_reads, map_calls, unmap_calls, irq_changes;
-    struct s1_diag diag; /* r2.1: keep last */
+    struct s1_diag diag; /* r2.1: keep last (r4: only the canary follows it) */
+    struct s1_wcanary wcanary; /* r4 */
 };
 /* r2.1: published S1DG layout (checked on host and target builds; the decoder
  * relies on these numbers together with the ELF symbol `controller`). */
@@ -121,6 +142,9 @@ _Static_assert(sizeof(struct s1_diag) == S1DG_SIZE, "S1DG size changed");
 _Static_assert(offsetof(struct s1_diag, ring) == 0x3e8, "S1DG ring offset");
 _Static_assert(offsetof(struct s1_diag, admin_first) == 0x53e8, "S1DG admin offset");
 _Static_assert(offsetof(struct s1_diag, mmio_first) == 0x65e8, "S1DG mmio offset");
+#define S1WC_MODEL_OFFSET (S1DG_MODEL_OFFSET + S1DG_SIZE)
+_Static_assert(offsetof(struct s1_model, wcanary) == S1WC_MODEL_OFFSET, "S1WC follows S1DG");
+_Static_assert(sizeof(struct s1_wcanary) == 88, "S1WC layout");
 /* r3: storage behind the S1 frontend. The default is the immutable RAM fixture; a
  * native read-only window may be selected once, before s1_init, by the native PREP
  * path. Kept outside struct s1_model so the published S1DG layout is unchanged. */
@@ -129,7 +153,14 @@ struct s1_backend {
     u64 (*blocks)(void);
     bool (*read)(u64 lba, u32 blocks, void *buffer);
     void (*poll)(void);          /* EL2 tick: optional */
+    void (*abort)(void);        /* native safety refusal */
     void (*retire)(void);        /* storage retire/hv exit: optional */
+    /* r4 (optional, native rw): */
+    bool (*write)(u64 lba, u32 blocks, const void *buffer);
+    bool (*flush)(void);
+    void *(*xfer_buffer)(size_t *capacity);
+    void (*caps)(struct vnvme_caps *caps);
+    void (*canary)(u64 *abs_min_first, u64 *abs_max_last, u64 *ans_write_cmds, u64 *window_refusals);
 };
 bool s1_select_backend(const struct s1_backend *backend);
 void s1_poison_backend(void);

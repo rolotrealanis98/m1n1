@@ -23,6 +23,9 @@ typedef uint64_t u64;
 #define VNVME_MAX_QSIZE  256
 #define VNVME_MAX_QUEUES 2
 #define VNVME_MAX_BLOCKS 32
+/* r4: largest single command the frontend will plan (1 MiB = device MDTS). The data goes
+ * through a backend-provided transfer buffer; ctrl->bounce stays 128 KiB (S1DG layout). */
+#define VNVME_MAX_XFER_BLOCKS 256
 
 enum vnvme_admin_opcode {
     VNVME_ADMIN_DELETE_SQ = 0x00,
@@ -61,6 +64,7 @@ enum vnvme_status_code {
     VNVME_SC_ABORT_REQUESTED = 0x07,
     VNVME_SC_INVALID_NAMESPACE = 0x0b,
     VNVME_SC_NS_WRITE_PROTECTED = 0x20,
+    VNVME_SC_LBA_OUT_OF_RANGE = 0x80, /* r4.13: generic status, as a real drive reports a past-end READ */
     /* Command specific status: SCT 1 in bits 10:8 of the 15-bit status. */
     VNVME_SC_AER_LIMIT = 0x105,
     VNVME_SC_INVALID_LOG_PAGE = 0x109,
@@ -136,6 +140,14 @@ struct vnvme_trace_event {
     u16 sq_head;
 };
 
+/* r4: per-backend capabilities. Defaults (fixture / read-only) reproduce r2.2 exactly. */
+struct vnvme_caps {
+    u16 max_blocks;   /* per command, <= VNVME_MAX_XFER_BLOCKS; MDTS = log2 */
+    bool writable;    /* WRITE/FLUSH reach the backend; NSATTR.WP = 0 */
+    bool vwc;         /* volatile write cache present (Identify VWC, FID 06h) */
+    bool native;      /* identity strings for the native window */
+};
+
 struct vnvme_backend_ops {
     /* Complete contiguous guest-RAM span, checked permissions; NULL rejects.
      * Host-only S0. No fallback to raw IPA translation. Mapping must remain stable
@@ -146,9 +158,14 @@ struct vnvme_backend_ops {
     bool (*read_blocks)(void *opaque, u64 lba, u32 blocks, void *buffer);
     bool (*write_blocks)(void *opaque, u64 lba, u32 blocks, const void *buffer);
     bool (*flush)(void *opaque);
+    void (*abort)(void *opaque);
     void (*publish)(void *opaque);
     void (*irq)(void *opaque, bool asserted);
     void (*trace)(void *opaque, const struct vnvme_trace_event *event);
+    /* r4 (optional): backend-owned private transfer buffer for READ/WRITE data (single copy
+     * between it and the guest PRPs) and capabilities applied at every vnvme_init. */
+    void *(*xfer_buffer)(void *opaque, size_t *capacity);
+    void (*caps)(void *opaque, struct vnvme_caps *caps);
 };
 
 struct vnvme_queue {
@@ -194,6 +211,37 @@ struct vnvme_intx_delivery {
     bool owner_kick_pending;
 };
 
+/* r4.14: the PRP planner rule that refused a transfer (completed DATA TRANSFER ERROR, 0x04).
+ * Recorded per refusal (count by rule + a small log) so the firmware status lines can name it. */
+enum vnvme_prp_rule {
+    VNVME_PRP_NONE = 0,
+    VNVME_PRP_SIZE,         /* total 0, above the transfer buffer, or PRP1 zero */
+    VNVME_PRP_PRP2,         /* more than one page but PRP2 zero, or too many pages */
+    VNVME_PRP_PRP2_ALIGN,   /* two-page transfer: PRP2 (data pointer) not page aligned */
+    VNVME_PRP_LIST_PTR,     /* list pointer zero / not qword aligned / chained not page aligned / >2 fragments */
+    VNVME_PRP_LIST_ADMIT,   /* list fragment refused by guest-memory admission */
+    VNVME_PRP_ENTRY_ALIGN,  /* a list entry zero or not page aligned */
+    VNVME_PRP_COUNT,        /* more segments than the plan holds */
+    VNVME_PRP_DATA_ADMIT,   /* data segment refused by guest-memory admission */
+    VNVME_PRP_DATA_QUEUE,   /* data segment overlaps an active SQ/CQ */
+    VNVME_PRP_DATA_LIST,    /* data segment overlaps a consumed PRP list fragment */
+    VNVME_PRP_DATA_DATA,    /* data segment overlaps an earlier one (READ: other than an exact whole-page repeat) */
+    VNVME_PRP_RULES
+};
+#define VNVME_PRP_LOG 16
+struct vnvme_prp_refusal {
+    u64 ordinal;  /* 1-based refusal number (ctrl->prp_refusal_total after it) */
+    u64 command;  /* ctrl->stats.commands at the time (identifies the command) */
+    u64 addr;     /* the segment / list fragment / pointer that failed */
+    u64 len;
+    u64 other;    /* rule specific: capacity, the overlapped range base, the fragment count */
+    u16 cid;
+    u16 index;    /* data segment (0 = PRP1) or list fragment index */
+    u8 opcode;
+    u8 rule;
+    bool to_guest;
+};
+
 struct vnvme_ctrl {
     u64 namespace_blocks;
     const struct vnvme_backend_ops *ops;
@@ -219,6 +267,17 @@ struct vnvme_ctrl {
     u64 invalid_doorbells;
     u64 aborted_commands;
     u64 discarded_commands;
+    /* r4: capabilities and Set Features VWC state (fits in the padding before bounce). */
+    struct vnvme_caps caps;
+    bool wce;
+    u64 refused_reads; /* guest past-end READ: nonterminal, no backend I/O */
+    u64 backend_writes, backend_flushes, fua_flushes;
+    /* r4.14: PRP planner refusals by rule, the last VNVME_PRP_LOG of them, and READs whose
+     * destination segments repeat a guest page (allowed; see plan_prps_dir). */
+    u64 prp_refusals[VNVME_PRP_RULES];
+    u64 prp_refusal_total;
+    struct vnvme_prp_refusal prp_log[VNVME_PRP_LOG];
+    u64 prp_dup_dest_reads, prp_dup_dest_last;
     u8 bounce[VNVME_MAX_BLOCKS * VNVME_LBA_SIZE] ALIGNED(VNVME_PAGE_SIZE);
 };
 
@@ -235,6 +294,8 @@ bool vnvme_cq_doorbell(struct vnvme_ctrl *ctrl, u16 qid, u16 new_head);
  * AER with Command Abort Requested (no backend work); abrupt discards them and
  * drops all queues. Both leave the controller unable to fetch until reset. */
 void vnvme_shutdown(struct vnvme_ctrl *ctrl, bool abrupt);
+/* r4: flush a writable backend (no-op success otherwise); used before shutdown completes. */
+bool vnvme_backend_flush(struct vnvme_ctrl *ctrl);
 bool vnvme_intx_can_inject(bool asserted, u32 intms, bool injected, bool gic_enabled, int free_lr);
 bool vnvme_intx_delivery_can_inject(const struct vnvme_intx_delivery *delivery, bool asserted,
                                     u32 intms, bool gic_enabled, int free_lr);

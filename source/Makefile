@@ -56,7 +56,11 @@ QUIET :=
 endif
 endif
 
-BASE_CFLAGS := -O2 -Wall -g -Wundef -Werror=strict-prototypes -fno-common -fno-PIE \
+ifndef S1N_STAGE
+$(error S1N_STAGE=0,1,2,3 is required for this resident)
+endif
+
+BASE_CFLAGS := -DS1N_STAGE=$(S1N_STAGE) -O2 -Wall -g -Wundef -Werror=strict-prototypes -fno-common -fno-PIE \
 	-Werror=implicit-function-declaration -Werror=implicit-int \
 	-Wsign-compare -Wunused-parameter -Wno-multichar \
 	-ffreestanding -fpic -ffunction-sections -fdata-sections \
@@ -141,12 +145,14 @@ HV_OBJECTS := $(patsubst %,hv/%, \
 	win/hv_win_storage_mem.o \
 	win/hv_win_storage.o \
 	win/hv_win_storage_native.o \
+	win/hv_win_status.o \
 	win/s1/hv_nvme_queue.o \
 	win/s1/hv_nvme.o \
 	win/s1/hv_pci.o \
 	win/s1/ram_disk.o \
 	win/s1/ans_ro.o \
 	win/s1/native_window.o \
+	win/s1/native_link.o \
 	win/hv_win_psci.o \
 	win/hv_win_pl011.o \
 	win/hv_win_pmu.o \

@@ -108,7 +108,8 @@ HV_WIN_CAP_FB_SHADOW = 1 << 5
 HV_WIN_PMU_MAGIC = 0x504d5552          # "PMUR", P_HV_WIN_PMU_STATS(0) >> 32
 HV_WIN_PMU_STATS = ("id", "pages", "ranges", "tables", "scans", "pages_rewritten", "insns", "insns_pmccntr",
                     "insns_mrs", "insns_msr", "write_flips", "walk_flips", "pins", "pin_full", "sweeps",
-                    "unpins", "spurious", "ipa_fail", "not_ours", "stuck")   # src/hv/win/hv_win.h order
+                    "unpins", "spurious", "ipa_fail", "not_ours", "stuck",
+                    "dma_resets")   # src/hv/win/hv_win.h order (dma_resets: pmu-reads; ~0 on older residents)
 HV_WIN_PMU_LOG_SIZE = 256
 HV_WIN_PMU_STAT_LOG_IPA, HV_WIN_PMU_STAT_LOG_OP, HV_WIN_PMU_STAT_LOG_ELR = 0x100, 0x200, 0x300
 GIC_SPI_MIN, GIC_SPI_MAX = 32, 1019  # GICD_TYPER.ITLinesNumber 31 (hv_vgic3.c)
@@ -824,7 +825,8 @@ def report_pmu_rewrite(p, run_dir, record):
            f"{st['pages_rewritten']} pages rewritten, {st['insns']} words (PMCCNTR {st['insns_pmccntr']}, "
            f"other mrs {st['insns_mrs']}, msr {st['insns_msr']}); flips write {st['write_flips']} walker "
            f"{st['walk_flips']}; pinned {st['pins']} (list full {st['pin_full']}), sweeps {st['sweeps']}; "
-           f"spurious {st['spurious']}, AT failures {st['ipa_fail']}, not ours {st['not_ours']}, stuck {st['stuck']}")
+           f"spurious {st['spurious']}, AT failures {st['ipa_fail']}, not ours {st['not_ours']}, stuck {st['stuck']}; "
+           f"device refills {st['dma_resets'] if st['dma_resets'] != (1 << 64) - 1 else 'n/a'}")
     lines = [f"{k} {v}" for k, v in st.items() if k != "id"]
     first = max(0, st["insns"] - HV_WIN_PMU_LOG_SIZE)
     lines.append(f"last {st['insns'] - first} rewrite(s): seq IPA old new fetch-PC")

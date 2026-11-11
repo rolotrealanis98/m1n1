@@ -1,0 +1,660 @@
+--- a/src/exception.c
++++ b/src/exception.c
+@@ -6,6 +6,7 @@
+ #include "cpu_regs.h"
+ #include "gxf.h"
+ #include "iodev.h"
++#include "mcc.h"
+ #include "memory.h"
+ #include "uart.h"
+ #include "utils.h"
+@@ -228,8 +229,11 @@
+ 
+     u64 sts = mrs(SYS_IMP_APL_L2C_ERR_STS);
+     printf("L2C_ERR_STS: 0x%lx\n", sts);
+-    printf("L2C_ERR_ADR: 0x%lx\n", mrs(SYS_IMP_APL_L2C_ERR_ADR));
++    u64 l2c_adr = mrs(SYS_IMP_APL_L2C_ERR_ADR);
++    printf("L2C_ERR_ADR: 0x%lx\n", l2c_adr);
+     printf("L2C_ERR_INF: 0x%lx\n", mrs(SYS_IMP_APL_L2C_ERR_INF));
++    if (((esr >> 26) & 0x3f) == 0x2f && sts) /* smp2h: SError, name the region L2C_ERR_ADR hit */
++        mcc_describe_l2c_adr(l2c_adr);
+     if (cpu_features->apple_sysregs_unlocked) {
+         msr(SYS_IMP_APL_L2C_ERR_STS, sts);
+     }
+--- a/src/hv/win/hv_win_storage.c
++++ b/src/hv/win/hv_win_storage.c
+@@ -169,6 +169,7 @@
+     case 9:return ((u64)controller.regs.cc<<32)|controller.regs.csts;
+     case 10:return controller.external_irq;
+     case 11:return epoch;
++    case 12:return controller.queue.refused_reads; /* r4.6: nonterminal guest READ range errors */
+     default:return UINT64_MAX;
+     }
+ }
+--- a/src/hv/win/hv_win_storage_native.c
++++ b/src/hv/win/hv_win_storage_native.c
+@@ -66,6 +66,7 @@
+ 
+ s64 hv_win_storage_native_select(u64 data, u64 size)
+ {
++    if (!s1n_storage_context()) { ans_ro_abort(ANS_RO_E_CONTEXT); return -1; }
+     s1n_link_lock(); /* one-way even when select fails */
+     if (tried)
+         return -1;
+@@ -106,6 +107,7 @@
+  * never touched (returns -1: recover by platform reset). */
+ s64 hv_win_storage_native_quiesce(void)
+ {
++    if (!s1n_storage_context()) { ans_ro_abort(ANS_RO_E_CONTEXT); return -1; }
+     if (!selected)
+         return -1;
+     for (unsigned i = 0; i < NATIVE_MAX_CPUS; i++)
+--- a/src/hv/win/s1/ans_ro.c
++++ b/src/hv/win/s1/ans_ro.c
+@@ -31,6 +31,7 @@
+  *     shutdown (behaviour of aura nvme.c nvme_shutdown, T6050 path; own code). */
+ #include "ans_ro.h"
+ #include "native_window.h"
++#include "native_link.h"
+ #include "adt.h"
+ #include "asc.h"
+ #include "pmgr.h"
+@@ -56,8 +57,8 @@
+ 
+ #define NVME_TIMEOUT          1000000
+ /* r4: bounded but longer waits for data commands (ANS FLUSH is known to be slow) */
+-#define NVME_WRITE_TIMEOUT    5000000
+-#define NVME_FLUSH_TIMEOUT   10000000
++#define NVME_WRITE_TIMEOUT   30000000
++#define NVME_FLUSH_TIMEOUT   30000000
+ #define NVME_ENABLE_TIMEOUT   5000000
+ #define NVME_SHUTDOWN_TIMEOUT 5000000
+ /* r4.4 (= r3.5): the boot-time IOP power-ON wait is 10 s too (r4.3: 1 s). The quiesce's power
+@@ -178,7 +179,8 @@
+ _Static_assert(sizeof(dma.acpl) <= ANS_NVME_PAGE && sizeof(dma.acmd) <= ANS_NVME_PAGE, "one page per queue");
+ _Static_assert(ANS_XFER_BYTES / ANS_RO_BLOCK - 1 <= ANS_NVME_PAGE / sizeof(u64), "one PRP list page suffices");
+ 
+-static enum ans_ro_state state;
++static _Atomic enum ans_ro_state state;
++static bool session_frozen;
+ static struct ans_ro_stats st;
+ static u64 base, nvmmu;
+ static asc_dev_t *asc;
+@@ -193,6 +195,7 @@
+ static u64 sart_regs;
+ static u8 next_io_tag = ANS_IO_TAG;
+ static bool gpt_read_active;
++static bool exec_busy, recheck_active;
+ #if S1N_STAGE_WRITES
+ static bool first_write_checked;
+ #endif
+@@ -209,14 +212,17 @@
+ 
+ static void set_state(enum ans_ro_state s, enum ans_ro_reason r)
+ {
++    if (__atomic_load_n(&session_frozen, __ATOMIC_ACQUIRE)) s = ANS_RO_FROZEN;
+     state = s;
+     st.state = s;
+-    if (r && !st.reason)
+-        st.reason = r;
++    u32 no_reason = 0;
++    if (r) __atomic_compare_exchange_n(&st.reason, &no_reason, r, false,
++                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+ }
+ static void freeze(enum ans_ro_reason r)
+ {
+     /* No MMIO, no RTKit sleep, no CPU stop, no PMGR, no free: platform reset recovers. */
++    __atomic_store_n(&session_frozen, true, __ATOMIC_RELEASE);
+     set_state(ANS_RO_FROZEN, r);
+     printf("ans_ro: FROZEN (reason %u); no further ANS access until platform reset\n", r);
+ }
+@@ -399,13 +405,33 @@
+ }
+ 
+ /* The only submission path. Returns 0 ok, -1 NVMe status error (DMA settled), -2 frozen. */
++static int exec_owned(struct ans_queue *q, const struct ans_cmd *cmd);
+ static int exec(struct ans_queue *q, const struct ans_cmd *cmd)
++{
++    if (__atomic_test_and_set(&exec_busy, __ATOMIC_ACQUIRE)) {
++        freeze(ANS_RO_E_REENTRY);
++        return -2;
++    }
++    int rc;
++    if (!s1n_storage_context()) {
++        freeze(ANS_RO_E_CONTEXT);
++        rc = -2;
++    } else {
++        rc = exec_owned(q, cmd);
++    }
++    __atomic_clear(&exec_busy, __ATOMIC_RELEASE);
++    return rc;
++}
++
++/* Private ownership path: only the owner may perform the first-write GPT reads and
++ * rebuild the pending command. Public/nested submissions always enter exec(). */
++static int exec_owned(struct ans_queue *q, const struct ans_cmd *cmd)
+ {
+     if (state != ANS_RO_LIVE && !(state == ANS_RO_OFF && q->admin))
+         return -2;
+     if (!allowed(q->admin, cmd->opcode)) {
+-        set_state(state, ANS_RO_E_NOT_ALLOWED);
+-        return -1;
++        freeze(ANS_RO_E_NOT_ALLOWED);
++        return -2;
+     }
+     if (st.commands != st.cmd_admin + st.cmd_reads + st.cmd_writes + st.cmd_flushes ||
+         st.io_submitted != st.io_completed) {
+@@ -415,6 +441,7 @@
+ 
+     /* M2: no mailbox or external callback after the slot is filled and checked. */
+     if (!drain()) return -2;
++    if (__atomic_load_n(&session_frozen, __ATOMIC_ACQUIRE)) return -2;
+     dc_ivac_range(&q->cqes[q->head], sizeof(struct ans_cpl));
+     sysop("dsb sy"); /* complete cache maintenance before DMA/CPU access */
+     dma_rmb();
+@@ -467,7 +494,10 @@
+ #if S1N_STAGE_WRITES
+     if (!q->admin && cmd->opcode == OP_WRITE && !first_write_checked) {
+         memcpy(recheck_saved, dma.xfer, sizeof(recheck_saved));
++        recheck_active = true;
+         bool ok = s1n_recheck_before_write();
++        recheck_active = false;
++        if (state == ANS_RO_FROZEN) return -2;
+         memcpy(dma.xfer, recheck_saved, sizeof(recheck_saved));
+         dc_civac_range(dma.xfer, sizeof(dma.xfer));
+         memset(recheck_saved, 0, sizeof(recheck_saved));
+@@ -476,7 +506,7 @@
+             return -2;
+         }
+         first_write_checked = true;
+-        return exec(q, cmd); /* refill, clean and revalidate after the GPT reads */
++        return exec_owned(q, cmd); /* refill, clean and revalidate under the same guard */
+     }
+ #endif
+     if (!q->admin && slot->opcode == OP_FLUSH && st.cmd_flushes >= S1N_FLUSH_CAP) {
+@@ -492,6 +522,7 @@
+         st.ans_writes++;
+     }
+ #endif
++    if (__atomic_load_n(&session_frozen, __ATOMIC_ACQUIRE)) return -2;
+     st.commands++;
+     if (q->admin) st.cmd_admin++;
+     else {
+@@ -515,7 +546,7 @@
+             freeze(ANS_RO_E_CMD_TIMEOUT);
+             return -2;
+         }
+-        if (!drain())
++        if (!drain() || __atomic_load_n(&session_frozen, __ATOMIC_ACQUIRE))
+             return -2;
+         dc_ivac_range(&q->cqes[q->head], sizeof(cqe));
+         sysop("dsb sy"); /* complete cache maintenance before DMA/CPU access */
+@@ -642,6 +673,7 @@
+ 
+ bool ans_ro_init(void)
+ {
++    if (!s1n_storage_context()) { freeze(ANS_RO_E_CONTEXT); return false; }
+     if (state != ANS_RO_OFF)
+         return false;
+     st.lowest_written = UINT64_MAX;
+@@ -802,7 +834,25 @@
+ /* r4: one ANS READ or WRITE of `blocks` (<= max_xfer) at absolute `lba`, DMA to/from
+  * dma.xfer + offset only. The SQE/TCB are authored here from validated values, and precheck()
+  * re-validates them against the window right before the doorbell. */
++static bool xfer_owned(bool write, u64 lba, u32 blocks, u64 offset, bool recheck);
++bool ans_ro_access_ok(void)
++{
++    if (__atomic_load_n(&exec_busy, __ATOMIC_ACQUIRE)) {
++        freeze(ANS_RO_E_REENTRY);
++        return false;
++    }
++    if (!s1n_storage_context()) {
++        freeze(ANS_RO_E_CONTEXT);
++        return false;
++    }
++    return !__atomic_load_n(&session_frozen, __ATOMIC_ACQUIRE);
++}
+ bool ans_ro_xfer(bool write, u64 lba, u32 blocks, u64 offset)
++{
++    if (!ans_ro_access_ok()) return false;
++    return xfer_owned(write, lba, blocks, offset, false);
++}
++static bool xfer_owned(bool write, u64 lba, u32 blocks, u64 offset, bool recheck)
+ {
+     if (state != ANS_RO_LIVE) return false;
+     u64 bytes = (u64)blocks * ANS_RO_BLOCK;
+@@ -846,7 +896,7 @@
+         dc_civac_range(buf, bytes);
+     }
+     dma_wmb();
+-    int rc = exec(&ioq, &cmd);
++    int rc = recheck ? exec_owned(&ioq, &cmd) : exec(&ioq, &cmd);
+     if (rc) {
+         if (write) st.write_errors++; else st.read_errors++;
+         return false;
+@@ -864,6 +914,7 @@
+ 
+ bool ans_ro_flush(void)
+ {
++    if (!ans_ro_access_ok()) return false;
+     if (state != ANS_RO_LIVE || !rw_enabled)
+         return false;
+     struct ans_cmd cmd;
+@@ -880,6 +931,7 @@
+ 
+ bool ans_ro_set_window(bool rw, u32 max_blocks)
+ {
++    if (!ans_ro_access_ok()) return false;
+     if (state != ANS_RO_LIVE || window_set || st.nsze != S1N_PIN_NSZE ||
+         !max_blocks || max_blocks > ANS_XFER_BYTES / ANS_RO_BLOCK)
+         return false;
+@@ -891,9 +943,17 @@
+ 
+ bool ans_ro_read_gpt(u64 lba, void *out)
+ {
++    if (!s1n_storage_context()) { freeze(ANS_RO_E_CONTEXT); return false; }
++    if (gpt_read_active) { freeze(ANS_RO_E_REENTRY); return false; }
+     if (!gpt_lba(lba, 1) || gpt_read_active) return false;
+     gpt_read_active = true;
+-    bool ok = ans_ro_read_block(lba, out);
++    bool ok;
++    if (recheck_active && s1n_storage_context()) {
++        ok = out && xfer_owned(false, lba, 1, 0, true);
++        if (ok) memcpy(out, dma.xfer, ANS_RO_BLOCK);
++    } else {
++        ok = ans_ro_read_block(lba, out);
++    }
+     gpt_read_active = false;
+     return ok;
+ }
+@@ -901,7 +961,9 @@
+ /* Only this routine can open the write gate in stages 1/2. One shot even on failure. */
+ bool ans_ro_run_canary(void)
+ {
++    if (!ans_ro_access_ok()) return false;
+ #if S1N_STAGE_CANARY
++    if (!s1n_canary_context()) { freeze(ANS_RO_E_CONTEXT); return false; }
+     if (canary_tried || !window_set || !rw_enabled || state != ANS_RO_LIVE) return false;
+     canary_tried = true;
+     canary_running = true;
+@@ -914,6 +976,15 @@
+             if (!ans_ro_xfer(false, lba + i, k, (u64)i * ANS_RO_BLOCK)) goto fail;
+         }
+         memcpy(canary_saved, dma.xfer, sizeof(canary_saved));
++        /* Verify every saved byte before the first write to this chunk. */
++        for (u32 i = 0; i < n; i += max_xfer) {
++            u32 k = n - i < max_xfer ? n - i : max_xfer;
++            if (!ans_ro_xfer(false, lba + i, k, (u64)i * ANS_RO_BLOCK)) goto fail;
++        }
++        if (memcmp(canary_saved, dma.xfer, sizeof(canary_saved))) {
++            freeze(ANS_RO_E_CANARY);
++            goto fail;
++        }
+         for (u32 i = 0; i < sizeof(canary_pattern); i++)
+             canary_pattern[i] = (u8)((lba + i / ANS_RO_BLOCK) * 31 + i * 13 + 0x5a);
+         for (unsigned pass = 0; pass < 2; pass++) {
+@@ -955,6 +1026,7 @@
+ 
+ void *ans_ro_xfer_buffer(size_t *capacity)
+ {
++    if (!ans_ro_access_ok()) { *capacity = 0; return NULL; }
+     *capacity = sizeof(dma.xfer);
+     return dma.xfer;
+ }
+@@ -977,6 +1049,7 @@
+ 
+ void ans_ro_poll(void)
+ {
++    if (!ans_ro_access_ok()) return;
+     if (state != ANS_RO_LIVE)
+         return;
+     st.polls++;
+@@ -985,6 +1058,7 @@
+ 
+ bool ans_ro_shutdown(void)
+ {
++    if (!ans_ro_access_ok()) return false;
+     if (state != ANS_RO_LIVE)
+         return false;
+     /* Exactly the stage-1 nvme_shutdown() order. Command failures are recorded but, as in
+--- a/src/hv/win/s1/ans_ro.h
++++ b/src/hv/win/s1/ans_ro.h
+@@ -45,6 +45,8 @@
+     ANS_RO_E_CQE,       /* 26: duplicate or unexpected completion (CQE valid before submit / after consume) */
+     ANS_RO_E_COUNTER,   /* 27: session counters inconsistent (submitted/completed/by type/canary totals) */
+     ANS_RO_E_CANARY,    /* 28: W1/W2 canary procedure: read-back mismatch or GPT changed before first write */
++    ANS_RO_E_REENTRY,   /* 29: concurrent or nested command submission */
++    ANS_RO_E_CONTEXT,   /* 30: not boot CPU, or exception/bark proxy */
+ };
+ 
+ struct ans_ro_stats {
+@@ -74,6 +76,7 @@
+ 
+ /* Bring ANS up from the stopped stage-1 handoff. One shot. Returns false on refusal or
+  * freeze; ans_ro_state() distinguishes the two. */
++bool ans_ro_access_ok(void);
+ bool ans_ro_init(void);
+ /* Read exactly one 4 KiB block of NSID 1 into the private bounce and copy it to out.
+  * Returns false on error; uncertain DMA freezes the driver. */
+--- a/src/hv/win/s1/hv_nvme_queue.c
++++ b/src/hv/win/s1/hv_nvme_queue.c
+@@ -628,7 +628,10 @@
+     if ((cmd->cdw12 & ~write_cdw12_ok) || (cmd->cdw13 & 0xffffff00u))
+         return VNVME_SC_INVALID_FIELD;
+     u32 blocks = (cmd->cdw12 & 0xffff) + 1;
+-    if (blocks > ctrl->caps.max_blocks) return VNVME_SC_INVALID_FIELD;
++    if (blocks > ctrl->caps.max_blocks) {
++        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
++        return VNVME_SC_INVALID_FIELD;
++    }
+     u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
+     if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) {
+         if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
+@@ -640,8 +643,14 @@
+     if (!plan_prps_dir(ctrl, cmd, total, &plan, capacity, false)) return VNVME_SC_DATA_TRANSFER_ERROR;
+     if (!ctrl->ops->write_blocks) return VNVME_SC_INTERNAL;
+     copy_from_plan(&plan, buffer);
+-    if (!ctrl->ops->write_blocks(ctrl->opaque, lba, blocks, buffer))
+-        return VNVME_SC_INTERNAL;
++    for (u32 done = 0; done < blocks;) {
++        u32 n = blocks - done;
++        if (n > 32) n = 32;
++        if (!ctrl->ops->write_blocks(ctrl->opaque, lba + done, n,
++                                     buffer + (size_t)done * VNVME_LBA_SIZE))
++            return VNVME_SC_INTERNAL;
++        done += n;
++    }
+     ctrl->backend_writes++;
+     if ((cmd->cdw12 & BIT(30)) || !ctrl->wce) {
+         ctrl->fua_flushes++; /* FUA or write-through (WCE=0): write then flush */
+@@ -666,8 +675,9 @@
+     if (cmd->opcode == VNVME_IO_WRITE && !ctrl->caps.writable) {
+         u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
+         u32 blocks = (cmd->cdw12 & 0xffff) + 1;
+-        if ((lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) && ctrl->ops->abort)
+-            ctrl->ops->abort(ctrl->opaque);
++        (void)lba;
++        (void)blocks;
++        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
+     }
+     if (cmd->opcode == VNVME_IO_WRITE)
+         return ctrl->caps.writable ? process_write(ctrl, cmd) : VNVME_SC_NS_WRITE_PROTECTED;
+@@ -677,9 +687,12 @@
+     if ((cmd->cdw12 & ~(0xffffu | BIT(30) | BIT(31))) || (cmd->cdw13 & 0xffffff00u))
+         return VNVME_SC_INVALID_FIELD;
+     u32 blocks = (cmd->cdw12 & 0xffff) + 1;
+-    if (blocks > ctrl->caps.max_blocks) return VNVME_SC_INVALID_FIELD;
+     u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
+     if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) {
++        ctrl->refused_reads++;
++        return VNVME_SC_INVALID_FIELD;
++    }
++    if (blocks > ctrl->caps.max_blocks) {
+         if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);
+         return VNVME_SC_INVALID_FIELD;
+     }
+@@ -687,9 +700,18 @@
+     u8 *buffer = data_buffer(ctrl, &capacity);
+     static struct prp_plan plan; /* r4: 257-entry plan, static (single-threaded under bhl) */
+     if (!plan_prps_dir(ctrl, cmd, total, &plan, capacity, true)) return VNVME_SC_DATA_TRANSFER_ERROR;
+-    if (!ctrl->ops->read_blocks || !ctrl->ops->read_blocks(ctrl->opaque, lba, blocks, buffer))
+-        return VNVME_SC_INTERNAL;
+-    copy_to_plan(&plan, buffer);
++    static u8 read_result[256 * VNVME_LBA_SIZE];
++    if (!ctrl->ops->read_blocks) return VNVME_SC_INTERNAL;
++    for (u32 done = 0; done < blocks;) {
++        u32 n = blocks - done;
++        if (n > 32) n = 32;
++        if (!ctrl->ops->read_blocks(ctrl->opaque, lba + done, n, buffer))
++            return VNVME_SC_INTERNAL;
++        memcpy(read_result + (size_t)done * VNVME_LBA_SIZE, buffer,
++               (size_t)n * VNVME_LBA_SIZE);
++        done += n;
++    }
++    copy_to_plan(&plan, read_result);
+     return VNVME_SC_SUCCESS;
+ }
+ 
+--- a/src/hv/win/s1/hv_nvme_queue.h
++++ b/src/hv/win/s1/hv_nvme_queue.h
+@@ -238,6 +238,7 @@
+     /* r4: capabilities and Set Features VWC state (fits in the padding before bounce). */
+     struct vnvme_caps caps;
+     bool wce;
++    u64 refused_reads; /* guest past-end READ: nonterminal, no backend I/O */
+     u64 backend_writes, backend_flushes, fua_flushes;
+     u8 bounce[VNVME_MAX_BLOCKS * VNVME_LBA_SIZE] ALIGNED(VNVME_PAGE_SIZE);
+ };
+--- a/src/hv/win/s1/native_link.c
++++ b/src/hv/win/s1/native_link.c
+@@ -2,9 +2,26 @@
+ #include "native_link.h"
+ #include "s1_stage.h"
+ #include "proxy.h"
++#ifndef ANS_RO_HOST_TEST
++#include "smp.h"
++#include "uartproxy.h"
++#else
++int s1n_test_cpu;
++bool s1n_test_exception;
++#endif
+ 
+ static bool locked, prep_used, start_used;
+ static u64 refusals;
++bool s1n_storage_context(void)
++{
++#ifdef ANS_RO_HOST_TEST
++    return s1n_test_cpu == 0 && !s1n_test_exception;
++#else
++    return smp_id() == boot_cpu_idx &&
++           !__atomic_load_n(&uartproxy_storage_exceptions, __ATOMIC_ACQUIRE);
++#endif
++}
++bool s1n_canary_context(void) { return s1n_storage_context() && !start_used; }
+ void s1n_link_lock(void) { locked = true; }
+ bool s1n_link_locked(void) { return locked; }
+ u64 s1n_link_refusals(void) { return refusals; }
+@@ -16,6 +33,18 @@
+ }
+ bool s1n_link_proxy(u64 opcode, bool guest_exception)
+ {
++    switch (opcode) {
++    case P_HV_START:
++    case P_HV_WIN_STORAGE_NATIVE:
++    case P_HV_WIN_STORAGE_NATIVE_QUIESCE:
++    case P_HV_WIN_STORAGE_NATIVE_CANARY:
++    case P_HV_WIN_STORAGE_NATIVE_STAT:
++    case P_HV_WIN_STORAGE_STAT:
++    case P_HV_WIN_STORAGE_PREP:
++        if (guest_exception || !s1n_storage_context()) { refusals++; return false; }
++        break;
++    default: break;
++    }
+     if (!locked) return true;
+     switch (opcode) {
+     case P_NOP:
+@@ -35,7 +64,8 @@
+         break;
+ #if S1N_STAGE_CANARY
+     case P_HV_WIN_STORAGE_NATIVE_CANARY:
+-        return true;
++        if (!guest_exception && s1n_canary_context()) return true;
++        break;
+ #endif
+     case P_EXIT:
+         if (guest_exception) return true;
+--- a/src/hv/win/s1/native_link.h
++++ b/src/hv/win/s1/native_link.h
+@@ -2,6 +2,8 @@
+ #ifndef S1_NATIVE_LINK_H
+ #define S1_NATIVE_LINK_H
+ #include "types.h"
++bool s1n_storage_context(void);
++bool s1n_canary_context(void);
+ void s1n_link_lock(void);
+ bool s1n_link_locked(void);
+ u64 s1n_link_refusals(void);
+--- a/src/hv/win/s1/native_window.c
++++ b/src/hv/win/s1/native_window.c
+@@ -244,6 +244,7 @@
+         return false;
+     size_t cap;
+     void *x = ans_ro_xfer_buffer(&cap);
++    if (!x || cap < (u64)blocks * SECTOR) return false;
+     if (out != x)
+         memcpy(out, x, (u64)blocks * SECTOR);
+     st.reads += blocks;
+@@ -260,6 +261,7 @@
+     }
+     size_t cap;
+     void *x = ans_ro_xfer_buffer(&cap);
++    if (!x || cap < (u64)blocks * SECTOR) return false;
+     if (data != x)
+         memcpy(x, data, (u64)blocks * SECTOR);
+     if (!transfer(true, lba, blocks))
+--- a/src/mcc.c
++++ b/src/mcc.c
+@@ -233,10 +233,96 @@
+     return ret;
+ }
+ 
++/*
++ * smp2h: T6050 has no MCC driver here ("MCC: Unsupported version:mcc,t6050"), so the register path
++ * below never ran and the TZ carveouts stayed in m1n1's Normal-cacheable identity map of all DRAM.
++ * Every EL2 SError seen on this machine (ESR 0xbe000000, L2C_ERR_STS 0x82 = access fault) had
++ * L2C_ERR_ADR[41:0] inside region-id-2 (serror-20261110/ANALYSIS.md). Upstream unmaps the TZ
++ * carveouts for exactly this reason (72788291: "safe from SErrors caused by hitting TZ carveouts"),
++ * and for SoCs without TZ registers takes them from the ADT (d34014b1, region-id-4 and region-id-2).
++ * This is that ADT path, run when the MCC is not initialised on T6050.
++ */
++static const char *const mcc_adt_tz_names[] = {"region-id-4", "region-id-2"};
++
++static int mcc_unmap_adt_tz(void)
++{
++    int node = adt_path_offset(adt, "/chosen/carveout-memory-map");
++
++    if (node < 0) {
++        printf("MMU: no /chosen/carveout-memory-map, TZ carveouts stay mapped\n");
++        return -1;
++    }
++    if (mem_size_actual > (u64)-1 - ram_base)
++        return -1;
++    for (size_t i = 0; i < ARRAY_SIZE(mcc_adt_tz_names); i++) {
++        u32 len;
++        const u64 *range = adt_getprop(adt, node, mcc_adt_tz_names[i], &len);
++        u64 start, size;
++
++        if (!range || len != 2 * sizeof(u64)) {
++            printf("MMU: %s missing, left mapped\n", mcc_adt_tz_names[i]);
++            continue;
++        }
++        memcpy(&start, range, sizeof(start));
++        memcpy(&size, range + 1, sizeof(size));
++        if (!size || start < ram_base || start > (u64)-1 - size ||
++            start + size > ram_base + mem_size_actual || ((start | size) & (get_page_size() - 1)) ||
++            mcc_carveout_count >= ARRAY_SIZE(mcc_carveouts) - 1) {
++            printf("MMU: %s bad bounds 0x%lx+0x%lx, left mapped\n", mcc_adt_tz_names[i], start,
++                   size);
++            continue;
++        }
++        printf("MMU: Unmapping %s (TZ, ADT) at 0x%lx..0x%lx\n", mcc_adt_tz_names[i], start,
++               start + size);
++        mmu_rm_mapping(start, size);
++        mmu_rm_mapping(start | REGION_RWX_EL0, size);
++        mmu_rm_mapping(start | REGION_RW_EL0, size);
++        mmu_rm_mapping(start | REGION_RX_EL1, size);
++        mcc_carveouts[mcc_carveout_count].base = start;
++        mcc_carveouts[mcc_carveout_count].size = size;
++        mcc_carveout_count++;
++    }
++    return 0;
++}
++
++/* smp2h: SError diagnostic. Name the ADT carveout holding an L2C_ERR_ADR (PA = bits [41:0]). */
++void mcc_describe_l2c_adr(u64 adr)
++{
++    u64 pa = adr & GENMASK(41, 0);
++    int node = adt ? adt_path_offset(adt, "/chosen/carveout-memory-map") : -1;
++    const char *hit = NULL;
++
++    for (size_t i = 0; i < mcc_carveout_count; i++)
++        if (pa >= mcc_carveouts[i].base && pa - mcc_carveouts[i].base < mcc_carveouts[i].size)
++            printf("L2C_ERR_ADR PA 0x%lx is in an unmapped TZ carveout (0x%lx+0x%lx)\n", pa,
++                   mcc_carveouts[i].base, mcc_carveouts[i].size);
++    if (node < 0)
++        return;
++    ADT_FOREACH_PROPERTY(adt, node, prop)
++    {
++        if (prop->size != 2 * sizeof(u64) || strncmp(prop->name, "region-id-", 10))
++            continue;
++        u64 r[2];
++        memcpy(r, prop->value, sizeof(r));
++        if (pa >= r[0] && pa - r[0] < r[1]) {
++            hit = prop->name;
++            printf("L2C_ERR_ADR PA 0x%lx: %s 0x%lx..0x%lx\n", pa, hit, r[0], r[0] + r[1]);
++        }
++    }
++    if (!hit)
++        printf("L2C_ERR_ADR PA 0x%lx: in no carveout-memory-map region\n", pa);
++}
++
+ int mcc_unmap_carveouts(void)
+ {
+-    if (!mcc_initialized)
+-        return -1;
++    if (!mcc_initialized) {
++        if (chip_id == T6050) {
++            mcc_carveout_count = 0;
++            memset(mcc_carveouts, 0, sizeof mcc_carveouts);
++            return mcc_unmap_adt_tz();
++        }
++        return -1;
++    }
+ 
+     mcc_carveout_count = 0;
+     memset(mcc_carveouts, 0, sizeof mcc_carveouts);
+--- a/src/mcc.h
++++ b/src/mcc.h
+@@ -16,5 +16,6 @@
+ int mcc_init(void);
+ int mcc_unmap_carveouts(void);
+ int mcc_enable_cache(void);
++void mcc_describe_l2c_adr(u64 adr); /* smp2h SError diagnostic */
+ 
+ #endif
+--- a/src/uartproxy.c
++++ b/src/uartproxy.c
+@@ -123,12 +123,23 @@
+ 
+ iodev_id_t uartproxy_iodev;
+ bool uartproxy_guest_exception;
++u32 uartproxy_storage_exceptions;
+ static ssize_t discard_read(void *buf, size_t n)
+ {
+     return iodev_read(uartproxy_iodev, buf, n);
+ }
+ 
++static int uartproxy_run_inner(struct uartproxy_msg_start *start);
+ int uartproxy_run(struct uartproxy_msg_start *start)
++{
++    bool exception = start && start->reason != START_BOOT;
++    if (exception) __atomic_add_fetch(&uartproxy_storage_exceptions, 1, __ATOMIC_ACQ_REL);
++    int ret = uartproxy_run_inner(start);
++    if (exception) __atomic_sub_fetch(&uartproxy_storage_exceptions, 1, __ATOMIC_ACQ_REL);
++    return ret;
++}
++
++static int uartproxy_run_inner(struct uartproxy_msg_start *start)
+ {
+     int ret;
+     int running = 1;
+--- a/src/uartproxy.h
++++ b/src/uartproxy.h
+@@ -7,6 +7,7 @@
+ 
+ extern iodev_id_t uartproxy_iodev;
+ extern bool uartproxy_guest_exception;
++extern u32 uartproxy_storage_exceptions;
+ 
+ typedef enum _uartproxy_start_reason_t {
+     START_BOOT,
