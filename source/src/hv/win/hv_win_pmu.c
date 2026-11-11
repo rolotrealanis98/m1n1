@@ -156,6 +156,7 @@ static struct pmu_storm {
     u64 tick;   /* storm_clock at its last pin */
     u16 pins;   /* pins in a row, each within PMU_STORM_GAP sweeps of the previous */
     u16 sticky; /* sweeps it still survives */
+    u64 swept;  /* sweep number that last counted it (a block can sit in the pin list twice) */
     bool logged;
 } storm[PMU_STORM_SLOTS];
 static u32 storm_printed;
@@ -226,13 +227,17 @@ static void pmu_sweep(void)
 {
     u32 kept = 0;
     bool changed = false;
+    u64 sweep = pmu.stats[HV_WIN_PMU_SWEEPS] + 1;
     for (u32 i = 0; i < pmu.nr_pinned; i++) {
         u64 page = pmu.pinned[i];
         if (hv_xt_get(page, NULL, NULL) != HV_XT_PINNED)
             continue;
         struct pmu_storm *e = pmu_storm_slot(page, false);
+        if (e && e->swept == sweep)
+            continue; /* a second list entry of a block kept above: counted once, listed once */
         if (e && e->sticky) {
             e->sticky--;
+            e->swept = sweep;
             pmu.pinned[kept++] = page;
             continue;
         }
