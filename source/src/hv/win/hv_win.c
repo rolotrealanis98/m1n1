@@ -631,10 +631,69 @@ static void hv_win_cpu_state_log(void)
  */
 #define PSCI_ENTRY_SCTLR_EL1 0x30d00800UL
 
+/*
+ * nightly-6d PMU UNDEF catcher (hv_win_pmu.c): trap the guest's EL1 reads of ESR_EL1 and FAR_EL1 on this
+ * CPU (FEAT_FGT HFGRTR_EL2 bits 16 and 17, positive polarity). Only while the 4 KiB mode is armed; the
+ * bits are read back, so a CPU on which they do not stick reports UNAVAILABLE once. reset: after a CPU
+ * (re)start, whose EL2 registers may be new. Otherwise a cheap re-check (one mrs) that re-arms if lost.
+ */
+#define HFGRTR_ESR_EL1 BIT(16)
+#define HFGRTR_FAR_EL1 BIT(17)
+#define HFGRTR_CATCH   (HFGRTR_ESR_EL1 | HFGRTR_FAR_EL1)
+static s8 hv_win_catch_state[MAX_CPUS]; /* 0 not tried, 1 armed, -1 unavailable */
+
+void hv_win_pmu_catch_cpu(bool reset)
+{
+    int cpu = smp_id();
+    if (reset)
+        hv_win_catch_state[cpu] = 0;
+    if (hv_win_catch_state[cpu] < 0 || !hv_win_pmu_catch_wanted(0))
+        return;
+    if (!FIELD_GET(ID_AA64MMFR0_FGT, mrs(ID_AA64MMFR0_EL1))) {
+        hv_win_catch_state[cpu] = -1;
+        hv_win_pmu_catch_note(false, 0);
+        return;
+    }
+    u64 v = mrs(SYS_HFGRTR_EL2); /* readable on the T6050 (hv_win_cpu_state_log prints it) */
+    if (hv_win_catch_state[cpu] > 0 && (v & HFGRTR_CATCH) == HFGRTR_CATCH)
+        return;
+    /* the first write on a CPU is guarded (a fault leaves the read-back without both bits) */
+    bool first = !hv_win_catch_state[cpu];
+    if (first)
+        exc_guard = GUARD_MARK | GUARD_SILENT;
+    msr(SYS_HFGRTR_EL2, v | HFGRTR_CATCH);
+    sysop("isb");
+    v = mrs(SYS_HFGRTR_EL2);
+    sysop("isb");
+    if (first)
+        exc_guard = GUARD_OFF;
+    bool ok = (v & HFGRTR_CATCH) == HFGRTR_CATCH;
+    hv_win_catch_state[cpu] = ok ? 1 : -1;
+    hv_win_pmu_catch_note(ok, v);
+}
+
+/* hv_exc.c locked MSR path: the EC 0 ESR_EL1/FAR_EL1 reads hv_win_handle_msr() passed on */
+bool hv_win_handle_msr_locked(struct exc_info *ctx, u64 iss)
+{
+    if (!hv_win_enabled() || !(iss & ESR_ISS_MSR_DIR))
+        return false;
+    u64 reg = iss & (ESR_ISS_MSR_OP0 | ESR_ISS_MSR_OP2 | ESR_ISS_MSR_OP1 | ESR_ISS_MSR_CRn |
+                     ESR_ISS_MSR_CRm);
+    if (reg != SYSREG_ISS(SYS_ESR_EL1) && reg != SYSREG_ISS(SYS_FAR_EL1))
+        return false;
+    u64 rt = FIELD_GET(ESR_ISS_MSR_Rt, iss);
+    u64 v = hv_win_pmu_el1_read(ctx, reg == SYSREG_ISS(SYS_FAR_EL1));
+    if (rt != 31)
+        ctx->regs[rt] = v;
+    return true;
+}
+
 void hv_win_cpu_init(void)
 {
     if (!hv_win_enabled())
         return;
+
+    hv_win_pmu_catch_cpu(true); /* nightly-6d: a no-op until the 4 KiB PMU mode is armed */
 
     hv_win_pmu_traps_init();
     hv_win_perf_cpu_apply(); /* perf-exits: a no-op unless P_HV_WIN_PERF set mdscr-pass */
@@ -841,6 +900,17 @@ bool hv_win_handle_msr(struct exc_info *ctx, u64 iss)
     if (hv_win_is_pmu_reg(FIELD_GET(ESR_ISS_MSR_OP0, iss), FIELD_GET(ESR_ISS_MSR_OP1, iss),
                           FIELD_GET(ESR_ISS_MSR_CRn, iss), crm)) {
         hv_win_pmu_access(ctx, reg, rt, is_read, val);
+        return true;
+    }
+
+    /* nightly-6d PMU UNDEF catcher: ESR_EL1/FAR_EL1 reads trap (HFGRTR_EL2) while the 4 KiB mode is armed.
+     * Everything but an EC 0 (UNDEF) ESR is answered here, lock-free; EC 0 goes to the locked path. */
+    if (is_read && (reg == SYSREG_ISS(SYS_ESR_EL1) || reg == SYSREG_ISS(SYS_FAR_EL1))) {
+        u64 esr1 = mrs(SYS_ESR_EL12);
+        if (hv_win_pmu_catch_wanted(esr1))
+            return false;
+        if (rt != 31)
+            ctx->regs[rt] = reg == SYSREG_ISS(SYS_ESR_EL1) ? esr1 : mrs(SYS_FAR_EL12);
         return true;
     }
 

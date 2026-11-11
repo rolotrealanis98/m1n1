@@ -320,6 +320,13 @@ enum hv_win_pmu_stat {
     HV_WIN_PMU_EXEC_DENIED,         /* 4 KiB: of those, frame not proven (block opened unscanned) */
     HV_WIN_PMU_REPROTECTS,          /* 4 KiB: CODE blocks with an unscanned frame re-protected */
     HV_WIN_PMU_STORMS,              /* nightly-7: blocks made sticky by the storm guard (write/execute ping-pong) */
+    /* nightly-6d UNDEF catcher (4 KiB mode; hv_win_pmu.c "UNDEF catcher") */
+    HV_WIN_PMU_CATCHES,             /* PMU UNDEFs caught at the guest's ESR/FAR read: frame scanned, retried */
+    HV_WIN_PMU_CATCH_SKIPS,         /* EC 0 reads not caught: not a tracked PMU word / not provably executed */
+    HV_WIN_PMU_CATCH_PASSIVE,       /* EC 0 reads outside the OS (firmware, boot applications): left alone */
+    HV_WIN_PMU_CATCH_LOOPS,         /* same PC caught again and again on one CPU: handed to the guest */
+    HV_WIN_PMU_CATCH_CPUS,          /* CPUs on which the FGT ESR/FAR read trap was armed (incl. re-arms) */
+    HV_WIN_PMU_CATCH_UNAVAIL,       /* CPUs on which it could not be armed (no FGT, bits read back 0) */
     HV_WIN_PMU_NR_STATS,
 };
 #define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */
@@ -341,6 +348,18 @@ u64 hv_win_pmu_stat(u64 idx);
 bool hv_win_handle_iabort(struct exc_info *ctx);          /* true: re-execute the instruction */
 bool hv_win_handle_dabort(struct exc_info *ctx, u64 esr); /* true: re-execute the access */
 void hv_win_pmu_tick(void);                               /* hv_tick(), under the big HV lock */
+void hv_win_pmu_diag(const struct exc_info *ctx);          /* locked, before exit handling */
+/* nightly-6d UNDEF catcher. The guest's EL1 reads of ESR_EL1/FAR_EL1 trap to EL2 (HFGRTR_EL2) while the
+ * 4 KiB mode is armed. Lock-free: is the catcher on, and does this ESR value need the locked path? */
+#define HV_WIN_PMU_CATCH_STATS 1 /* the HV_WIN_PMU_CATCH* stats exist (host tests build against older trees) */
+bool hv_win_pmu_catch_wanted(u64 esr_el1);
+/* Locked: the value of ESR_EL1 (far = false) or FAR_EL1 the trapped read returns; may first scan the
+ * frame of a PMU UNDEF and turn the pending exception into a translation fault the guest retries */
+u64 hv_win_pmu_el1_read(struct exc_info *ctx, bool far);
+/* hv_win.c: arm (or re-check) the trap on this CPU; reset after a CPU (re)start. Report from it: */
+void hv_win_pmu_catch_cpu(bool reset);
+void hv_win_pmu_catch_note(bool ok, u64 hfgrtr);
+bool hv_win_handle_msr_locked(struct exc_info *ctx, u64 iss); /* hv_exc.c locked MSR path */
 void hv_win_pmu_report(void);                             /* printf summary (guest exit) */
 /* EL2 is about to store into guest RAM for a device (DMA write): re-arm the scan of what the range
  * touches (hv_win_pmu.c). Under the big HV lock, before the copy. Returns pages whose X was revoked. */

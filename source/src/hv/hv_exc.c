@@ -1615,6 +1615,7 @@ static bool hv_exc_sync_body(struct exc_info *ctx)
 
     hv_exc_entry();
 
+    hv_win_pmu_diag(ctx);
     bool protect_elr = false;
 
     switch (ec) {
@@ -1629,7 +1630,9 @@ static bool hv_exc_sync_body(struct exc_info *ctx)
             break;
         case ESR_EC_MSR:
             hv_wdt_breadcrumb('M');
-            handled = hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));
+            /* nightly-6d: the PMU UNDEF catcher's ESR_EL1/FAR_EL1 reads (EC 0) need the big HV lock */
+            handled = hv_win_handle_msr_locked(ctx, FIELD_GET(ESR_ISS, ctx->esr)) ||
+                      hv_handle_msr(ctx, FIELD_GET(ESR_ISS, ctx->esr));
             break;
         case ESR_EC_SMC:
             /* SMCCC/PSCI over SMC (only trapped when HV_WIN_F_PSCI_SMC set HCR_EL2.TSC) */
@@ -2078,7 +2081,11 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
         {HV_WIN_PMU_WORDS_SKIP_EXEC, "skexec"}, {HV_WIN_PMU_WORDS_SKIP_BOUNDARY, "skbnd"},
         {HV_WIN_PMU_WORDS_SKIP_OTHER, "skother"}, {HV_WIN_PMU_MODIFIED_NEVER_EXECUTED, "MNE"},
         {HV_WIN_PMU_EXEC_FAULTS, "xflt"}, {HV_WIN_PMU_EXEC_DENIED, "xunproven"},
-        {HV_WIN_PMU_REPROTECTS, "reprot"}, {HV_WIN_PMU_PIN_FULL, "pinfull"}, {HV_WIN_PMU_STORMS, "storm"}};
+        {HV_WIN_PMU_REPROTECTS, "reprot"}, {HV_WIN_PMU_PIN_FULL, "pinfull"}, {HV_WIN_PMU_STORMS, "storm"},
+        {HV_WIN_PMU_CATCHES, "catch"},
+        {HV_WIN_PMU_CATCH_SKIPS, "cskip"}, {HV_WIN_PMU_CATCH_PASSIVE, "cpass"},
+        {HV_WIN_PMU_CATCH_LOOPS, "cloop"}, {HV_WIN_PMU_CATCH_CPUS, "ccpu"},
+        {HV_WIN_PMU_CATCH_UNAVAIL, "cunavail"}};
     for (unsigned i = 0; i < sizeof(pk) / sizeof(pk[0]); i++) {
         u64 v = hv_win_pmu_stat(pk[i].idx);
         printf(" %s %lu(+%lu)", pk[i].name, (unsigned long)v, (unsigned long)(v - st_prev_pmu[pk[i].idx]));

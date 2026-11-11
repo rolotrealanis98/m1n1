@@ -92,6 +92,30 @@ M = [
     ('id_bit_missing', 'hv_win_pmu.c', '(pmu.mode16k ? 0 : HV_WIN_PMU_ID_4K)', '0'),
     ('unknown_flag_accepted', 'hv_win_pmu.c', '    if (flags & ~(u64)HV_WIN_PMU_MODE_16K)\n        return -1;',
      '    (void)0;'),
+    # nightly-6d UNDEF catcher
+    ('catch_off', 'hv_win_pmu.c', '    if (pmu_catch(ctx, &e)) {', '    if (false && pmu_catch(ctx, &e)) {'),
+    ('catch_no_reprotect', 'hv_win_pmu.c',
+     '                pmu_clear_frames(fr); /* DIRTY or PINNED: was writable, no frame state survives */\n            hv_xt_set(block, HV_XT_SCANNING, flips);',
+     '                pmu_clear_frames(fr); /* DIRTY or PINNED: was writable, no frame state survives */\n            (void)0;'),
+    # (no mutant for the catcher's pmu_clear_frames on DIRTY/PINNED: equivalent, as the frame bits of a
+    #  writable block are already clear: every transition to DIRTY or PINNED clears them first)
+    ('catch_no_forced_word', 'hv_win_pmu.c',
+     '        if (pmu_rw_classify(*word) != PMU_RW_NONE) {\n            /* kept by the data guard',
+     '        if (false) {\n            /* kept by the data guard'),
+    ('catch_no_os_gate', 'hv_win_pmu.c', '    if ((s.tcr & BIT(23)) || (mode != 0 && !(e->elr & BIT(55)))) {', '    if (false) {'),
+    ('catch_low_el1', 'hv_win_pmu.c', '(mode != 0 && !(e->elr & BIT(55)))', '(false)'),
+    ('catch_no_loop_guard', 'hv_win_pmu.c', 'if (catch_elr[cpu] == e->elr && catch_repeat[cpu] >= PMU_CATCH_LOOP_LIMIT) {',
+     'if (false) {'),
+    ('catch_progress_counts', 'hv_win_pmu.c', '        catch_repeat[cpu] = 0; /* progress', '        catch_repeat[cpu]++; /* progress'),
+    ('catch_any_ec0_word', 'hv_win_pmu.c', '        if (!pmu_logged(ipa)) {', '        if (!pmu_logged(ipa) && false) {'),
+    ('catch_el0_class_always', 'hv_win_pmu.c', '(!(e.spsr & 0x1f) ? 0x20UL : 0x21UL)', '0x20UL'),
+    ('catch_ifsc_l2', 'hv_win_pmu.c', '#define PMU_CATCH_IFSC       0x07', '#define PMU_CATCH_IFSC       0x06'),
+    ('catch_far_unchanged', 'hv_win_pmu.c', '        e.far = e.elr;\n', ''),
+    ('catch_never_lists', 'hv_win_pmu.c', '        if (!pmu_all_scanned(fr))\n            pmu_open_add(block, fr);',
+     '        (void)0;'),
+    ('catch_stays_scanning', 'hv_win_pmu.c', '        /* 3. Executable and read-only again, as after a proven fetch fault */\n        hv_xt_set(block, HV_XT_CODE, flips);',
+     '        /* 3. Executable and read-only again, as after a proven fetch fault */\n        hv_xt_set(block, HV_XT_SCANNING, flips);'),
+    ('catch_ec_any', 'hv_win_pmu.c', 'return pmu.armed && !pmu.mode16k && !((esr_el1 >> 26) & 0x3f);', 'return pmu.armed && !pmu.mode16k;'),
 ]
 
 CFLAGS = ['-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
