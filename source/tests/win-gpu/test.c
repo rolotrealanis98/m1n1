@@ -2,6 +2,7 @@
 /* gpu-pt: host test of the GPU PS guard decision (src/hv/win/hv_win_gpu_logic.h). */
 #include <stdio.h>
 #include "../../src/hv/win/hv_win_gpu_logic.h"
+#include "../../src/hv/win/hv_win_t6050_routes.h"
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; if (fails < 20) { printf("FAIL: " __VA_ARGS__); printf("\n"); } } } while (0)
@@ -35,6 +36,26 @@ int main(void)
     CHECK(gpu_ps_is_active(0x1f0403ffu), "GFX reading");
     CHECK(!gpu_ps_is_active(0x0f040300u), "handover GFX off reading");
     CHECK(!gpu_ps_is_active(0x0f04030fu), "target ACTIVE without AUTO_ENABLE and ACTUAL 0 is not active");
+    /* gpu-pt2: T6050 routes with this machine's numbers. AIC layout as hv_win_aic_layout_valid() requires:
+     * nr_die 1, nr_irq 3104, max_irq 4096 (die = line / max_irq, line % max_irq < nr_irq). */
+    static const unsigned long gpu_lines[4] = {2797, 2800, 2801, 2804};
+    for (int i = 0; i < 4; i++) {
+        unsigned long l = gpu_lines[i];
+        CHECK(l / 4096 == 0 && l % 4096 < 3104, "GPU line %lu outside the T6050 AIC", l);
+        CHECK(hv_win_t6050_route_allowed(l, 96 + i), "GPU line %lu -> SPI %d refused (the hardware failure)", l, 96 + i);
+        CHECK(hv_win_t6050_route_allowed(l, 32) && hv_win_t6050_route_allowed(l, 1019), "SPI range ends");
+        CHECK(!hv_win_t6050_route_allowed(l, 31) && !hv_win_t6050_route_allowed(l, 1020), "non-SPI accepted");
+    }
+    CHECK(hv_win_t6050_route_allowed(1451, 65), "USB route lost");
+    CHECK(!hv_win_t6050_route_allowed(1451, 96), "USB route on another SPI");
+    /* the unwired ASC/sgx lines and everything else stay refused */
+    static const unsigned long other[] = {2798, 2799, 2802, 2803, 2448, 2449, 2450, 2451, 450, 2463, 2465, 2806, 0, 1450, 1452, 3103};
+    for (unsigned int i = 0; i < sizeof(other) / sizeof(other[0]); i++)
+        CHECK(!hv_win_t6050_route_allowed(other[i], 96), "line %lu admitted", other[i]);
+    unsigned long admitted = 0;
+    for (unsigned long l = 0; l < 4096; l++)
+        admitted += hv_win_t6050_route_allowed(l, 97) != 0;
+    CHECK(admitted == 4, "%lu lines admitted for SPI 97, expected the 4 GPU lines", admitted);
     if (fails) {
         printf("win-gpu FAIL (%d of %lu)\n", fails, n);
         return 1;

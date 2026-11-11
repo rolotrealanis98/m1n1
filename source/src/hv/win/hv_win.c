@@ -5,6 +5,7 @@
  */
 
 #include "hv_win.h"
+#include "hv_win_t6050_routes.h" /* gpu-pt2 */
 #include "hv_win_hidm.h"
 #include "hv_win_smcp.h"
 #include "hv_win_m5wn.h"
@@ -1038,8 +1039,10 @@ int hv_win_map_irq(u64 aic_line, u64 gsiv)
      * register), and hv_vgic3_handle_aic_irq delivers it to the vCPU named by GICD_IROUTER.
      */
     bool t6050 = aic->base == HV_WIN_T6050_AIC_BASE;
-    if (t6050 && (!hv_win_aic_layout_valid() || aic_line != 1451 || gsiv != 65)) {
-        printf("HV/win: unsupported T6050 AIC layout or Windows USB route\n");
+    if (t6050 && (!hv_win_aic_layout_valid() || !hv_win_t6050_route_allowed(aic_line, gsiv))) {
+        printf("HV/win: T6050 AIC route %ld -> SPI %ld refused (layout %s; admitted: USB 1451->65, GPU "
+               "2797/2800/2801/2804 -> any SPI)\n",
+               aic_line, gsiv, hv_win_aic_layout_valid() ? "ok" : "unexpected");
         return -1;
     }
 
