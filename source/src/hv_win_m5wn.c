@@ -6,6 +6,8 @@
  * the same wire layout as the S1 registration; storage files are not modified. */
 #include "hv_win_m5wn.h"
 #include "m5wn/service/m5wn_fake.h"
+#include "m5wn/n1/n1_core.h"
+#include "hv_win_n1.h"
 #include "hv/hv.h"
 #include "hv/win/hv_win.h"
 #include "hv/win/hv_win_storage.h"
@@ -70,6 +72,12 @@ static int g_region(void *ctx, wn_u64 ipa, wn_u64 len)
     return -1;
 }
 
+static bool backend_n1;
+static int n1_sink_rx(void *s, const n1_u8 *f, n1_u32 l) { return wn_service_rx(s, f, l); }
+static void n1_sink_link(void *s, int up, n1_u32 mbps) { wn_service_set_link(s, up, mbps); }
+static void n1_sink_event(void *s) { wn_service_event(s); }
+static const wn_backend_ops n1_ops = {n1_wn_tx, 0, 0, n1_wn_scan, n1_wn_results, n1_wn_join, n1_wn_leave, n1_wn_status};
+
 bool hv_win_m5wn_claims_spi(u64 gsiv) { return attempted && gsiv == WN_GSIV; }
 
 static bool access_page(struct exc_info *ctx, u64 address, u64 *value, bool write, int width)
@@ -131,7 +139,7 @@ s64 hv_win_m5wn_configure(u64 data, u64 size)
         return -1;
     memcpy(&c, (const void *)data, sizeof(c));
     if (c.magic != WN_MAGIC || c.version != WN_VERSION || c.reg != WN_REG_BASE || c.ctrl != WN_CTRL_BASE ||
-        c.gsiv != WN_GSIV || c.backend != 1 || c.zero[0] || c.zero[1] || c.zero[2] || c.zero[3] || !c.epoch ||
+        c.gsiv != WN_GSIV || (c.backend != 1 && c.backend != 2) || c.zero[0] || c.zero[1] || c.zero[2] || c.zero[3] || !c.epoch ||
         !c.nr_ram || c.nr_ram > HV_SM_MAX_RAM || !c.nr_protected || c.nr_protected > HV_SM_MAX_PROTECTED ||
         size != sizeof(c) + (u64)(c.nr_ram + c.nr_protected) * 16)
         return -1;
@@ -162,14 +170,26 @@ s64 hv_win_m5wn_configure(u64 data, u64 size)
     plat.guest_read = g_read;
     plat.guest_write = g_write;
     plat.region_ok = g_region;
-    wn_service_init(&service, &plat, &wn_fake_ops, &fake, fake_mac, WN_F_FAKE);
-    wn_fake_init(&fake, &service, 1, 1);
+    if (c.backend == 2) {
+        /* real N1 (hv_win_n1.c brought the radio up before this call) */
+        struct n1 *core = hv_win_n1_core();
+        if (!core) return -1;
+        wn_service_init(&service, &plat, &n1_ops, core, core->mac, 0);
+        core->sink = &service; core->sink_rx = n1_sink_rx; core->sink_link = n1_sink_link; core->sink_event = n1_sink_event;
+        backend_n1 = true;
+    } else {
+        wn_service_init(&service, &plat, &wn_fake_ops, &fake, fake_mac, WN_F_FAKE);
+        wn_fake_init(&fake, &service, 1, 1);
+    }
     if (hv_map_hook(WN_REG_BASE, access_page, 0x4000) < 0 || hv_map_hook(WN_CTRL_BASE, access_page, 0x4000) < 0)
         return -1;
     exposed = true;
     update_irq();
-    printf("HV/win M5WN: fake backend (gateway 192.168.77.1), REG %lx CTRL %lx GSIV %u (no Apple hardware)\n",
-           (u64)WN_REG_BASE, (u64)WN_CTRL_BASE, WN_GSIV);
+    if (backend_n1)
+        printf("HV/win M5WN: N1 backend, REG %lx CTRL %lx GSIV %u\n", (u64)WN_REG_BASE, (u64)WN_CTRL_BASE, WN_GSIV);
+    else
+        printf("HV/win M5WN: fake backend (gateway 192.168.77.1), REG %lx CTRL %lx GSIV %u (no Apple hardware)\n",
+               (u64)WN_REG_BASE, (u64)WN_CTRL_BASE, WN_GSIV);
     return 0;
 }
 
@@ -191,7 +211,8 @@ u64 hv_win_m5wn_stat(u64 index)
 void hv_win_m5wn_tick(void)
 {
     if (!exposed || retired || smp_id() != boot_cpu_idx) return;
-    update_irq(); /* the fake backend answers synchronously; a radio backend polls here */
+    /* N1 RX frames arrive from hv_win_n1_tick() (each guest copy takes its own lease) */
+    update_irq();
 }
 
 void hv_win_m5wn_retire(void)

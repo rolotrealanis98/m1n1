@@ -175,6 +175,11 @@ typedef enum {
     /* wireless/n1-20261111: M5WN mediated network (0xc48/0xc49; clear of ANSM/CPPC/SMCP/UT numbers) */
     P_HV_WIN_M5WN_CONFIGURE = 0xc48,
     P_HV_WIN_M5WN_STAT = 0xc49,
+    P_HV_WIN_N1_PROBE = 0xc4a,
+    P_HV_WIN_N1_STAT = 0xc4b,
+    P_HV_WIN_N1_START = 0xc4c,
+    P_HV_WIN_N1_CTL = 0xc4d,
+    P_HV_WIN_N1_PARK = 0xc4e,
     P_HV_WIN_SMP_DUMP = 0xc29, /* smp2f: print the SMP/WFI/timer/vGIC dump (boot CPU; -1 elsewhere) */
 
     P_FB_INIT = 0xd00,

@@ -34,6 +34,7 @@
 #include "hv/win/hv_win_storage.h"
 #include "hv_win_hidm.h"
 #include "hv_win_m5wn.h"
+#include "hv_win_n1.h"
 #include "hv/win/s1/native_link.h"
 #include "hv/win/s1/ans_ro.h"
 #include "minilzlib/minlzma.h"
@@ -662,6 +663,21 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_M5WN_STAT:
             reply->retval = hv_win_m5wn_stat(request->args[0]);
+            break;
+        case P_HV_WIN_N1_PROBE:
+            reply->retval = hv_win_n1_probe(request->args[0]);
+            break;
+        case P_HV_WIN_N1_STAT:
+            reply->retval = hv_win_n1_stat(request->args[0]);
+            break;
+        case P_HV_WIN_N1_START:
+            reply->retval = hv_win_n1_start(request->args[0], request->args[1], request->args[2], request->args[3]);
+            break;
+        case P_HV_WIN_N1_CTL:
+            reply->retval = hv_win_n1_ctl(request->args[0], request->args[1]);
+            break;
+        case P_HV_WIN_N1_PARK:
+            reply->retval = hv_win_n1_park();
             break;
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");

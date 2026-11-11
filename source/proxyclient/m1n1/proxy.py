@@ -689,6 +689,11 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_HIDM_CONFIGURE = 0xc28
     P_HV_WIN_M5WN_CONFIGURE = 0xc48
     P_HV_WIN_M5WN_STAT = 0xc49
+    P_HV_WIN_N1_PROBE = 0xc4a
+    P_HV_WIN_N1_STAT = 0xc4b
+    P_HV_WIN_N1_START = 0xc4c
+    P_HV_WIN_N1_CTL = 0xc4d
+    P_HV_WIN_N1_PARK = 0xc4e
     P_HV_WIN_STORAGE_PREP = 0xc20
     P_HV_WIN_STORAGE_STAT = 0xc21
     P_HV_WIN_STORAGE_NATIVE = 0xc22
@@ -1231,6 +1236,16 @@ class M1N1Proxy(Reloadable):
         # M5WN v1: 96-byte header + {base,size} ranges (m5wn_contract.build_registration), staged in
         # target memory like hv_win_storage_prepare. One launch only, before any vCPU starts, 1 vCPU.
         return self.request(self.P_HV_WIN_M5WN_CONFIGURE, registration, len(registration), signed=True)
+    def hv_win_n1_probe(self, flags=0):
+        return self.request(self.P_HV_WIN_N1_PROBE, flags, signed=True)
+    def hv_win_n1_stat(self, index):
+        return self.request(self.P_HV_WIN_N1_STAT, index)
+    def hv_win_n1_start(self, fw_addr, fw_len, stage, flags=0):
+        return self.request(self.P_HV_WIN_N1_START, fw_addr, fw_len, stage, flags, signed=True)
+    def hv_win_n1_ctl(self, op, arg=0):
+        return self.request(self.P_HV_WIN_N1_CTL, op, arg, signed=True)
+    def hv_win_n1_park(self):
+        return self.request(self.P_HV_WIN_N1_PARK, signed=True)
     def hv_win_m5wn_stat(self, index):
         return self.request(self.P_HV_WIN_M5WN_STAT, index)
 
