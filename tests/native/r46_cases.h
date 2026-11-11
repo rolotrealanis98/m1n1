@@ -162,6 +162,30 @@ static void n7_smp_timeout(int op)
     s1n_test_smp_timeout_us = 0;
     r45_frozen();
 }
+/* nightly-7: with the link locked, the session-end (0xc5a), heartbeat (0xc5b) and session-stat (0xc5c) requests are
+ * admitted only in a host-interrupt or exception session; every other op of such a session keeps its r4.x answer.
+ * Literal numbers: trace-1cpu also builds this file against the old tree (static_check.py pins them in proxy.h). */
+static void n7_link_session(void)
+{
+    fresh(base_cfg());
+    CHECK(select_native() == 0 && s1n_link_locked());
+    for (u64 op = 0xc5a; op <= 0xc5c; op++) {
+        CHECK(s1n_link_proxy(op, true));
+        CHECK(!s1n_link_proxy(op, false));
+    }
+    for (u64 op = 0; op < 0x1000; op++) {
+        if (op >= 0xc5a && op <= 0xc5c)
+            continue;
+        bool want = op == P_NOP || op == P_REBOOT || op == P_HV_WIN_STORAGE_NATIVE_STAT ||
+            op == P_HV_WIN_STORAGE_STAT || op == P_HV_WIN_STATUS || op == P_HV_WIN_FB_STAT ||
+            op == P_HV_WIN_PL011_STATS || op == P_HV_WIN_STORAGE_NATIVE_QUIESCE || op == P_EXIT;
+        if (op == P_HV_START || op == P_HV_WIN_STORAGE_PREP || op == P_HV_WIN_STORAGE_NATIVE ||
+            op == P_HV_WIN_STORAGE_NATIVE_CANARY || op == P_HV_WIN_STORAGE_NATIVE_STAT ||
+            op == P_HV_WIN_STORAGE_STAT || op == P_HV_WIN_STORAGE_NATIVE_QUIESCE)
+            want = false; /* storage ops: never in an exception session */
+        CHECK(s1n_link_proxy(op, true) == want);
+    }
+}
 static void r46_split(void)
 {
     rw_up(rw_cfg(), 0);
@@ -285,6 +309,7 @@ static bool r46_dispatch(const char *s)
     else if (!strcmp(s,"r46_canary_save")) r46_canary(true);
     else if (!strncmp(s,"r46_timeout_",12)) r46_timeout(atoi(s+12));
     else if (!strncmp(s,"n7_smp_timeout_",15)) n7_smp_timeout(atoi(s+15));
+    else if (!strcmp(s,"n7_link_session")) n7_link_session();
     else if (!strncmp(s,"r46_raw_range_",14)) r46_raw_range(atoi(s+14));
     else if (!strncmp(s,"r46_admin_bad_",14)) r46_admin_bad(atoi(s+14));
     else if (!strcmp(s,"r46_ro_cap")) r46_ro_cap();

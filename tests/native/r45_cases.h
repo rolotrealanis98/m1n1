@@ -106,11 +106,6 @@ static void r45_link(void)
     CHECK(!s1n_link_proxy(P_HV_WIN_STORAGE_PREP, false));
     CHECK(!s1n_link_proxy(P_HV_START, false));
     CHECK(s1n_link_proxy(P_EXIT, true)); CHECK(!s1n_link_proxy(P_EXIT, false));
-    /* nightly-7: the session-end/heartbeat/stat requests only in a host-interrupt or exception session */
-    CHECK(s1n_link_proxy(P_HV_WIN_SESSION_END, true)); CHECK(!s1n_link_proxy(P_HV_WIN_SESSION_END, false));
-    CHECK(s1n_link_proxy(P_HV_WIN_HEARTBEAT, true)); CHECK(!s1n_link_proxy(P_HV_WIN_HEARTBEAT, false));
-    CHECK(s1n_link_proxy(P_HV_WIN_SESSION_STAT, true)); CHECK(!s1n_link_proxy(P_HV_WIN_SESSION_STAT, false));
-    CHECK(!s1n_link_proxy(P_HV_WIN_PERF, true)); /* anything else stays refused in such a session */
     CHECK(s1n_link_refusals() > 4000);
     for (unsigned sentinel = 0; sentinel < 2; sentinel++) {
         discard_seen = 0; discard_left = 513 + 4 * sentinel;

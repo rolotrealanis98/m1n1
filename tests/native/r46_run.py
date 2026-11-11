@@ -5,7 +5,7 @@ from pathlib import Path
 H=Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('native',H/'run.py');r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
 root=Path(tempfile.mkdtemp(prefix='r46-'))
-common=['r46_stage_gate','r46_ro_cap','r46_admin_bad_6','r46_admin_bad_128','r46_nested','r46_concurrent','r46_proxy','r46_ro_write']+[f'r46_context_{i}' for i in range(12)]+[f'r46_allowlist_{i}' for i in range(7)]
+common=['n7_link_session','r46_stage_gate','r46_ro_cap','r46_admin_bad_6','r46_admin_bad_128','r46_nested','r46_concurrent','r46_proxy','r46_ro_write']+[f'r46_context_{i}' for i in range(12)]+[f'r46_allowlist_{i}' for i in range(7)]
 cases={s:common+(['r46_canary','r46_canary_save','r46_nested_canary','r46_canary_pattern_corrupt'] if s in [1,2] else []) for s in range(4)}
 cases[0]+=['r46_stage0_flush_cap']
 cases[3]+= [f'r46_raw_range_{i}' for i in range(4)]+['r46_split','r46_read_probe','r46_flush_error']+[f'r46_timeout_{i}' for i in range(3)]+[f'n7_smp_timeout_{i}' for i in range(4)]+[f'r46_write_refusal_{i}' for i in range(6)]+[f'r46_guest_op_{i}' for i in [4,8,9,128,129,132,255]]
@@ -34,6 +34,7 @@ mutants=[
  ('flush_timeout_short',3,['r46_timeout_0'],[(A,'#define NVME_FLUSH_TIMEOUT   30000000','#define NVME_FLUSH_TIMEOUT   10000000')]),
  ('n7_smp_bound_ignored',3,['n7_smp_timeout_0','n7_smp_timeout_1','n7_smp_timeout_2'],[(A,'        if (smp_limit && smp_limit < limit)\n            limit = smp_limit;','        (void)smp_limit;')]),
  ('n7_smp_bound_raises',3,['n7_smp_timeout_3'],[(A,'        if (smp_limit && smp_limit < limit)\n            limit = smp_limit;','        if (smp_limit)\n            limit = smp_limit + 30000000;')]),
+ ('n7_session_ops_any_session',3,['n7_link_session'],[(L,'    case P_HV_WIN_SESSION_STAT:\n        if (guest_exception) return true;','    case P_HV_WIN_SESSION_STAT:\n        return true;')]),
  ('read_freezes',3,['r46_read_probe'],[(Q,'        ctrl->refused_reads++;','        ctrl->refused_reads++;\n        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);')]),
  ('read_not_counted',3,['r46_read_probe'],[(Q,'        ctrl->refused_reads++;','        (void)0;')]),
  ('write_no_abort',3,['r46_write_refusal_0'],[(Q,'    if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) {\n        if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);','    if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) {')]),

@@ -83,6 +83,9 @@ check('proxy.h: P_HV_WIN_PERF = 0xc58, unique', 'P_HV_WIN_PERF = 0xc58' in ph an
 check('proxy.c: dispatch', 'case P_HV_WIN_PERF:\n            reply->retval = hv_win_perf_configure(request->args[0]);' in pc)
 check('proxy.py: constant + method', 'P_HV_WIN_PERF = 0xc58' in pp and 'def hv_win_perf_configure(self, flags):' in pp)
 
+# nightly-7: session-end ops (tests/native/r46_cases.h n7_link_session uses these numbers)
+check('proxy.h: session end/heartbeat/stat = 0xc5a/0xc5b/0xc5c', all(f'{n} = {v}' in ph and ph.count(v) == 1 for n, v in
+      (('P_HV_WIN_SESSION_END', '0xc5a'), ('P_HV_WIN_HEARTBEAT', '0xc5b'), ('P_HV_WIN_SESSION_STAT', '0xc5c'))))
 # storage untouched
 paths = ['source/src/hv/win/s1', 'source/src/hv/win/hv_win_storage.c', 'source/src/hv/win/hv_win_storage.h',
          'source/src/hv/win/hv_win_storage_mem.c', 'source/src/hv/win/hv_win_storage_mem.h',

@@ -1,7 +1,7 @@
 #!/bin/sh
 # nightly-7: host test of src/hv/win/hv_win_session.c (the REAL file, #include lines stripped, after prelude.h).
 set -e
-H=$(cd "$(dirname "$0")" && pwd)
+H=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 OUT=${OUT:-$(mktemp -d)}
 mkdir -p "$OUT"
 { cat "$H/prelude.h"; grep -v '^#include' "$H/../../src/hv/win/hv_win_session.c"; cat "$H/body.c"; } > "$OUT/test.c"

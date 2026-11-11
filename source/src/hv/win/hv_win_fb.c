@@ -4,7 +4,7 @@
  * 98599af29c644e89ab7f844ce94633cd451fd63a src/hv/windows/hv.c; the dirty-page tracking, pass
  * scheduler, wide conversion core, 2x mode and benchmark below are our own (display/improve-20261109,
  * second round disp2-20261110).
- * Opt-in, single-vCPU. No DCP programming. Allocation is permanent until reboot: host mappings
+ * Opt-in, any number of vCPUs (nightly-7; was single-vCPU). No DCP programming. Allocation is permanent until reboot: host mappings
  * change attributes and must never return to malloc.
  *
  * Modes (PREPARE arg1):
@@ -165,9 +165,17 @@ static struct {
     bool attempted;
 } win_fb;
 
+/*
+ * nightly-7: any number of vCPUs (was exactly 1). Before the guest starts (PREPARE/START), as before. At run time
+ * every piece of shared state is already serialised by bhl: the dirty-fault handler runs in the locked half of the
+ * data-abort path on whichever CPU faulted; the conversion, pass snapshots and refresh run in hv_tick on the boot
+ * CPU only. Granting write access needs only the faulting CPU's TLB flushed (another CPU's stale read-only entry
+ * takes a spurious fault, classified and flushed locally); taking it away (pass snapshot) uses the inner-shareable
+ * TLBIs (ipas2e1is / vmalle1is / vmalls12e1is), complete on every CPU before a shadow byte is read.
+ */
 static bool fb_idle_single_cpu(void)
 {
-    if (!hv_win_vgic_enabled() || hv_win.nr_vcpus != 1 || hv_cpus_in_guest)
+    if (!hv_win_vgic_enabled() || hv_win.nr_vcpus < 1 || hv_cpus_in_guest)
         return false;
     for (unsigned int i = 0; i < MAX_CPUS; i++)
         if (hv_started_cpus[i])
@@ -795,7 +803,7 @@ static u64 fb_refresh_step(u64 now)
     return get_ticks() - t0;
 }
 
-/* At the tail of hv_tick (before the storage tick). Single-vCPU only. */
+/* At the tail of hv_tick (before the storage tick), boot CPU only, under bhl; any number of vCPUs (nightly-7). */
 static void hv_win_fb_tick_passes(void);
 
 void hv_win_fb_tick(void)
