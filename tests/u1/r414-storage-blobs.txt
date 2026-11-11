@@ -7,8 +7,8 @@ aff0557da45ae68209934ef48887a8112663ca45 source/src/hv/win/s1/LICENSE
 38aa8680ac536baade706d0640ce836714ee62ab source/src/hv/win/s1/ans_ro.c
 a997ce3503e5ba673bed050ba4d62ae6f66f0593 source/src/hv/win/s1/ans_ro.h
 caa8676e9ab0bbbce03db1ca142ad8cdabf69c8e source/src/hv/win/s1/hv_nvme.c
-d26c21958ca62430c72eb5160d5d6e13d8505051 source/src/hv/win/s1/hv_nvme_queue.c
-5f7e3a24717ecdd8bfda12b376ff342e898096fd source/src/hv/win/s1/hv_nvme_queue.h
+f68b6d570bd3aa27cabf1f0e607f65b30552549c source/src/hv/win/s1/hv_nvme_queue.c
+f395d0113f301e98201f863423d20ef50aa180bb source/src/hv/win/s1/hv_nvme_queue.h
 5fe87c78ad54bd330165af35a8cc87ba9f81f944 source/src/hv/win/s1/hv_pci.c
 faf87771c9b3c3eafb66fd2c2e7cdc665a2bcd6a source/src/hv/win/s1/model.h
 87cf14f6294f0b76fee0b050ee7c52776c3c47cd source/src/hv/win/s1/native_link.c
