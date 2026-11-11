@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Independent implementation from PROTOCOL.md; no Linux driver code copied. */
 #include "mtp_kbd.h"
+#include "hidm/tp/mtp_tp.h"
 #define LOG(k, ...) do { if ((k)->io.log) (k)->io.log(__VA_ARGS__); } while (0)
 static hm_u32 le16(const hm_u8 *p) { return p[0] | ((hm_u32)p[1] << 8); }
 static int name_is(const hm_u8 *p, const char *want)
@@ -68,19 +69,45 @@ hm_u32 mtp_kbd_report(void *ctx, hm_u32 id, hm_u32 op, hm_u32 rid,
     (void)ctx; (void)id; (void)op; (void)rid; (void)data; (void)length;
     return HM_DENIED;
 }
-static void queue(struct mtp_kbd *k, const hm_u8 *msg, unsigned len)
+/* One command frame (channel 0x11) into the single TX slot. */
+static void frame_out(struct mtp_kbd *k, hm_u8 iface, hm_u8 flags, hm_u8 seq,
+                      const hm_u8 *msg, unsigned len)
 {
-    if (k->tx_len || len > 10) { mtp_kbd_fail(k, MTP_E_TX); return; }
     unsigned body = (8 + len + 3) & ~3u;
     hm_zero(k->tx, sizeof(k->tx));
     k->tx[0] = 8; k->tx[1] = 0x11; k->tx[2] = body;
-    k->tx[4] = k->seq++; k->tx[8] = 0x80; k->tx[10] = len;
+    k->tx[4] = seq; k->tx[5] = iface; k->tx[8] = flags; k->tx[10] = len;
     hm_copy(k->tx + 16, msg, len);
     hm_u32 sum = 0;
     for (unsigned i = 0; i < 8 + body; i += 4) sum += hm_le32(k->tx + i);
     hm_put32(k->tx + 8 + body, ~sum);
     k->tx_len = body + 12;
     k->tx_deadline = k->io.now_us(k->io.ctx) + 500000;
+}
+static void queue(struct mtp_kbd *k, const hm_u8 *msg, unsigned len)
+{
+    if (k->tx_len || len > 10) { mtp_kbd_fail(k, MTP_E_TX); return; }
+    k->tx_kind = 0;
+    frame_out(k, 0, 0x80, k->seq++, msg, len);
+}
+int mtp_kbd_tp_send(void *ctx, hm_u8 iface, hm_u8 flags, hm_u8 seq, const hm_u8 *msg,
+                    unsigned len, hm_u8 *seq_used)
+{
+    struct mtp_kbd *k = ctx;
+    if (k->phase == MTP_FAILED || k->tx_len || !len || len > 24) return -1;
+    if (!iface) seq = k->seq++; /* comm: one counter shared with the keyboard's commands */
+    *seq_used = seq;
+    k->tx_kind = 0;
+    frame_out(k, iface, flags, seq, msg, len);
+    return 0;
+}
+hm_u32 mtp_kbd_report_all(void *ctx, hm_u32 id, hm_u32 op, hm_u32 rid, hm_u8 *data,
+                          hm_u32 *length)
+{
+    struct mtp_kbd *k = ctx;
+    if (k->tp && k->tp->phase == TP_LIVE && id == k->tp->mt)
+        return mtp_tp_report(k->tp, op, rid, data, length);
+    return HM_DENIED;
 }
 static void init_event(struct mtp_kbd *k, const hm_u8 *m, unsigned n)
 {
@@ -101,6 +128,8 @@ static void init_event(struct mtp_kbd *k, const hm_u8 *m, unsigned n)
     if (!name_is(m + 4, "keyboard")) {
         if ((k->found && id == k->iface) || (k->stm_found && id == k->stm_iface))
             mtp_kbd_fail(k, MTP_E_TOPOLOGY);
+        else if (k->tp)
+            mtp_tp_on_init(k->tp, m, n);
         return;
     }
     if ((k->found && id != k->iface) || k->complete || (k->stm_found && id == k->stm_iface)) {
@@ -158,15 +187,18 @@ static void receive_frame(struct mtp_kbd *k)
     const hm_u8 *m = f + 16;
     k->frames++;
     if (f[1] == 0x11) {
-        if (f[5] != 0 || f[8] != 0x80 || !len || m[0] != 0xb4) return;
         hm_u32 rc = hm_le32(f + 12);
-        if (k->enable_sent && f[4] == k->enable_seq) {
+        if (f[5] == 0 && f[8] == 0x80 && len && m[0] == 0xb4 && !k->ack && k->enable_sent &&
+            f[4] == k->enable_seq) {
             LOG(k, "MTP: keyboard enable ACK seq=%u retcode=%#x\n", f[4], rc);
             if (rc) mtp_kbd_fail(k, MTP_E_ACK);
             else k->ack = 1;
-        } else if (k->stm_sent && f[4] == k->stm_seq) {
+        } else if (f[5] == 0 && f[8] == 0x80 && len && m[0] == 0xb4 && !k->stm_ack &&
+                   k->stm_sent && f[4] == k->stm_seq) {
             LOG(k, "MTP: stm enable ACK seq=%u retcode=%#x\n", f[4], rc);
             k->stm_ack = rc ? -1 : 1;
+        } else if (k->tp) {
+            mtp_tp_on_ack(k->tp, f[5], f[4], f[8], rc, m, len);
         }
         return;
     }
@@ -181,14 +213,20 @@ static void receive_frame(struct mtp_kbd *k)
             } else if (k->stm_sent && m[1] == k->stm_iface) {
                 LOG(k, "MTP: stm READY iface=%u\n", m[1]);
                 k->stm_ready = 1;
+            } else if (k->tp) {
+                mtp_tp_on_ready(k->tp, m[1]);
             }
         } else if (m[0] == 0xa0) {
             if (len != 5) { mtp_kbd_fail(k, MTP_E_FRAME); return; }
+            if (k->tp && mtp_tp_on_gpio(k->tp, m, len)) return;
             LOG(k, "MTP: GPIO request iface=%u gpio=%u cmd=%u -> NACK 0xe000f00d (as Linux here)\n",
                 m[1], m[2], m[4]);
             hm_u8 nack[10] = {0xa1, 0x0d, 0xf0, 0x00, 0xe0};
             hm_copy(nack + 5, m, 5); queue(k, nack, sizeof(nack));
         }
+    } else if (k->tp && f[5] != k->iface &&
+               mtp_tp_on_report(k->tp, f[5], m, len, k->service, k->io.now_us(k->io.ctx))) {
+        if (k->io.input_changed) k->io.input_changed(k->io.ctx);
     } else if (k->phase == MTP_LIVE && f[5] == k->iface) {
         if (!len || len > HM_PAYLOAD) { mtp_kbd_fail(k, MTP_E_FRAME); return; }
         hm_service_push(k->service, k->iface, m, len, k->io.now_us(k->io.ctx) * 1000);
@@ -211,10 +249,9 @@ static void tx_poll(struct mtp_kbd *k)
     }
     for (unsigned i = 0; i < k->tx_len; i += 4)
         k->io.write32(k->io.ctx, MTP_TX32, hm_le32(k->tx + i));
-    if (k->tx[16] == 0xb4) {
-        if (k->complete && k->tx[17] == k->iface) k->enable_sent = 1;
-        else k->stm_sent = 1;
-    }
+    if (k->tx_kind == 1) k->enable_sent = 1;
+    else if (k->tx_kind == 2) k->stm_sent = 1;
+    k->tx_kind = 0;
     k->tx_len = 0;
 }
 /* Only the keyboard and stm interfaces can ever be enabled. */
@@ -227,7 +264,9 @@ static void enable(struct mtp_kbd *k, hm_u8 iface, int stm)
     hm_u8 msg[2] = {0xb4, iface};
     if (stm) k->stm_seq = k->seq; else k->enable_seq = k->seq;
     LOG(k, "MTP: enable %s iface=%u seq=%u\n", stm ? "stm" : "keyboard", iface, k->seq);
-    queue(k, msg, sizeof(msg)); tx_poll(k);
+    queue(k, msg, sizeof(msg));
+    k->tx_kind = stm ? 2 : 1;
+    tx_poll(k);
 }
 static void go_keyboard(struct mtp_kbd *k, hm_u64 now)
 {
@@ -272,6 +311,7 @@ void mtp_kbd_poll(struct mtp_kbd *k)
         mtp_kbd_fail(k, MTP_E_TIMEOUT); return;
     }
     tx_poll(k);
+    if (k->phase == MTP_LIVE && k->tp && !k->tx_len) { mtp_tp_step(k->tp); tx_poll(k); }
     if (k->phase == MTP_STM) stm_step(k, start);
     if (k->phase == MTP_ENABLE && !k->enable_sent && !k->tx_len)
         enable(k, k->iface, 0);

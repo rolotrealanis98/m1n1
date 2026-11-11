@@ -213,6 +213,11 @@ OBJECTS := \
 	hv_win_n1.o \
 	m5wn/n1/n1_probe.o \
 	m5wn/n1/n1_core.o \
+	hidm/tp/apple_mt.o \
+	hidm/tp/ptp.o \
+	hidm/tp/mtp_tp.o \
+	mtp_tp_resident.o \
+	mtp_dma.o \
 	sart.o \
 	sep.o \
 	sio.o \

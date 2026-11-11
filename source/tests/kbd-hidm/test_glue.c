@@ -26,9 +26,16 @@ int mtp_kbd_resident_start(struct mtp_kbd *k,hm_service *s)
  static const hm_u8 desc[]={5,1,9,6,0xa1,1,0xc0};
  k->phase=MTP_LIVE;k->iface=2;k->keyboard=(hm_backend_interface){{.id=2,.flags=1,.descriptor_length=sizeof(desc)},desc};return 0;
 }
+/* trackpad adapter stubs (2026-11-11): finish returns a PTP interface when tp_on */
+static bool tp_on; static u64 armed_fw=~0ull;
+void (*mtp_kbd_dma_hook)(struct rtkit_dev *); void mtp_dma_rtkit_hook(struct rtkit_dev *r){(void)r;}
+static const hm_u8 tp_desc[]={5,0x0d,9,5,0xa1,1,0x85,1,0x09,0x42,0x15,0,0x25,1,0x75,8,0x95,1,0x81,2,0xc0};
+void mtp_tp_resident_arm(u64 addr,u64 len){(void)len;armed_fw=addr;}
+const hm_backend_interface *mtp_tp_resident_finish(struct mtp_kbd *k)
+{static hm_backend_interface t;(void)k;if(!tp_on)return NULL;t=(hm_backend_interface){{.id=1,.flags=1,.descriptor_length=sizeof(tp_desc)},tp_desc};return &t;}
 static void reset(void)
 {
- attempted=exposed=retired=irq=line=collision=mapped=backend_fail=map_fail=false;maps=irq_changes=0;
+ attempted=exposed=retired=irq=line=collision=mapped=backend_fail=map_fail=tp_on=false;armed_fw=~0ull;maps=irq_changes=0;
  memset(&service,0,sizeof(service));memset(hv_started_cpus,0,sizeof(hv_started_cpus));groups++;
 }
 static void wrpage(u64 addr,u32 val) {u64 v=val;CHECK(access_page(NULL,addr,&v,true,2));}
@@ -42,7 +49,7 @@ static void cmd(unsigned seq,unsigned op,unsigned iface,unsigned len)
 }
 int main(void)
 {
- reset();CHECK(!hv_win_hidm_configure(1));CHECK(maps==2 && service.count==1);CHECK(hv_win_hidm_claims_spi(68));CHECK(hv_win_hidm_configure(1)==-1);
+ reset();CHECK(!hv_win_hidm_configure(1,0,0));CHECK(maps==2 && service.count==1);CHECK(hv_win_hidm_claims_spi(68));CHECK(hv_win_hidm_configure(1,0,0)==-1);
  CHECK(rdpage(HM_REG_BASE,2)==HM_MAGIC);CHECK(rdpage(HM_REG_BASE+4,2)==1);
  for(unsigned off=0x1000;off<0x4000;off+=4)CHECK(rdpage(HM_REG_BASE+off,2)==0 && rdpage(HM_DATA_BASE+off,2)==0);
  for(int width=0;width<=4;width++)if(width!=2)CHECK(!rdpage(HM_REG_BASE,width));
@@ -54,12 +61,17 @@ int main(void)
  wrpage(HM_REG_BASE+HM_R_TAIL,1);CHECK(!line);cmd(3,HM_OUTPUT,2,1);CHECK(rdpage(HM_DATA_BASE+HM_RESP_OFF+4,2)==HM_DENIED);
  cmd(4,HM_DESCRIPTOR,2,7);CHECK(rdpage(HM_DATA_BASE+HM_RESP_OFF+4,2)==HM_OK);CHECK(rdpage(HM_DATA_BASE+HM_RESP_OFF+8,2)==7);
  hm_service_push(&service,2,report,8,2000);hv_win_hidm_tick();CHECK(line);cmd(5,HM_BYE,0,0);CHECK(!line);
- reset();collision=true;CHECK(hv_win_hidm_configure(1)==-1 && !maps);
- reset();mapped=true;CHECK(hv_win_hidm_configure(1)==-1 && !maps);
- reset();hv_started_cpus[3]=true;CHECK(hv_win_hidm_configure(1)==-1 && !maps);
- reset();CHECK(hv_win_hidm_configure(99)==-1 && !maps);
- reset();map_fail=true;CHECK(hv_win_hidm_configure(1)==-1 && maps==2);CHECK(!rdpage(HM_REG_BASE,2));
- reset();backend_fail=true;CHECK(hv_win_hidm_configure(1)==0 && !service.count);cmd(1,HM_HELLO,0,0);cmd(2,HM_ENUM,0,0);CHECK(rdpage(HM_DATA_BASE+HM_RESP_OFF+4,2)==HM_NOT_FOUND);
- reset();CHECK(!hv_win_hidm_configure(1));service.ready=service.active=service.enabled=1;hm_service_push(&service,2,report,8,0);hv_win_hidm_tick();CHECK(line);hv_win_hidm_retire();CHECK(!line && !rdpage(HM_REG_BASE,2));
+ reset();collision=true;CHECK(hv_win_hidm_configure(1,0,0)==-1 && !maps);
+ reset();mapped=true;CHECK(hv_win_hidm_configure(1,0,0)==-1 && !maps);
+ reset();hv_started_cpus[3]=true;CHECK(hv_win_hidm_configure(1,0,0)==-1 && !maps);
+ reset();CHECK(hv_win_hidm_configure(99,0,0)==-1 && !maps);
+ reset();map_fail=true;CHECK(hv_win_hidm_configure(1,0,0)==-1 && maps==2);CHECK(!rdpage(HM_REG_BASE,2));
+ reset();backend_fail=true;CHECK(hv_win_hidm_configure(1,0,0)==0 && !service.count);cmd(1,HM_HELLO,0,0);cmd(2,HM_ENUM,0,0);CHECK(rdpage(HM_DATA_BASE+HM_RESP_OFF+4,2)==HM_NOT_FOUND);
+ reset();CHECK(!hv_win_hidm_configure(1,0,0));service.ready=service.active=service.enabled=1;hm_service_push(&service,2,report,8,0);hv_win_hidm_tick();CHECK(line);hv_win_hidm_retire();CHECK(!line && !rdpage(HM_REG_BASE,2));
+ /* trackpad: armed with the launcher's firmware pointer; published as a second interface */
+ reset();mtp_kbd_dma_hook=NULL;CHECK(!hv_win_hidm_configure(1,0,0) && armed_fw==0 && service.count==1 && mtp_kbd_dma_hook==mtp_dma_rtkit_hook); /* host RTKit buffers always armed */
+ reset();tp_on=true;CHECK(!hv_win_hidm_configure(1,0x12340000,81420) && armed_fw==0x12340000 && service.count==2);
+ CHECK(service.interfaces[0].info.id==2 && service.interfaces[1].info.id==1);
+ reset();tp_on=true;backend_fail=true;CHECK(!hv_win_hidm_configure(1,0x12340000,81420) && !service.count); /* no keyboard: nothing */
  printf("glue: %u groups, %u checks PASS\n",groups,checks);return 0;
 }

@@ -34,6 +34,12 @@ typedef unsigned long long hm_u64;
 #define HM_R_ENABLE 0x1cu /* RW bit 0 */
 #define HM_R_DOORBELL 0x20u /* WO sequence; synchronous command */
 #define HM_R_IRQ 0x24u /* RO: head != tail, independent of mask */
+/* v1.1 (2026-11-11, trackpad track): CAPS reads 0 on a v1.0 service (reserved offset).
+ * Bit 0: GET_FEATURE accepts offset != 0, so feature reports up to HM_MAX_FEATURE bytes
+ * (the 257-byte Precision Touchpad certification report) travel in 256-byte chunks. */
+#define HM_R_CAPS 0x28u
+#define HM_CAP_BIG_FEATURE 1u
+#define HM_MAX_FEATURE 1024u
 #define HM_REQ_OFF 0u
 #define HM_RESP_OFF 288u
 #define HM_RING_OFF 768u

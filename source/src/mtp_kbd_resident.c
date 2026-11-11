@@ -11,6 +11,14 @@
 
 static rtkit_dev_t *mtp_rtkit;
 static bool attempted;
+/* Trackpad (2026-11-11): called after mtp_kbd_init and before the interfaces are
+ * announced, so an optional layer can attach (k->tp) and see every INIT. NULL =
+ * keyboard only, unchanged. */
+void (*mtp_kbd_attach_hook)(struct mtp_kbd *k);
+/* 2026-11-11 (tp1-a1: the MTP asked for a host crashlog buffer, IOVA 0): called after
+ * DAPF, before the MTP CPU starts, to give RTKit host memory through dart-mtp as Linux
+ * does. NULL = SRAM-only buffers, the previous behaviour. */
+void (*mtp_kbd_dma_hook)(rtkit_dev_t *rtk);
 static hm_u32 mmio_read(void *ctx, hm_u64 addr) { (void)ctx; return read32(addr); }
 static void mmio_write(void *ctx, hm_u64 addr, hm_u32 value)
 { (void)ctx; write32(addr, value); }
@@ -123,6 +131,7 @@ int mtp_kbd_resident_start(struct mtp_kbd *k, hm_service *s)
     rtkit_mtp_mode(mtp_rtkit, 0x294c00000, 0xc4000);
     printf("MTP: stage 4/7 DAPF init /arm-io/dart-mtp (as m1n1 kboot before Linux)\n");
     if (dapf_init("/arm-io/dart-mtp", 1) < 0) { printf("MTP: stage 4 FAILED: dapf_init\n"); goto fail; }
+    if (mtp_kbd_dma_hook) mtp_kbd_dma_hook(mtp_rtkit);
     /* Linux dockchannel probe: IRQ_MASK = 0, IRQ_FLAG = ~0 (write-only, no read-modify-write).
      * Thresholds are only programmed by Linux when arming an IRQ wait; polling never arms one
      * (m1n1 dockchannel_uart polls RX_COUNT the same way). */
@@ -133,6 +142,7 @@ int mtp_kbd_resident_start(struct mtp_kbd *k, hm_service *s)
     write32(MTP_CPU_CONTROL, 0x10);
     printf("MTP: stage 6/7 CPU_CONTROL=RUN; RTKit wake/HELLO/EPMAP/power (bounded ~16 s)\n");
     if (!rtkit_boot(mtp_rtkit)) { printf("MTP: stage 6 FAILED: RTKit boot\n"); goto fail; }
+    if (mtp_kbd_attach_hook) mtp_kbd_attach_hook(k);
     printf("MTP: stage 7/7 waiting for interface INIT / enable (bounded 20 s + 10 s)\n");
     k->deadline = now_us(NULL) + 20000000;
     while (k->phase != MTP_LIVE && k->phase != MTP_FAILED) {

@@ -72,7 +72,8 @@ static void command(hm_service *s,hm_u32 seq) {
         if(q.report_id || !q.length || q.offset>n || q.length>n-q.offset) {r.status=HM_RANGE;goto done;}
         hm_copy(r.payload,s->interfaces[i].descriptor+q.offset,q.length);r.length=q.length;r.status=HM_OK;goto done;
     }
-    if(q.offset) goto done;
+    /* v1.1: only GET_FEATURE may carry an offset (chunked large feature reports). */
+    if(q.offset && q.op!=HM_GET_FEATURE) goto done;
     if(q.op==HM_ACTIVATE || q.op==HM_DEACTIVATE) {
         if(q.length||q.report_id) goto done;
         if(q.op==HM_ACTIVATE) s->active|=1u<<i;else {s->active&=~(1u<<i);drop_pending(s,q.iface);}
@@ -81,11 +82,24 @@ static void command(hm_service *s,hm_u32 seq) {
     if(q.op!=HM_OUTPUT && q.op!=HM_GET_FEATURE && q.op!=HM_SET_FEATURE) goto done;
     if(!q.length) {r.status=HM_RANGE;goto done;}
     r.status=HM_DENIED;
-    if(s->report) {
+    if(s->report && q.op==HM_GET_FEATURE) {
+        /* v1.1: the backend fills the whole report (<= HM_MAX_FEATURE) into private
+         * storage; the response carries [offset, offset+length) of it. Stateless:
+         * every chunk re-reads the backend's cached report. */
+        if(q.offset>HM_MAX_FEATURE-q.length) {r.status=HM_RANGE;goto done;}
+        n=q.offset+q.length; /* capacity: exactly what this chunk needs (v1: = length) */
+        hm_zero(s->big,sizeof(s->big));
+        r.status=s->report(s->backend,q.iface,q.op,q.report_id,s->big,&n);
+        if(r.status>HM_IO_ERROR || n>q.offset+q.length) {r.status=HM_IO_ERROR;goto done;}
+        if(r.status==HM_OK) {
+            if(q.offset>=n) {r.status=HM_RANGE;goto done;}
+            r.length=n-q.offset<q.length?n-q.offset:q.length;
+            hm_copy(r.payload,s->big+q.offset,r.length);
+        }
+    } else if(s->report) {
         n=q.length;
         r.status=s->report(s->backend,q.iface,q.op,q.report_id,q.payload,&n);
         if(r.status>HM_IO_ERROR || n>q.length) {r.status=HM_IO_ERROR;goto done;}
-        if(r.status==HM_OK && q.op==HM_GET_FEATURE) {r.length=n;hm_copy(r.payload,q.payload,n);}
     }
 done:
     s->last_seq=seq;hm_copy(s->data+HM_RESP_OFF,&r,sizeof(r));
@@ -100,7 +114,8 @@ hm_u32 hm_service_read(hm_service *s,hm_u32 page,hm_u32 off) {
     case HM_R_READY:return s->ready;case HM_R_COUNT:return s->count;
     case HM_R_HEAD:return s->head;case HM_R_TAIL:return s->tail;
     case HM_R_OVERFLOW:return s->overflow;case HM_R_ENABLE:return s->enabled;
-    case HM_R_IRQ:return s->ready && s->head!=s->tail;default:return 0;
+    case HM_R_IRQ:return s->ready && s->head!=s->tail;
+    case HM_R_CAPS:return HM_CAP_BIG_FEATURE;default:return 0;
     }
 }
 void hm_service_write(hm_service *s,hm_u32 page,hm_u32 off,hm_u32 v) {

@@ -92,6 +92,10 @@ struct rtkit_dev {
     bool mtp, tx_pending, oslog_buffer, mtp_boot_log;
     u64 sram_base, sram_size, tx_deadline;
     struct asc_message pending_tx;
+    /* MTP: host-provided buffers for requests with IOVA 0 (Linux rtkit-helper
+     * shmem_setup -> dma_alloc_coherent through dart-mtp). NULL = refuse, as before. */
+    bool (*mtp_alloc)(size_t sz, void **cpu, u64 *iova);
+    struct rtkit_buffer oslog_bfr;
 
     u64 dva_base;
 
@@ -191,6 +195,59 @@ void rtkit_mtp_mode(rtkit_dev_t *rtk, u64 base, size_t size)
     rtk->mtp = true;
     rtk->sram_base = base;
     rtk->sram_size = size;
+}
+
+static bool rtkit_mail_send(rtkit_dev_t *rtk, const struct asc_message *msg);
+
+void rtkit_mtp_host_buffers(rtkit_dev_t *rtk, bool (*alloc)(size_t sz, void **cpu, u64 *iova))
+{
+    rtk->mtp_alloc = alloc;
+}
+
+/*
+ * MTP buffer request with IOVA 0: the coprocessor asks the host for memory
+ * (Linux rtkit.c apple_rtkit_common_rx_get_buffer -> rtkit-helper shmem_setup ->
+ * dma_alloc_coherent). Allocate, then reply with the same type, the size and the
+ * DMA address. An identical repeat re-sends the reply; a changed one is refused.
+ * oslog: size in bytes at bits 55:36, IOVA >> 12 at bits 35:0, type at 63:56.
+ */
+static bool rtkit_mtp_host_buffer(rtkit_dev_t *rtk, u8 ep, struct rtkit_buffer *bfr, size_t sz,
+                                  bool oslog)
+{
+    if (!sz || !rtk->mtp_alloc)
+        return false;
+    if (bfr->bfr) {
+        if (bfr->sz != sz) {
+            printf("rtkit(mtp): buffer request ep 0x%x size 0x%lx while 0x%lx is live: refused\n", ep,
+                   (unsigned long)sz, (unsigned long)bfr->sz);
+            return false;
+        }
+    } else {
+        void *cpu;
+        u64 iova;
+        if (!rtk->mtp_alloc(sz, &cpu, &iova) || (iova & ~GENMASK(43, 0)) || (oslog && (iova & 0xfff))) {
+            printf("rtkit(mtp): host buffer for ep 0x%x size 0x%lx: allocation/map failed\n", ep,
+                   (unsigned long)sz);
+            return false;
+        }
+        bfr->bfr = cpu;
+        bfr->dva = iova;
+        bfr->sz = sz;
+        rtkit_printf("host buffer ep 0x%x size 0x%lx at iova 0x%lx (Linux: dma_alloc_coherent via dart-mtp)\n",
+                     ep, (unsigned long)sz, (unsigned long)iova);
+    }
+    struct asc_message reply;
+    reply.msg1 = ep;
+    if (oslog)
+        reply.msg0 = (1ULL << 56) | ((u64)(sz & 0xfffff) << 36) | ((bfr->dva >> 12) & GENMASK(35, 0));
+    else
+        reply.msg0 = FIELD_PREP(MGMT_TYPE, MSG_BUFFER_REQUEST) |
+                     FIELD_PREP(MSG_BUFFER_REQUEST_SIZE, sz >> 12) | (bfr->dva & GENMASK(43, 0));
+    if (!rtkit_mail_send(rtk, &reply)) {
+        rtkit_printf("unable to send host buffer reply\n");
+        return false;
+    }
+    return true;
 }
 
 static bool rtkit_mail_send(rtkit_dev_t *rtk, const struct asc_message *msg)
@@ -310,6 +367,8 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
                          FIELD_GET(MSG_BUFFER_REQUEST_IOVA, msg->msg);
 
     if (rtk->sram) {
+        if (rtk->mtp && !addr && rtk->mtp_alloc)
+            return rtkit_mtp_host_buffer(rtk, msg->ep, bfr, sz, false);
         if (rtk->mtp && (!sz || addr < rtk->sram_base || sz > rtk->sram_size ||
                          addr - rtk->sram_base > rtk->sram_size - sz)) {
             printf("rtkit(mtp): buffer request ep 0x%x iova 0x%lx size 0x%lx not inside MTP SRAM: "
@@ -519,6 +578,12 @@ skip_mtp_log:;
                     if (type == 1) {
                         u64 addr = (msg->msg & 0xfffffffffULL) << 12;
                         u64 size = (msg->msg >> 36) & 0xfffff;
+                        if (!addr && rtk->mtp_alloc) {
+                            if (!rtkit_mtp_host_buffer(rtk, msg->ep, &rtk->oslog_bfr, size, true))
+                                return -1;
+                            rtk->oslog_buffer = true;
+                            break;
+                        }
                         if (!size || addr < rtk->sram_base || size > rtk->sram_size ||
                             addr - rtk->sram_base > rtk->sram_size - size)
                             return -1;
