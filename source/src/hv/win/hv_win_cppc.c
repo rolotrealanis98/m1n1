@@ -243,6 +243,56 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
     return 0;
 }
 
+/*
+ * n7cpu: one compact line every 30 s while cpuperf-B is on, so the run log carries the CPPC/DVFS state without a
+ * host dump request: per cluster the p-state EL2 expects, STATUS current, CMD writes, and (Stage C) the average
+ * delivered/reference since the last line; per vCPU the last Desired (and total Desired writes).
+ */
+#define CPPC_PERIODIC_NS 30000000000UL
+static u64 periodic_last, periodic_t[DVFS_MAX_CLUSTERS], periodic_d[DVFS_MAX_CLUSTERS];
+
+static void cppc_periodic(u64 now)
+{
+    if (!periodic_last) {
+        periodic_last = now;
+        for (u32 i = 0; i < dvfs.nclusters && dl_on; i++) {
+            periodic_t[i] = mrs(CNTPCT_EL0);
+            periodic_d[i] = cppc_dl_value(&dl[i], periodic_t[i]);
+        }
+        return;
+    }
+    if (now - periodic_last < CPPC_PERIODIC_NS)
+        return;
+    periodic_last = now;
+    char buf[640];
+    int n = snprintf(buf, sizeof(buf), "HV/win cpuperf-P +%lds |", (long)((now - gov_t0) / 1000000000UL));
+    for (u32 i = 0; i < dvfs.nclusters && n < 560; i++) {
+        struct dvfs_cluster *c = &dvfs.c[i];
+        n += snprintf(buf + n, sizeof(buf) - n, " cl%d p%d st p%d w%ld f%d", i, c->expected, dl_on ? dl_cur[i] : 0,
+                      (long)c->writes, c->fail);
+        if (dl_on) {
+            u64 t = mrs(CNTPCT_EL0), d = cppc_dl_value(&dl[i], t);
+            u64 dt = t - periodic_t[i], dd = d - periodic_d[i];
+            n += snprintf(buf + n, sizeof(buf) - n, " dl %ld%%", dt ? (long)(dd * 100 / dt) : 0);
+            periodic_t[i] = t;
+            periodic_d[i] = d;
+        }
+        n += snprintf(buf + n, sizeof(buf) - n, " |");
+    }
+    u64 wsum = 0;
+    if (cppc.configured && n < 560) {
+        n += snprintf(buf + n, sizeof(buf) - n, " des");
+        for (u32 k = 0; k < cppc.ncpus && n < 620; k++) {
+            n += snprintf(buf + n, sizeof(buf) - n, " %d", cppc.slot[k].desired);
+            wsum += cppc.slot[k].desired_writes;
+        }
+    }
+    if (n >= (int)sizeof(buf))
+        n = sizeof(buf) - 1;
+    buf[n] = 0;
+    printf("%s (writes %ld)\n", buf, (long)wsum);
+}
+
 /* hv_tick() (boot CPU, big HV lock held): a no-op unless cpuperf-B is on. */
 void hv_win_cppc_tick(void)
 {
@@ -280,6 +330,7 @@ void hv_win_cppc_tick(void)
     dvfs_service(&dvfs, &dvfs_hw, desired, seen, now);
     if (dl_on)
         dl_update(tk);
+    cppc_periodic(now);
 
     /* residency (by the state we last wrote / inherited) and a bounded change timeline */
     if (!gov_res_last) {
