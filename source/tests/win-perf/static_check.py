@@ -92,5 +92,9 @@ check('storage files identical to nightly-4b (s1/*, hv_win_storage*, native, NV 
 r = subprocess.run(['git', '-C', str(WT), 'diff', '--name-only', PARENT, '--', 'source/src'], capture_output=True, text=True)
 bad = [p for p in r.stdout.split() if re.search(r'/s1/|hv_win_storage|hv_nvme|native_', p)]
 check(f'no storage-pattern file changed ({len(r.stdout.split())} source files changed)', not bad)
+# nightly-6c: the nightly-5c review's conditions for builds rebased on it (REVIEW-5c.md): these resident files unchanged
+r = subprocess.run(['git', '-C', str(WT), 'diff', '--quiet', PARENT, '--', 'source/src/heapblock.c', 'source/src/heapblock.h',
+                    'source/src/usb.c', 'source/src/mtp_dma.c'])
+check('heapblock.c/.h, usb.c, mtp_dma.c identical to the parent (review-5c condition)', r.returncode == 0)
 print(f'win-perf static: {fails} failed')
 sys.exit(1 if fails else 0)
