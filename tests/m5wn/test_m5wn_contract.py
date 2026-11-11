@@ -28,7 +28,7 @@ epoch, rb, rs, nr, np = struct.unpack_from("<QQQII", wire, 64)
 check(epoch == 123456789 and nr == 1 and len(wire) == 96 + 16 * (nr + np), "header counts")
 check(rb == plan["universe"][0] and rb + rs >= kw["heap_top"] + c.HEAP_PAD, "resident covers heap pad")
 prot = [struct.unpack_from("<QQ", wire, 96 + 16 * (nr + i)) for i in range(np)]
-check((0xF38108000, 0x8000) in prot, "M5WN frame protected")
+check((0xF38100000, 0x10000) in prot, "M5WN frame protected")
 check(any(b == plan["fd_base"] for b, _ in prot), "FD protected")
 for bad, what in [(dict(frames=frames[:2]), "missing frame"), (dict(epoch=0), "zero epoch")]:
     try:

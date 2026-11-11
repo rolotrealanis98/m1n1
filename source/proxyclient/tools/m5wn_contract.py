@@ -15,7 +15,7 @@ WN_MAGIC = 0x4E57354D
 REG = 0xF38108000
 CTRL = 0xF3810C000
 GSIV = 69
-FRAME = ("M5WN", REG, 0x8000)  # both 16 KiB granules
+FRAME = ("M5WN", 0xF38100000, 0x10000)  # the 64 KiB launcher frame holding both M5WN granules
 
 
 def descriptor(backend=1):
@@ -89,7 +89,7 @@ def build_registration(plan, *, resident_base, heap_top, adt_size, epoch, frames
             raise ValueError("synthetic frame alignment/overlap")
         spans.append(span)
         protected.append(("synthetic " + name, span))
-    if (REG, REG + 0x8000) not in spans:
+    if not any(a <= REG and REG + 0x8000 <= b for a, b in spans):
         raise ValueError("M5WN frame missing from the synthetic frames")
     for name, span in (("native framebuffer", plan.get("fb")), ("EL2 shadow", shadow)):
         if span is not None:
