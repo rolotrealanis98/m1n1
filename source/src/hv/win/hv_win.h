@@ -79,6 +79,8 @@ enum hv_win_irq_model {
  * a control. The 1-vCPU path never traps WFI (its boot-CPU WFIs stay short under the 1 kHz tick).
  */
 #define HV_WIN_F_NO_WFI_TRAP BIT(3)
+/* gpu-pt (launcher --gpu passthrough): guard PMGR GPX/AFR/GFX against power-off, refuse start with GFX off */
+#define HV_WIN_F_GPU_PS_GUARD BIT(4)
 
 /* P_HV_WIN_STATUS */
 enum hv_win_exit {
@@ -142,6 +144,10 @@ struct hv_win_state {
 };
 
 extern struct hv_win_state hv_win;
+
+/* gpu-pt (hv_win_gpu.c): PS guard, installed by hv_start(); report at guest exit */
+bool hv_win_gpu_start(void);
+void hv_win_gpu_report(void);
 
 enum hv_win_diag_stage {
     HV_WIN_DIAG_TRAP,

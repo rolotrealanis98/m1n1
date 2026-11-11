@@ -361,7 +361,7 @@ int hv_win_configure(u64 irq_model, u64 gicd_base, u64 gicr_base, u64 nr_vcpus, 
     }
 
     if (flags & ~(u64)(HV_WIN_F_PSCI_SMC | HV_WIN_F_RESERVE_CPU | HV_WIN_F_KEEP_STEAL |
-                       HV_WIN_F_NO_WFI_TRAP)) {
+                       HV_WIN_F_NO_WFI_TRAP | HV_WIN_F_GPU_PS_GUARD)) {
         printf("HV/win: unknown flags 0x%lx\n", flags);
         return -1;
     }
