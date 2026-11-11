@@ -266,6 +266,11 @@ void hv_start(void *entry, u64 regs[4])
         return;
     }
 
+    if (!hv_win_gpu_start()) { /* gpu-pt: no-op unless HV_WIN_F_GPU_PS_GUARD */
+        printf("HV: GPU power-state guard failed; guest refused\n");
+        return;
+    }
+
     if (!hv_cpu_state_setup_hook()) {
         printf("CPU state hook setup failed, can't start the hypervisor\n");
         return;

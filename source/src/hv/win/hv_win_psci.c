@@ -224,6 +224,7 @@ static void psci_system_exit(u32 reason)
         printf("HV/win: guest requested %s on CPU %d\n",
                reason == HV_WIN_EXIT_SYSTEM_OFF ? "SYSTEM_OFF" : "SYSTEM_RESET", smp_id());
     hv_win_pmu_report();
+    hv_win_gpu_report(); /* gpu-pt */
     /* smp2d: on a guest reset/bugcheck dump the resetting CPU's exit ring and the WFI/debug/integrity
      * counters, so a single hardware run settles the WFI-state-loss question. */
     hv_win_wfi_report();
