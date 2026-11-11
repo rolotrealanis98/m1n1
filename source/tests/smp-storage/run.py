@@ -91,10 +91,8 @@ MUTANTS = [
     s1_backend_poll();
     smps_hold(HV_SMPS_TICK, t0, 0);''')], 'main'),  # nightly-7: retargeted past the breadcrumbs (same intent)
     ('retire_lock_removed', [(L, '''    hv_storage_lock_take(); /* smp-storage */
-    smps_enter(HV_SMPS_OTHER); /* nightly-7 */
     storage_retire_locked();
-    hv_storage_lock_release();''', '''    smps_enter(HV_SMPS_OTHER); /* nightly-7 */
-    storage_retire_locked();''')], 'retire'),  # nightly-7: retargeted past the breadcrumbs (same intent)
+    hv_storage_lock_release();''', '''    storage_retire_locked();''')], 'retire'),
     ('lock_not_exclusive', [(L, '''        if (__atomic_compare_exchange_n(&storage_lock.owner, &none, me, false, __ATOMIC_ACQUIRE,
                                         __ATOMIC_RELAXED))
             break;''', '''        __atomic_store_n(&storage_lock.owner, me, __ATOMIC_RELAXED); (void)none;

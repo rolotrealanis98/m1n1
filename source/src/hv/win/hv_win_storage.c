@@ -196,7 +196,6 @@ static void storage_retire_locked(void);
 void hv_win_storage_retire(void)
 {
     hv_storage_lock_take(); /* smp-storage */
-    smps_enter(HV_SMPS_OTHER); /* nightly-7 */
     storage_retire_locked();
     hv_storage_lock_release();
 }
