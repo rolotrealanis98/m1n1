@@ -25,12 +25,14 @@ int n1_probe(const struct n1_hal *h, const struct n1_addrs *a, unsigned flags, n
     out[N1P_P0_STATUS] = N1_RD(h, a->port[0] + 0x804);
     out[N1P_P0_LINKSTS] = N1_RD(h, a->port[0] + 0x208);
     out[N1P_P0_LTSSM] = N1_RD(h, a->port[0] + 0x080);
-    for (i = 1; i < 4; i++)
-        if (a->port[i]) out[N1P_P1_LINKSTS + (i - 1)] = N1_RD(h, a->port[i] + 0x208); /* stage S */
     /* 2. power states (PMGR, read only) */
     for (i = 0; i < N1_PS_COUNT; i++) out[N1P_PS_FIRST + i] = h->ps_read(h->ctx, (enum n1_ps)i);
     if (ps_on(out[N1P_PS_FIRST + N1_PS_APCIE_SYS_GP]) && ps_on(out[N1P_PS_FIRST + N1_PS_APCIE_PHY_SW]))
         verdict |= N1V_GP_POWER;
+    /* the other GP ports' link status: stage S reads them only after stage A raised GP power */
+    if (verdict & N1V_GP_POWER)
+        for (i = 1; i < 4; i++)
+            if (a->port[i]) out[N1P_P1_LINKSTS + (i - 1)] = N1_RD(h, a->port[i] + 0x208);
     if ((out[N1P_RC_CTL] & 1) && (out[N1P_RC_STAT] & 1)) verdict |= N1V_RC_READY;
     /* 3. PERST# pad (stage A entry check) */
     out[N1P_PERST_PAD] = N1_RD(h, a->perst);
