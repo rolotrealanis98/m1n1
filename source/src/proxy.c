@@ -36,6 +36,7 @@
 #include "hv_win_smcp.h"
 #include "hv_win_m5wn.h"
 #include "hv_win_n1.h"
+#include "hv/win/hv_win_n1pt.h"
 #include "hv_win_dcpw.h"
 #include "hv/win/s1/native_link.h"
 #include "hv/win/s1/ans_ro.h"
@@ -701,6 +702,12 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_N1_PARK:
             reply->retval = hv_win_n1_park();
+            break;
+        case P_HV_WIN_N1PT_PREP:
+            reply->retval = hv_win_n1pt_prep(request->args[0], request->args[1], request->args[2], request->args[3]);
+            break;
+        case P_HV_WIN_N1PT_STAT:
+            reply->retval = hv_win_n1pt_stat(request->args[0]);
             break;
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");

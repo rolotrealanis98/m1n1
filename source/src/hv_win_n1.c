@@ -10,6 +10,7 @@
  * m1n1's storage snapshot/compare around every shared stage and (with ANS started) a GPT block
  * read before/after, resetting through the watchdog if storage is in doubt. */
 #include "hv_win_n1.h"
+#include "hv/win/hv_win_n1pt.h"
 #include "m5wn/n1/n1_probe.h"
 #include "m5wn/n1/n1_core.h"
 #include "pcie_t6050.h"
@@ -226,7 +227,11 @@ s64 hv_win_n1_park(void)
     return pcie_t6050_n1_park();
 }
 
-void hv_win_n1_retire(void) { hv_win_n1_park(); }
+void hv_win_n1_retire(void)
+{
+    hv_win_n1_park();
+    hv_win_n1pt_retire(); /* n1pt: PARK at guest exit / resident retire */
+}
 
 void *hv_win_n1_core(void) { return core.stage == N1_ST_RADIO ? &core : NULL; }
 

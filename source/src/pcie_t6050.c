@@ -941,3 +941,43 @@ int pcie_t6050_n1_cycle(void)
     printf("pcie-t6050: n1 link cycled\n");
     return 0;
 }
+
+/* ---- n1pt (wireless/n1-native-20261111): storage guard around the runtime PORT_CYCLE and PARK ---------
+ * The same registers and the same rule as storage_check() above (PS target/auto, NVMe BOOT_STATUS and CC must
+ * not change; PS actual-state/was-gated bits may), plus: ANS must not stop and CSTS must not turn fatal. No
+ * NVMe block read here: at run time ANS belongs to the resident's disk path. Reads only. compare = 0 takes the
+ * reference, 1 compares with it: 0 unchanged/allowed, -1 mismatch (each difference printed). */
+static u32 guard_ref[ST_COUNT];
+static bool guard_have_ref;
+
+int pcie_t6050_storage_guard(int compare)
+{
+    u32 cur[ST_COUNT];
+    int bad = 0;
+
+    if (!storage_addr[ST_ANS_CTRL] && storage_find())
+        return -1;
+    for (int i = 0; i < ST_COUNT; i++)
+        cur[i] = read32(storage_addr[i]);
+    if (!compare) {
+        memcpy(guard_ref, cur, sizeof(cur));
+        guard_have_ref = true;
+        return 0;
+    }
+    if (!guard_have_ref)
+        return -1;
+    for (int i = 0; i < ST_COUNT; i++) {
+        if (cur[i] == guard_ref[i])
+            continue;
+        if (i >= ST_PS && i < ST_SART && !((cur[i] ^ guard_ref[i]) & ~0x3f0))
+            continue;
+        if (i >= ST_PS || i == ST_BOOT_STATUS || i == ST_CC ||
+            (i == ST_ANS_CTRL && (guard_ref[i] & BIT(4)) && !(cur[i] & BIT(4))) ||
+            (i == ST_CSTS && (cur[i] & BIT(1)) && !(guard_ref[i] & BIT(1)))) {
+            printf("pcie-t6050: n1pt storage guard: 0x%lx 0x%08x -> 0x%08x\n", storage_addr[i], guard_ref[i],
+                   cur[i]);
+            bad++;
+        }
+    }
+    return bad ? -1 : 0;
+}

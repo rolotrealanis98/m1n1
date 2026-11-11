@@ -1,0 +1,270 @@
+/* SPDX-License-Identifier: MIT */
+/*
+ * n1pt (wireless/n1-native-20261111): the N1 Wi-Fi/BT chip passed through to the Windows guest by PCI ID.
+ * Contract: wireless/n1-native-20261111/INTERFACE.md s1-s2. Register inventory and safety argument:
+ * wireless/n1-native-20261111/platform/REGISTERS.md.
+ *
+ *  P_HV_WIN_N1PT_PREP (win, ecam_ipa, iova, gsiv)  pre-guest, from the launcher, once per session, before any
+ *      disk path and before the SMC client (SMCP) starts: m1n1 mode-4 training (gP13 pulse, storage snapshot and
+ *      NVMe block compare: pcie_t6050_n1_train_ans), then n1pt_plat_prepare (bridge, fn0 BAR0/MSI, ROM check,
+ *      port MSI, RID2SID, the 128 MiB pool off the top of RAM and its DART tables). Any failure parks the port
+ *      and returns < 0: the launcher then boots Windows without the N1.
+ *  P_HV_WIN_N1PT_STAT (index)                       state words for the launcher (pool address, flags, counters)
+ *  hv_win_n1pt_start()  in hv_start(): ECAM and window hooks, BAR0 Device-nGnRnE, AIC lines; never refuses the
+ *      guest (a failure leaves an all-ones bus and parks the N1).
+ *  hv_win_n1pt_irq()    AIC events of the N1 MSI lines and the port interrupt -> IRQ_STATUS -> one level SPI.
+ *  hv_win_n1pt_retire() guest exit (SYSTEM_OFF/RESET, host stop, dead-man) and resident retire: PARK.
+ */
+
+#include "types.h"
+#include "hv_win.h"
+#include "hv_win_n1pt.h"
+#include "hv_win_n1pt_logic.h"
+#include "hv_win_storage.h"
+#include "../hv.h"
+#include "aic.h"
+#include "hv_win_n1.h"
+#include "hv_win_smcp.h"
+#include "n1pt_plat.h"
+#include "pcie_t6050.h"
+#include "pcie_t6050_n1.h"
+#include "string.h"
+#include "utils.h"
+
+static struct n1pt st;
+static struct n1pt_plat plat;
+static u64 ecam_ipa, pool;
+static u32 gsiv;
+static bool attempted, prepped, armed, irq_armed, retired;
+static u32 link_events;
+static DECLARE_SPINLOCK(irq_lock);
+
+extern bool hv_started_cpus[];
+
+static bool guest_started(void)
+{
+    for (int i = 0; i < MAX_CPUS; i++)
+        if (hv_started_cpus[i])
+            return true;
+    return false;
+}
+
+static void s2_flush(void)
+{
+    sysop("dsb ishst");
+    sysop("tlbi vmalls12e1is");
+    sysop("dsb ish");
+    sysop("isb");
+}
+
+/* ---- ops for the logic and the commands ---- */
+static u32 o_cfg_read(void *c, unsigned fn, unsigned off) { (void)c; return n1pt_plat_cfg_read(&plat, fn, off); }
+static void o_cfg_write(void *c, unsigned fn, unsigned off, u32 v) { (void)c; n1pt_plat_cfg_write(&plat, fn, off, v); }
+static bool o_link_up(void *c) { (void)c; return n1pt_plat_link_up(&plat); }
+static int o_command(struct n1pt *s, unsigned cmd, u32 arg) { (void)arg; return n1pt_plat_command(&plat, s, cmd); }
+static u64 o_now_us(void *c) { (void)c; return ticks_to_usecs(get_ticks()); }
+static void o_spi(void *c, bool level) { (void)c; hv_vgic3_set_spi_level(gsiv, level); }
+static const struct n1pt_ops ops = {0, o_cfg_read, o_cfg_write, o_link_up, o_command, o_now_us, o_spi};
+
+static bool win_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width);
+
+static int cb_map_bars(void *c, int bar0, int bar2)
+{
+    (void)c;
+    u64 b0 = plat.win + N1PT_BAR0_OFF, b2 = plat.win + N1PT_BAR2_OFF;
+    int r0 = bar0 ? hv_map_hw_dev(b0, b0, N1PT_BAR0_SIZE) : hv_map_hook(b0, win_hook, N1PT_BAR0_SIZE);
+    int r2 = bar2 ? hv_map_hw_dev(b2, b2, N1PT_BAR2_SIZE) : hv_map_hook(b2, win_hook, N1PT_BAR2_SIZE);
+    s2_flush();
+    return (r0 < 0 || r2 < 0) ? -1 : 0;
+}
+
+static void cb_link_irq(void *c, int on)
+{
+    (void)c;
+    if (!irq_armed)
+        return;
+    if (on && link_events <= 256)
+        aic_unmask(N1PT_LINK_AIC);
+    else
+        aic_mask(N1PT_LINK_AIC);
+}
+static const struct n1pt_plat_cb plat_cb = {0, cb_map_bars, cb_link_irq};
+
+/* ---- guest traps (under the big HV lock) ---- */
+static bool ecam_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width)
+{
+    UNUSED(ctx);
+    u64 off = addr - ecam_ipa;
+    if (write)
+        n1pt_ecam_write(&st, off, (u32)*val, width);
+    else
+        *val = width > 2 ? ~0UL : n1pt_ecam_read(&st, off, width);
+    return true;
+}
+
+static bool win_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width)
+{
+    UNUSED(ctx);
+    u64 off = addr - plat.win;
+    if (write && width == 2 && off == N1PT_BAR4_OFF + N1SV_CMD) {
+        n1pt_window_write(&st, off, (u32)*val, width); /* the command runs without the IRQ lock */
+        return true;
+    }
+    spin_lock(&irq_lock);
+    if (write)
+        n1pt_window_write(&st, off, (u32)*val, width);
+    else
+        *val = width > 2 ? ~0UL : n1pt_window_read(&st, off, width);
+    spin_unlock(&irq_lock);
+    return true;
+}
+
+/* ---- pre-guest ---- */
+s64 hv_win_n1pt_prep(u64 win, u64 ecam, u64 iova, u64 spi)
+{
+    if (guest_started() || attempted) {
+        printf("n1pt: PREP refused (guest running or already tried)\n");
+        return -1;
+    }
+    attempted = true;
+    if (hv_win_disk_path_used() || hv_win_smcp_attempted() || hv_win_n1_touched()) {
+        printf("n1pt: PREP refused: a disk path, the SMC client or the old N1 path ran first (order: N1 first)\n");
+        return -2;
+    }
+    if (!win || (win & (N1PT_WIN_SIZE - 1)) || !ecam || (ecam & (N1PT_ECAM_SIZE - 1)) || (iova & 0x3fff) ||
+        iova + N1PT_POOL_SIZE > (1UL << 36) || (iova <= N1PT_DOORBELL && N1PT_DOORBELL < iova + N1PT_POOL_SIZE) ||
+        spi < 32 || spi > 1019) {
+        printf("n1pt: PREP refused: layout win 0x%lx ecam 0x%lx iova 0x%lx spi %lu\n", win, ecam, iova, spi);
+        return -3;
+    }
+    if (pcie_t6050_n1_addrs(&plat.a))
+        return -4;
+    printf("n1pt: training apcie0 port 0 (gP13 pulse + m1n1 mode 4 with the storage snapshot/NVMe compare)\n");
+    if (pcie_t6050_n1_train_ans(N1_TRAIN_SMC)) {
+        pcie_t6050_n1_park();
+        printf("n1pt: N1 REFUSED: training failed (port parked); Windows boots without it\n");
+        return -5;
+    }
+    pool = top_of_memory_alloc(N1PT_POOL_SIZE);
+    memset((void *)pool, 0, N1PT_POOL_SIZE);
+    plat.win = win;
+    plat.cb = &plat_cb;
+    if (n1pt_plat_prepare(&plat, pool, iova, N1PT_POOL_SIZE)) {
+        pcie_t6050_n1_park();
+        printf("n1pt: N1 REFUSED: preparation failed (port parked); pool 0x%lx stays out of guest RAM\n", pool);
+        return -6;
+    }
+    ecam_ipa = ecam;
+    gsiv = (u32)spi;
+    n1pt_init(&st, &ops, win, pool, iova, N1PT_POOL_SIZE);
+    prepped = true;
+    printf("n1pt: PREP done: ECAM IPA 0x%lx, window 0x%lx, pool 0x%lx+0x%lx IOVA 0x%lx, SPI %u\n", ecam, win, pool,
+           (u64)N1PT_POOL_SIZE, iova, gsiv);
+    return 0;
+}
+
+u64 hv_win_n1pt_stat(u64 index)
+{
+    switch (index) {
+    case 0:
+        return (u64)prepped | (u64)armed << 1 | (u64)irq_armed << 2 | (u64)st.parked << 3 | (u64)st.guard << 4 |
+               (u64)st.fns_enabled << 5 | (u64)st.dead << 6 | (u64)retired << 7 | (u64)attempted << 8;
+    case 1: return pool;
+    case 2: return prepped ? N1PT_POOL_SIZE : 0;
+    case 3: return st.pool_iova;
+    case 4: return plat.four_level;
+    case 5: return st.n_irq;
+    case 6: return st.n_cmds;
+    case 7: return st.n_dropped;
+    case 8: return st.n_bar_moves;
+    case 9: return (u64)(s64)st.cmd_result;
+    case 10: return link_events;
+    default: return 0;
+    }
+}
+
+/* ---- guest start (hv_start), never refuses the guest ---- */
+bool hv_win_n1pt_start(void)
+{
+    if (!prepped)
+        return true;
+    if (hv_map_hook(ecam_ipa, ecam_hook, N1PT_ECAM_SIZE) < 0) {
+        printf("n1pt: N1 REFUSED at start: ECAM hook failed (Windows boots without it)\n");
+        st.dead = true;
+        st.ops->command(&st, N1PT_CMD_PARK, 0);
+        return true;
+    }
+    if (hv_map_hook(plat.win, win_hook, N1PT_WIN_SIZE) < 0 || !n1pt_plat_link_up(&plat) ||
+        cb_map_bars(0, 1, 0)) {
+        printf("n1pt: N1 REFUSED at start: window map failed or link down (bus reads all-ones)\n");
+        st.dead = true;
+        hv_map_hook(plat.win, win_hook, N1PT_WIN_SIZE);
+        s2_flush();
+        st.ops->command(&st, N1PT_CMD_PARK, 0);
+        return true;
+    }
+    s2_flush();
+    if (!hv_win_storage_claims_spi(gsiv) && hv_vgic3_spi_unassigned(gsiv) && hv_win_aic_claim_t6050()) {
+        for (u32 d = 0; d < 64; d++)
+            if (n1pt_msi_bit(d) >= 0)
+                aic_unmask(N1PT_MSI_AIC_BASE + d);
+        aic_unmask(N1PT_LINK_AIC);
+        irq_armed = true;
+    } else {
+        printf("n1pt: interrupts NOT armed (AIC layout or SPI %u taken): the driver must poll\n", gsiv);
+    }
+    hv_vgic3_set_spi_level(gsiv, false);
+    armed = true;
+    printf("n1pt: armed: ECAM 0x%lx (bus 0 root port 106b:100c, bus 1 106b:1900), BAR0 0x%lx Device-nGnRnE, BAR2 "
+           "0x%lx (all-ones until ENABLE_FUNCTIONS), service page 0x%lx, SPI %u%s\n",
+           ecam_ipa, (u64)(plat.win + N1PT_BAR0_OFF), (u64)(plat.win + N1PT_BAR2_OFF), (u64)(plat.win + N1PT_BAR4_OFF), gsiv,
+           irq_armed ? " (MSI AIC 1888+, link AIC 1523)" : "");
+    return true;
+}
+
+/* AIC event (hv_win_handle_irq): true if it was an N1 line */
+bool hv_win_n1pt_irq(u32 line)
+{
+    if (!irq_armed)
+        return false;
+    int bit = n1pt_aic_bit(line);
+    if (bit < 0)
+        return false;
+    u32 bits = BIT(bit);
+    if (bit == 31) {
+        u32 v = n1pt_plat_link_irq_ack(&plat);
+        bits = (v & BIT(14)) ? N1PT_IRQ_LINK : 0;
+        if (++link_events > 256) {
+            if (link_events == 257)
+                printf("n1pt: port interrupt storm (INTSTAT 0x%x): line 1523 left masked\n", v);
+            return true;
+        }
+    }
+    spin_lock(&irq_lock);
+    n1pt_irq_latch(&st, bits);
+    spin_unlock(&irq_lock);
+    aic_unmask(line);
+    return true;
+}
+
+/* guest exit and resident retire: PARK (LINUX-MAP 7: a live link at restart hangs the next boot) */
+void hv_win_n1pt_retire(void)
+{
+    if (!prepped || retired)
+        return;
+    retired = true;
+    if (irq_armed) {
+        for (u32 d = 0; d < 64; d++)
+            if (n1pt_msi_bit(d) >= 0)
+                aic_mask(N1PT_MSI_AIC_BASE + d);
+        aic_mask(N1PT_LINK_AIC);
+    }
+    int r = 0;
+    if (st.guard)
+        printf("n1pt: retire: NOT parked: the storage guard tripped earlier (no more PHY activity)\n");
+    else if (!st.parked)
+        r = n1pt_plat_command(&plat, &st, N1PT_CMD_PARK);
+    printf("n1pt: retire: park %d; irqs %u, commands %u (last %d, %u us), dropped cfg writes %u, BAR moves %u, "
+           "link events %u, guard %d\n",
+           r, st.n_irq, st.n_cmds, st.cmd_result, st.last_us, st.n_dropped, st.n_bar_moves, link_events, st.guard);
+}

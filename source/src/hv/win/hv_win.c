@@ -10,6 +10,7 @@
 #include "hv_win_smcp.h"
 #include "hv_win_m5wn.h"
 #include "hv_win_n1.h"
+#include "hv_win_n1pt.h"
 #include "hv_win_storage.h" /* nightly-2: hv_win_storage_model / native_stat (read-only) */
 #include "aic.h"
 #include "aic_regs.h"
@@ -980,6 +981,16 @@ static bool hv_win_aic_layout_valid(void)
            aic->intmaskset_stride == 0x4a00 && aic->intmaskclear_stride == 0x4a00;
 }
 
+/* n1pt: the N1 MSI/port lines are delivered by EL2 itself (hv_win_n1pt_irq), not through MAP_IRQ; they need the
+ * same T6050 AIC enable. false if the AIC is not the measured T6050 layout. */
+bool hv_win_aic_claim_t6050(void)
+{
+    if (!hv_win_aic_layout_valid())
+        return false;
+    hv_win_aic_enable_pending = true;
+    return true;
+}
+
 static bool hv_win_aic_enable_on_return(void)
 {
     if (!hv_win_aic_enable_pending)
@@ -1073,9 +1084,11 @@ bool hv_win_handle_irq(struct exc_info *ctx)
 
         if (!event)
             break;
-        if (FIELD_GET(AIC_EVENT_TYPE, event) == AIC_EVENT_TYPE_HW)
-            hv_vgic3_handle_aic_irq(FIELD_GET(AIC_EVENT_DIE, event) * aic->max_irq +
-                                    FIELD_GET(AIC_EVENT_NUM, event));
+        if (FIELD_GET(AIC_EVENT_TYPE, event) == AIC_EVENT_TYPE_HW) {
+            u32 line = FIELD_GET(AIC_EVENT_DIE, event) * aic->max_irq + FIELD_GET(AIC_EVENT_NUM, event);
+            if (!hv_win_n1pt_irq(line)) /* n1pt: N1 MSI and port lines latch into its service page */
+                hv_vgic3_handle_aic_irq(line);
+        }
     }
 
     return true;

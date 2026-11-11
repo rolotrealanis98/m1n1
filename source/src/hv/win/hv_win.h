@@ -158,6 +158,7 @@ extern struct hv_win_state hv_win;
 
 /* gpu-pt (hv_win_gpu.c): PS guard, installed by hv_start(); report at guest exit */
 bool hv_win_gpu_start(void);
+bool hv_win_aic_claim_t6050(void); /* n1pt: arm the T6050 AIC enable for EL2-delivered lines */
 void hv_win_gpu_report(void);
 
 enum hv_win_diag_stage {

@@ -160,6 +160,7 @@ HV_OBJECTS := $(patsubst %,hv/%, \
 	win/hv_win_pmu.o \
 	win/hv_win_pmu_rewrite.o \
 	win/hv_win_gpu.o \
+	win/hv_win_n1pt.o \
 	win/hv_vgic3.o)
 
 OBJECTS := \
@@ -175,6 +176,7 @@ OBJECTS := \
 	cpufreq.o \
 	dapf.o \
 	dart.o dart_identity.o \
+	n1pt_dart.o n1pt_plat.o \
 	dcp.o \
 	dcp_iboot.o \
 	devicetree.o \

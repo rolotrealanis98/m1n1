@@ -193,6 +193,7 @@ static bool smc_bringup(void)
 extern bool hv_started_cpus[];
 
 _Static_assert(FP_SMCP_F_POWER_ACTIONS == SMCP_REC_F_POWER_ACTIONS, "policy flag bit");
+bool hv_win_smcp_attempted(void) { return attempted; }
 bool hv_win_smcp_actions_armed(void) { return attempted && (rec_flags & SMCP_REC_F_POWER_ACTIONS); }
 
 s64 hv_win_smcp_configure(u64 version, u64 flags)
