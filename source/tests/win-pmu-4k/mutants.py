@@ -129,7 +129,8 @@ def build_and_run(d):
     c1 = subprocess.run(['clang', *CFLAGS, '-DPMU_MAX_OPEN=4', '-iquote', str(legacy / 'shim'), '-iquote', str(d),
                          str(here / 'test_4k.c'), str(d / 'hv_win_pmu.c'), str(d / 'hv_win_pmu_rewrite.c'),
                          '-o', str(t4)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    c2 = subprocess.run(['clang', *CFLAGS, '-Wundef', '-Wsign-compare', '-iquote', str(legacy / 'shim'),
+    # nightly-7: the legacy suite is built with the pin list it fills (as its Makefile does)
+    c2 = subprocess.run(['clang', *CFLAGS, '-DPMU_MAX_PINNED=256', '-Wundef', '-Wsign-compare', '-iquote', str(legacy / 'shim'),
                          '-iquote', str(d), str(legacy / 'test_pmu_rewrite.c'), str(d / 'hv_win_pmu_rewrite.c'),
                          str(d / 'hv_win_pmu.c'), '-o', str(lg)],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
