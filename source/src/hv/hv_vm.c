@@ -1612,9 +1612,6 @@ bool hv_handle_dabort(struct exc_info *ctx)
         return false;
     }
 
-    if (hv_xt_get(ipa, NULL, NULL) != HV_XT_UNTRACKED)
-        return false; /* PMU store emulation denied: leave RO/XN, hand to proxy */
-
     if (IS_HW(pte)) {
         printf("HV: Data abort on mapped page (0x%lx -> 0x%lx)\n", far, pte);
         // Try again, this is usually a race

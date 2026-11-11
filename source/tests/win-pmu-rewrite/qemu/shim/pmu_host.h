@@ -32,6 +32,8 @@
 int bm_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #define printf bm_printf
 void *memset(void *s, int c, size_t n);
+void *calloc(size_t n, size_t size); /* hv_win_pmu.c's 4 KiB frame bytes (nightly-5), el2.c */
+void free(void *p);
 
 void dc_civac_range(void *addr, size_t length);
 void dc_cvac_range(void *addr, size_t length);

@@ -83,10 +83,11 @@ u32 pmu_rw_rewrite_words_ex(u32 *words, u32 n, pmu_rw_record_fn *rec, pmu_rw_rec
     return done;
 }
 
-/* Proof of execution belongs to hv_win_pmu.c. This function only enforces the
- * frame boundary and the existing data guard. Keep the generic corpus API above. */
-u32 pmu_rw_rewrite_frame(u32 *words, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
-                         void *arg, u64 *counts)
+/* Production 4 KiB frame scanner. Proof of execution belongs to hv_win_pmu.c; this enforces the
+ * frame boundary and the data guard. next: the word after the frame (only read, for the guard of
+ * word 1023), or NULL when there is none: then a PMU word in the last slot is left alone. */
+u32 pmu_rw_rewrite_frame(u32 *words, const u32 *next, pmu_rw_record_fn *rec,
+                         pmu_rw_record_fn *skip, void *arg, u64 *counts)
 {
     u32 done = 0;
     for (u32 i = 0; i < 1024; i++) {
@@ -96,18 +97,19 @@ u32 pmu_rw_rewrite_frame(u32 *words, pmu_rw_record_fn *rec, pmu_rw_record_fn *sk
             counts[PMU_RW_SKIP_OTHER]++;
             continue;
         }
-        if (i == 1023) {
+        if (i == 1023 && !next) {
             counts[PMU_RW_SKIP_BOUNDARY]++;
             continue;
         }
-        if (pmu_rw_next_is_data(words[i + 1])) {
+        u32 following = i == 1023 ? *(const volatile u32 *)next : words[i + 1];
+        if (pmu_rw_next_is_data(following)) {
             counts[PMU_RW_SKIP_DATA]++;
             if (skip)
-                skip(arg, i, old, words[i + 1]);
+                skip(arg, i, old, following);
             continue;
         }
         u32 replacement = pmu_rw_replacement(old);
-        *(volatile u32 *)&words[i] = replacement;
+        *(volatile u32 *)&words[i] = replacement; /* one aligned, single-copy atomic 32-bit store */
         counts[kind]++;
         done++;
         if (rec)

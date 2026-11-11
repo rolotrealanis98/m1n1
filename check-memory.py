@@ -111,7 +111,7 @@ int main(void){
  for(unsigned attr=0;attr<15;attr++)reject_leaf(((IPA+0x4000)|ATTR)&~(15UL<<2)|(u64)attr<<2);
  reject_leaf(((IPA+0x4000)|ATTR)&~BIT(10));reject_leaf(((IPA+0x4000)|ATTR)&~BIT(8));
  reject_leaf((IPA+0x8000)|ATTR);reject_leaf(((IPA+0x4000)|ATTR)|BIT(56));
- reject_leaf((((IPA+0x4000)|ATTR)|BIT(55)|BIT(54))&~BIT(7)); /* SCANNING RO+XN */
+ /* nightly-5: SCANNING RO+XN is no longer refused here: it is admitted in the loop below */
  reject_leaf((((IPA+0x4000)|ATTR)|BIT(55)|BIT(54))&~(3UL<<6)); /* tracked, S2AP none */
  reject_leaf((((IPA+0x4000)|ATTR)|BIT(55))&~(3UL<<6)|BIT(7)); /* tracked, S2AP WO */
  reject_leaf(((((IPA+0x4000)|ATTR)|BIT(55))&~BIT(7))|BIT(52)); /* CODE with the contiguous bit */
@@ -119,9 +119,11 @@ int main(void){
  CHECK(dma_calls==0); /* a refused span never reaches the PMU reset */
  /* pmu-reads: PINNED RW+X and CODE RO+X are admitted both ways (only RW pages are ever tracked;
   * CODE's RO is the rewrite's write trap). A write re-arms exactly the admitted span, after every
-  * check; the provider itself leaves the descriptor alone (the PMU helper owns that change). */
- for(int st=0;st<2;st++){
-  registered();l3[1]=st?(((IPA+0x4000)|ATTR)|BIT(55)):((((IPA+0x4000)|ATTR)|BIT(55))&~BIT(7));
+  * check; the provider itself leaves the descriptor alone (the PMU helper owns that change).
+  * nightly-5: SCANNING RO+XN (st 2) is admitted as well: the 4 KiB scan granule keeps re-protected
+  * blocks in it between execution windows (it was refused above as a transient state before). */
+ for(int st=0;st<3;st++){
+  registered();l3[1]=st==2?((((IPA+0x4000)|ATTR)|BIT(55)|BIT(54))&~BIT(7)):st?(((IPA+0x4000)|ATTR)|BIT(55)):((((IPA+0x4000)|ATTR)|BIT(55))&~BIT(7));
   u64 saved=l3[1];dma_calls=0;
   CHECK(hv_storage_guest_span(&mem,IPA+0x4000,32,false));CHECK(dma_calls==0);
   CHECK(hv_storage_guest_span(&mem,IPA+0x3ff0,32,true));CHECK(dma_calls==1&&dma_ipa==IPA+0x3ff0&&dma_len==32);

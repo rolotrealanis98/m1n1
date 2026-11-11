@@ -42,10 +42,11 @@ bool hv_storage_mem_begin(struct hv_storage_mem *m, u64 epoch);
 bool hv_storage_mem_end(struct hv_storage_mem *m);
 void hv_storage_mem_retire(struct hv_storage_mem *m);
 /* Exact S0/S1 guest_span ABI. Reads and writes both require actual RW pages;
- * an execute-tracked page counts as RW in the PMU rewrite's DIRTY, CODE and
- * PINNED states (never SCANNING). pmu-reads: a write admission resets the
- * admitted pages' rewrite state (CODE/PINNED -> DIRTY, permissions only, same
- * output address, broadcast TLBI; hv_win_pmu_dma_write) so code EL2 copies in is
+ * an execute-tracked page counts as RW in every PMU rewrite state (DIRTY,
+ * SCANNING, CODE, PINNED; nightly-5: SCANNING is stable). pmu-reads: a write
+ * admission resets the admitted pages' rewrite state (no execute permission,
+ * touched frames rescanned at their next fetch; permissions only, same output
+ * address, broadcast TLBI; hv_win_pmu_dma_write) so code EL2 copies in is
  * rescanned before it runs; nothing else in S2, no cache attributes, no scans.
  * No guest VA translation. Identity IPA == PA prevents distinct admitted IPAs
  * aliasing the same physical bytes. */

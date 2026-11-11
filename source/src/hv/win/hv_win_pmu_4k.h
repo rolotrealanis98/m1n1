@@ -8,6 +8,7 @@
 #define PMU_FRAME_WORDS (PMU_FRAME_SIZE / 4)
 #define PMU_FRAME_EXECUTED 1U
 #define PMU_FRAME_SCANNED 2U
+#define PMU_FRAME_LISTED 0x80U /* first frame of a block only: block is on the open list */
 
 /* Small, conservative stage-1 execute-permission walk. Unsupported formats deny scanning.
  * read64 must accept only normal guest RAM and must not perform device reads.
@@ -30,10 +31,10 @@ static inline bool pmu_s1_exec(const struct pmu_s1 *s, u64 va, u64 pstate,
         *ipa = va;
         return true;
     }
-    /* No LPA2, E0PD, HPD or hardware-use overrides of hierarchical permissions.
-     * Ignoring HPD could incorrectly use APTable.RO to bypass WXN. */
-    if ((s->tcr & (BIT(59) | BIT(55) | BIT(56) | (0x3ffUL << 41))) ||
-        ((s->tcr >> 32) & 7) > 5)
+    /* No LPA2 or E0PD. HPD0/HPD1 are honoured below (Windows sets both: TCR_EL1
+     * 0x615b5513511 on hardware); HWU bits only re-purpose descriptor bits 59-62,
+     * which the leaf check below never reads. */
+    if ((s->tcr & (BIT(59) | BIT(55) | BIT(56))) || ((s->tcr >> 32) & 7) > 5)
         return false;
     bool upper = !!(va & BIT(55));
     u32 sz = upper ? (s->tcr >> 16) & 63 : s->tcr & 63;
@@ -48,10 +49,18 @@ static inline bool pmu_s1_exec(const struct pmu_s1 *s, u64 va, u64 pstate,
     if ((va & ~mask) != (upper ? ~mask : 0))
         return false;
     u32 start = 4 - (bits - 12 + 8) / 9;
-    u64 table = s->ttbr[upper] & 0x0000fffffffff000UL;
-    /* Conservative: require a full-page-aligned root; ASID and CnP are ignored. */
-    if (s->ttbr[upper] & 0xffeUL)
+    /* The root table holds 2^(bits - shift) entries, so it can be smaller than 4 KiB
+     * (Windows: T1SZ 17, a 2 KiB level-0 table, TTBR1_EL1 0x...e800). BADDR is
+     * aligned to the table size (at least 64 bytes); the bits below it are RES0.
+     * ASID and CnP are ignored. */
+    u32 root_align = bits - (12 + 9 * (3 - start)) + 3;
+    if (root_align < 6)
+        root_align = 6;
+    u64 table = s->ttbr[upper] & 0x0000fffffffffffeUL & ~((1UL << root_align) - 1);
+    if (s->ttbr[upper] & ((1UL << root_align) - 1) & ~1UL)
         return false;
+    /* HPD: APTable, PXNTable and UXNTable are ignored for this half. */
+    bool hpd = !!(s->tcr & BIT(upper ? 42 : 41));
     bool pxn = false, uxn = false, no_user = false, ro = false;
     for (u32 level = start; level <= 3; level++) {
         u32 shift = 12 + 9 * (3 - level);
@@ -61,10 +70,12 @@ static inline bool pmu_s1_exec(const struct pmu_s1 *s, u64 va, u64 pstate,
             (d & (3UL << 48)))
             return false;
         if (level < 3 && (d & 2)) {
-            pxn |= !!(d & BIT(59));
-            uxn |= !!(d & BIT(60));
-            no_user |= !!(d & BIT(61));
-            ro |= !!(d & BIT(62));
+            if (!hpd) {
+                pxn |= !!(d & BIT(59));
+                uxn |= !!(d & BIT(60));
+                no_user |= !!(d & BIT(61));
+                ro |= !!(d & BIT(62));
+            }
             table = d & 0x0000fffffffff000UL;
             continue;
         }

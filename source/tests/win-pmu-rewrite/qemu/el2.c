@@ -165,6 +165,28 @@ static void *memalign(size_t align, size_t size)
     return heap + start;
 }
 
+void *calloc(size_t n, size_t size)
+{
+    void *p = memalign(64, n * size);
+    memset(p, 0, n * size);
+    return p;
+}
+
+void free(void *p)
+{
+    (void)p;
+}
+
+/* nightly-5, 4 KiB granule: the guest's live stage-1 registers through the VHE _EL12 names */
+#include "hv_win_pmu_4k.h"
+bool pmu_host_s1(struct pmu_s1 *s)
+{
+    *s = (struct pmu_s1){.sctlr = mrs(SCTLR_EL12),
+                         .tcr = mrs(TCR_EL12),
+                         .ttbr = {mrs(TTBR0_EL12), mrs(TTBR1_EL12)}};
+    return true;
+}
+
 size_t heapblock_remaining(void)
 {
     return sizeof(heap) - heap_used + (16UL << 20); /* + hv_win_pmu.c's 16 MiB margin */
@@ -227,9 +249,22 @@ static void finish(void)
     /* page A: 6 PMU words; page B: 1 (written by the guest after its first run); page E: 1 (through
      * a VA alias, MMU on); main page: 1 data word that looks like mrs PMCCNTR (the documented risk)
      */
-    check_stat("insns-rewritten", HV_WIN_PMU_INSNS, 9, 9);
-    check_stat("pmccntr", HV_WIN_PMU_INSNS_PMCCNTR, 5, 5);
+    /* nightly-5: + page F frame 1 (1 PMCCNTR); 16 KiB granule: + page A's frame-1 data word */
+#ifdef GRANULE_16K
+    check_stat("insns-rewritten", HV_WIN_PMU_INSNS, 11, 11);
+    check_stat("pmccntr", HV_WIN_PMU_INSNS_PMCCNTR, 6, 6);
+    check_stat("other-mrs", HV_WIN_PMU_INSNS_MRS, 3, 3);
+    check_stat("rewrites outside the fetched frame (page A data, page F frame 1)",
+               HV_WIN_PMU_MODIFIED_NEVER_EXECUTED, 2, 2);
+#else
+    check_stat("insns-rewritten", HV_WIN_PMU_INSNS, 10, 10);
+    check_stat("pmccntr", HV_WIN_PMU_INSNS_PMCCNTR, 6, 6);
     check_stat("other-mrs", HV_WIN_PMU_INSNS_MRS, 2, 2);
+    check_stat("modified-never-executed", HV_WIN_PMU_MODIFIED_NEVER_EXECUTED, 0, 0);
+    check_stat("unproven fetches", HV_WIN_PMU_EXEC_DENIED, 0, 0);
+    check_stat("re-protects (page F at least)", HV_WIN_PMU_REPROTECTS, 1, 64);
+    check_stat("frames modified (main, A, B, E, F1)", HV_WIN_PMU_FRAMES_MODIFIED, 5, 5);
+#endif
     check_stat("msr", HV_WIN_PMU_INSNS_MSR, 2, 2);
     check_stat("pinned (page C)", HV_WIN_PMU_PINS, 1, 1);
     check_stat("walker flips (page D)", HV_WIN_PMU_WALK_FLIPS, 1, 1);
@@ -257,6 +292,8 @@ void el2_sync(struct exc_info *ctx)
             if (imm == 0 && ctx->regs[0] == 0x84000008) {
                 bm_printf("guest: SYSTEM_OFF\n");
                 finish();
+            } else if (imm == 0x4d41) { /* nightly-5: the guest asks for one hypervisor tick */
+                hv_win_pmu_tick();
             } else if (imm == M5W_HVC_DEBUG_PUTC) {
                 putc_uart((char)ctx->regs[0]);
             } else if (imm == 0x4d40) { /* guest check: x0 id, x1 pass, x2 value */
@@ -332,6 +369,10 @@ void el2_main(void)
     int pages = GUEST_SZ / 0x4000;
     bm_printf("NO_ARM: rewrite not armed\n");
 #else
+#ifdef GRANULE_16K /* nightly-5: the legacy 16 KiB scan granule (launcher --pmu-granule 16k) */
+    if (hv_win_pmu_set_mode(HV_WIN_PMU_MODE_16K))
+        bm_panic("set_mode");
+#endif
     int pages = hv_win_pmu_arm(GUEST_RAM, GUEST_SZ);
 #endif
     bm_printf("armed: %d pages, heap used %lu KiB\n", pages, (u64)heap_used >> 10);

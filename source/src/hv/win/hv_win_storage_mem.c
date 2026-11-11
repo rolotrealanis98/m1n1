@@ -128,8 +128,9 @@ void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write)
 {
     struct hv_storage_mem *m = opaque;
     /* Both directions deliberately require RW: stricter than read permission. An execute-tracked
-     * leaf counts as RW in every PMU-rewrite state but SCANNING: only RW pages are ever tracked,
-     * and CODE's read-only S2AP is the rewrite's write trap, not an ownership statement. */
+     * leaf counts as RW in every PMU-rewrite state: only RW pages are ever tracked, and a tracked
+     * leaf's read-only S2AP (CODE, SCANNING) is the rewrite's write trap, not an ownership statement.
+     * nightly-5: SCANNING (RO+XN) is no longer transient (4 KiB scan granule re-protects blocks). */
     if (!m || m->state != HV_SM_LEASED)
         return sm_refuse(HV_SM_WHY_STATE, ipa, length, m ? m->state : 0);
     if (!sm_dispatch_context(m)) {
@@ -165,8 +166,8 @@ void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write)
         const u64 tracked = BIT(55), flips = GENMASK(58, 56), xn = BIT(54);
         const u64 s2ap_w = BIT(7); /* S2AP 0b11 RW, 0b01 RO */
         const u64 expected = BIT(10) | (3UL << 8) | (3UL << 6) | (15UL << 2) | 1;
-        /* pmu-reads: tracked DIRTY (RW+XN), CODE (RO+X) and PINNED (RW+X) are admitted;
-         * SCANNING (RO+XN) is refused. A write re-arms CODE/PINNED below. */
+        /* pmu-reads: tracked DIRTY (RW+XN), SCANNING (RO+XN), CODE (RO+X) and PINNED (RW+X) are
+         * admitted. A write re-arms the touched frames below (hv_win_pmu_dma_write). */
         u64 g = (d & tracked) ? d | s2ap_w : d;
         /* Ordinary m1n1 normal-memory leaves only, no Device/NC/traces or unknown
          * attributes. L2 type0/L3 type1 is checked separately by the resolver. */
@@ -174,11 +175,9 @@ void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write)
             (leaf.size != HV_SM_PAGE && leaf.size != (1UL << 25)) ||
             leaf.ipa_base != leaf.pa_base || a < leaf.ipa_base ||
             a - leaf.ipa_base >= leaf.size ||
-            ((d & tracked) && (((d & xn) && !(d & s2ap_w)) || leaf.size != HV_SM_PAGE)) ||
+            ((d & tracked) && leaf.size != HV_SM_PAGE) ||
             (!(d & tracked) && (d & flips)))
-            return sm_refuse(((d & tracked) && (d & xn) && !(d & s2ap_w)) ? HV_SM_WHY_SCANNING
-                                                                          : HV_SM_WHY_LEAF_ATTR,
-                             ipa, length, d);
+            return sm_refuse(HV_SM_WHY_LEAF_ATTR, ipa, length, d);
         u64 n = leaf.size - (a - leaf.ipa_base);
         a += n < end - a ? n : end - a;
     }

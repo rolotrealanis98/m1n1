@@ -620,7 +620,10 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             reply->retval = hv_win_pl011_stats();
             break;
         case P_HV_WIN_PMU_REWRITE:
-            reply->retval = hv_win_pmu_arm(request->args[0], request->args[1]);
+            /* args[2]: scan granule flags (0 = 4 KiB, older launchers send 0) */
+            reply->retval = hv_win_pmu_set_mode(request->args[2]) < 0
+                                ? -1
+                                : hv_win_pmu_arm(request->args[0], request->args[1]);
             break;
         case P_HV_WIN_PMU_STATS:
             reply->retval = hv_win_pmu_stat(request->args[0]);

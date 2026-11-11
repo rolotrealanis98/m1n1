@@ -1869,13 +1869,18 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
         {HV_WIN_PMU_WALK_FLIPS, "walk"}, {HV_WIN_PMU_PINS, "pin"}, {HV_WIN_PMU_SWEEPS, "sweep"},
         {HV_WIN_PMU_SPURIOUS, "spur"}, {HV_WIN_PMU_IPA_FAIL, "ipafail"}, {HV_WIN_PMU_NOT_OURS, "notours"},
         {HV_WIN_PMU_STUCK, "stuck"}, {HV_WIN_PMU_DMA_RESETS, "dma"},
-        {HV_WIN_PMU_DATA_SKIPS, "dskip"}};
+        {HV_WIN_PMU_DATA_SKIPS, "dskip"}, {HV_WIN_PMU_FRAMES_SCANNED, "fscan"},
+        {HV_WIN_PMU_FRAMES_MODIFIED, "fmod"}, {HV_WIN_PMU_WORDS_MODIFIED, "wmod"},
+        {HV_WIN_PMU_WORDS_SKIP_EXEC, "skexec"}, {HV_WIN_PMU_WORDS_SKIP_BOUNDARY, "skbnd"},
+        {HV_WIN_PMU_WORDS_SKIP_OTHER, "skother"}, {HV_WIN_PMU_MODIFIED_NEVER_EXECUTED, "MNE"},
+        {HV_WIN_PMU_EXEC_FAULTS, "xflt"}, {HV_WIN_PMU_EXEC_DENIED, "xunproven"},
+        {HV_WIN_PMU_REPROTECTS, "reprot"}};
     for (unsigned i = 0; i < sizeof(pk) / sizeof(pk[0]); i++) {
         u64 v = hv_win_pmu_stat(pk[i].idx);
         printf(" %s %lu(+%lu)", pk[i].name, (unsigned long)v, (unsigned long)(v - st_prev_pmu[pk[i].idx]));
         st_prev_pmu[pk[i].idx] = v;
     }
-    printf("\n");
+    printf(" gran %s\n", (hv_win_pmu_stat(HV_WIN_PMU_ID) & HV_WIN_PMU_ID_4K) ? "4k" : "16k");
     iodev_console_flush();
 }
 

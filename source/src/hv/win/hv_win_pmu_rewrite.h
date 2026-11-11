@@ -36,8 +36,8 @@ enum pmu_rw_kind {
     PMU_RW_READ_OTHER,   /* mrs Xt, any other PMUv3 register */
     PMU_RW_WRITE,        /* msr <PMUv3 register>, Xt */
     PMU_RW_SKIP_DATA,    /* PMU-looking word left alone: the next word cannot execute (data) */
-    PMU_RW_SKIP_BOUNDARY,
-    PMU_RW_SKIP_OTHER,
+    PMU_RW_SKIP_BOUNDARY, /* 4 KiB frame scan: PMU word in the last slot, no next word known */
+    PMU_RW_SKIP_OTHER,    /* 4 KiB frame scan: not a PMU word */
     PMU_RW_NR_KINDS,
 };
 
@@ -95,8 +95,9 @@ u32 pmu_rw_rewrite_words(u32 *words, u32 n, pmu_rw_record_fn *rec, void *arg, u6
 u32 pmu_rw_rewrite_words_ex(u32 *words, u32 n, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
                             void *arg, u64 *counts);
 
-/* Production frame scanner: no read outside 4 KiB; final PMU word is left alone. */
-u32 pmu_rw_rewrite_frame(u32 *words, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
-                         void *arg, u64 *counts);
+/* Production 4 KiB frame scanner: writes only words[0..1023]; next (may be NULL) is the word after
+ * the frame, read for the data guard of the last word. counts[] must hold PMU_RW_NR_KINDS. */
+u32 pmu_rw_rewrite_frame(u32 *words, const u32 *next, pmu_rw_record_fn *rec,
+                         pmu_rw_record_fn *skip, void *arg, u64 *counts);
 
 #endif

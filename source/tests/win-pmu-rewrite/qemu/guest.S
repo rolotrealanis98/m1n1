@@ -63,6 +63,38 @@ guest_start:
     mov     x2, x0
     report  2
 
+    /* T8 (nightly-5): frame 1 of page A is data that looks like a PMU instruction and defeats the
+     * data guard (next word 0xf0200100). Only frame 0 of page A ever ran. 4 KiB granule: never
+     * touched. 16 KiB granule: rewritten at page A's first fetch (the bugcheck-0x1A hazard). */
+    movl    x1, 0x44101000
+    ldr     w2, [x1]
+#ifdef GRANULE_16K
+    movz    w3, #0x0003
+    movk    w3, #0xd280, lsl #16    /* movz x3, #0 */
+#else
+    movz    w3, #0xedc3
+    movk    w3, #0xd53b, lsl #16    /* mrs x3, PMEVTYPER<n>_EL0, unchanged */
+#endif
+    cmp     w2, w3
+    cset    x1, eq
+    report  8
+
+    /* T9 (nightly-5): page F, code in frames 0 and 1. ff0 opens the page (frame 0 scanned); ten
+     * EL2 ticks re-protect it (4 KiB: frame 1 unscanned); ff1's fetch then faults and frame 1 is
+     * proven and scanned before its PMU read runs (an unrewritten read would trap: run fails). */
+    bl      ff0
+#ifndef NO_TICK /* residual control: without the re-protection ff1 runs unscanned in the open page */
+    mov     x19, #10
+5:  hvc     #0x4d41                 /* EL2: hv_win_pmu_tick() */
+    subs    x19, x19, #1
+    b.ne    5b
+#endif
+    bl      ff1
+    cmp     x0, #0
+    cset    x1, ne
+    mov     x2, x0
+    report  9
+
     /* T3: page B ran (CODE); the guest writes a PMU read into it, does its I-cache maintenance and
      * calls it: the write makes the page writable + XN again, the fetch rescans it */
     bl      fb
@@ -222,6 +254,20 @@ fa:
     mrs     x3, pmcr_el0
     mrs     x4, pmevcntr5_el0
     msr     pmccfiltr_el0, x5
+    ret
+
+    .balign 4096
+fa_data:                            /* frame 1 of page A: data, never executed */
+    .word   0xd53bedc3
+    .word   0xf0200100
+
+    .section .guest_f, "ax"
+ff0:
+    mov     x0, #1
+    ret
+    .balign 4096
+ff1:                                /* frame 1 of page F */
+    mrs     x0, pmccntr_el0
     ret
 
     .section .guest_b, "ax"

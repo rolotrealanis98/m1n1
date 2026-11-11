@@ -17,5 +17,6 @@ SECTIONS
     .guest_c    0x44300000 : { *(.guest_c) }
     .guest_d    0x44400000 : { *(.guest_d) }
     .guest_e    0x44500000 : { *(.guest_e) }
+    .guest_f    0x44a00000 : { *(.guest_f) } /* nightly-5: code in frames 0 and 1 */
     /DISCARD/ : { *(.comment) *(.note*) }
 }

@@ -10,6 +10,7 @@
 #define PMU_HOST_H
 
 #include <stdio.h>
+#include <stdlib.h> /* calloc, free: hv_win_pmu.c's 4 KiB frame bytes (nightly-5) */
 #include <string.h>
 
 #include "exception.h"

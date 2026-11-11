@@ -111,7 +111,10 @@ HV_WIN_PMU_STATS = ("id", "pages", "ranges", "tables", "scans", "pages_rewritten
                     "unpins", "spurious", "ipa_fail", "not_ours", "stuck",
                     "dma_resets", "data_skips", "frames_scanned", "frames_modified",
                     "words_modified", "words_skip_exec", "words_skip_boundary", "words_skip_other",
-                    "modified_never_executed", "exec_faults", "exec_denied", "store_denied", "reprotects")   # src/hv/win/hv_win.h order (dma_resets, data_skips: ~0 on older residents)
+                    "modified_never_executed", "exec_faults", "exec_denied", "reprotects")
+# src/hv/win/hv_win.h order (dma_resets, data_skips, and everything after them: ~0 on older residents)
+HV_WIN_PMU_ID_4K = 1 << 1              # P_HV_WIN_PMU_STATS(0): 4 KiB scan granule
+HV_WIN_PMU_MODE_16K = 1                # P_HV_WIN_PMU_REWRITE flags
 HV_WIN_PMU_LOG_SIZE = 256
 HV_WIN_PMU_STAT_LOG_IPA, HV_WIN_PMU_STAT_LOG_OP, HV_WIN_PMU_STAT_LOG_ELR = 0x100, 0x200, 0x300
 GIC_SPI_MIN, GIC_SPI_MAX = 32, 1019  # GICD_TYPER.ITLinesNumber 31 (hv_vgic3.c)
@@ -940,6 +943,10 @@ def parse_args():
     parser.add_argument("--pmu-rewrite", choices=("off", "el2"), default="off",
                         help="el2: EL2 rewrites PMUv3 accesses at the first instruction fetch of each guest RAM page "
                              "(stage-2 XN; docs/PMU-EL2-REWRITE.md)")
+    parser.add_argument("--pmu-granule", choices=("4k", "16k"), default="4k",
+                        help="with --pmu-rewrite el2: 4k (default) scans only the 4 KiB frame whose fetch faulted, "
+                             "after proving it executable in the guest's stage-1 tables; 16k is the pre-nightly-5 "
+                             "behaviour (whole 16 KiB page scanned at its first fetch)")
     parser.add_argument("--capture-vuart", action="store_true",
                         help="record the second CDC port (vuart + PL011) to <run>/vuart.log and answer win_smoke's vuart "
                              "RX self-test with one 'K'; do not combine with a terminal on that port")
@@ -1138,6 +1145,12 @@ def report_pmu_rewrite(p, run_dir, record):
            f"spurious {st['spurious']}, AT failures {st['ipa_fail']}, not ours {st['not_ours']}, stuck {st['stuck']}; "
            f"device refills {st['dma_resets'] if st['dma_resets'] != (1 << 64) - 1 else 'n/a'}; "
            f"data-guard skips {st['data_skips'] if st['data_skips'] != (1 << 64) - 1 else 'n/a'}")
+    if st["frames_scanned"] != (1 << 64) - 1:
+        record(f"PMU rewrite granule {'4 KiB' if st['id'] & HV_WIN_PMU_ID_4K else '16 KiB'}: frames scanned "
+               f"{st['frames_scanned']} modified {st['frames_modified']}, words modified {st['words_modified']}; "
+               f"skipped exec-unproven {st['words_skip_exec']} boundary {st['words_skip_boundary']} "
+               f"non-PMU {st['words_skip_other']}; modified-never-executed {st['modified_never_executed']}; "
+               f"exec faults {st['exec_faults']} (unproven {st['exec_denied']}), re-protects {st['reprotects']}")
     lines = [f"{k} {v}" for k, v in st.items() if k != "id"]
     first = max(0, st["insns"] - HV_WIN_PMU_LOG_SIZE)
     lines.append(f"last {st['insns'] - first} rewrite(s): seq IPA old new fetch-PC")
@@ -1764,7 +1777,7 @@ def main():
         def start_with_pmu_rewrite(entry, x0, *rest):
             pages = 0
             for s, e in ram_ranges:
-                n = p.hv_win_pmu_rewrite(s, e - s)
+                n = p.hv_win_pmu_rewrite(s, e - s, HV_WIN_PMU_MODE_16K if args.pmu_granule == "16k" else 0)
                 if n < 0:
                     raise SystemExit(f"P_HV_WIN_PMU_REWRITE({s:#x}, {e - s:#x}) refused ({n}): see the m1n1 console")
                 pages += n
@@ -1772,8 +1785,12 @@ def main():
             if pid >> 32 != HV_WIN_PMU_MAGIC or not pid & 1:
                 raise SystemExit(f"PMU rewrite not armed after P_HV_WIN_PMU_REWRITE (id {pid:#x})")
             tables = p.hv_win_pmu_stats(HV_WIN_PMU_STATS.index("tables"))
+            granule = "4 KiB" if pid & HV_WIN_PMU_ID_4K else "16 KiB"
+            if granule != {"4k": "4 KiB", "16k": "16 KiB"}[args.pmu_granule]:
+                raise SystemExit(f"PMU rewrite armed with a {granule} scan granule, --pmu-granule {args.pmu_granule} "
+                                 f"asked (id {pid:#x}): firmware without the nightly-5 granule switch?")
             record(f"PMU rewrite (EL2) armed: {len(ram_ranges)} range(s), {pages} pages of 16 KiB execute-tracked, "
-                   f"{tables} L3 table(s) ({tables * 16} KiB of m1n1 heap)")
+                   f"{tables} L3 table(s) ({tables * 16} KiB of m1n1 heap), {granule} scan granule")
             return start_next(entry, x0, *rest)
 
         p.hv_start = start_with_pmu_rewrite

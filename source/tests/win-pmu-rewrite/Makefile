@@ -49,7 +49,9 @@ corpus: test_pmu_rewrite
 
 qemu:
 	./qemu/run.sh
+	XT_DEFS=-DGRANULE_16K ./qemu/run.sh
 	XT_DEFS=-DNO_ARM ./qemu/run.sh > /dev/null 2>&1; test $$? -ne 0 && echo "negative control (not armed): failed as it must"
+	XT_DEFS=-DNO_TICK ./qemu/run.sh > /dev/null 2>&1; test $$? -ne 0 && grep -q "unrewritten PMU access" $${QEMU_OUT:-qemu}/out/xt.log && echo "residual control (4 KiB, no re-protection tick): the unscanned sibling trapped, as documented"
 
 clean:
 	rm -rf qemu/build qemu/out test_pmu_rewrite test_pmu_rewrite.dSYM sysreg-space.bin sysreg-space.o sysreg-space.dis

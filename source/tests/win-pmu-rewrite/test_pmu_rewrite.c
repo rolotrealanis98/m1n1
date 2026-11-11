@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "hv_win.h"
+#include "hv_win_pmu_4k.h"
 #include "hv_win_pmu_rewrite.h"
 #include "pmu_host.h"
 
@@ -27,8 +28,17 @@
 #undef printf
 
 void hv_win_pmu_host_reset(void);
+u8 hv_win_pmu_host_frame(u64 ipa);
 
 static int verbose;
+/*
+ * nightly-5: the state-machine groups run twice. g4k = false: the 16 KiB scan granule
+ * (hv_win_pmu_set_mode(HV_WIN_PMU_MODE_16K), launcher --pmu-granule 16k) against every expectation
+ * exactly as before nightly-5. g4k = true: the 4 KiB granule (the default); expectations that differ
+ * under 4 KiB semantics are written as "g4k ? new : old" with the reason next to them
+ * (REVIEW-GUIDE.md lists every one).
+ */
+static bool g4k;
 static unsigned long checks, failures;
 
 #define CHECK(cond, ...)                                                                           \
@@ -479,15 +489,18 @@ bool hv_xt_fault_ipa(struct exc_info *ctx, bool s1ptw, bool write, u64 *ipa)
     }
     if (!m_fault_ok)
         return false;
-    *ipa = m_fault_ipa;
+    /* 4 KiB mode: AT returns PAR.PA | VA[11:0], as hv_xt_fault_ipa() does; the 16 KiB mock keeps
+     * the old free-standing offset */
+    *ipa = g4k ? (m_fault_ipa & ~0xfffUL) | (ctx->far & 0xfff) : m_fault_ipa;
     return true;
 }
 
 void dc_civac_range(void *addr, size_t length)
 {
     int p = m_page_of_pa(addr);
-    /* the scan starts here: the page must already be read-only for every CPU */
-    if (length != HV_XT_PAGE_SIZE || m_pg[p].st != HV_XT_SCANNING || nev < 2 ||
+    /* the scan starts here: the page must already be read-only for every CPU. 4 KiB: one frame is
+     * cleaned (length 4096) */
+    if (length != (g4k ? 4096 : HV_XT_PAGE_SIZE) || m_pg[p].st != HV_XT_SCANNING || nev < 2 ||
         ev[nev - 1].kind != EV_TLBI_BCAST || ev[nev - 2].kind != EV_SET ||
         ev[nev - 2].st != HV_XT_SCANNING)
         scan_order_ok = false;
@@ -496,7 +509,7 @@ void dc_civac_range(void *addr, size_t length)
 
 void dc_cvac_range(void *addr, size_t length)
 {
-    if (length != HV_XT_PAGE_SIZE)
+    if (length != (g4k ? 4096 : HV_XT_PAGE_SIZE))
         scan_order_ok = false;
     ev_add(EV_CVAC, m_page_of_pa(addr), 0);
 }
@@ -522,6 +535,60 @@ int host_printf(const char *fmt, ...)
     return n;
 }
 
+/* ---- 4 KiB mode: the guest's stage-1 tables, in tracked mock RAM ---------------------------------
+ * Windows' configuration on hardware (2026-11-09 m1a): TCR_EL1 0x615b5513511 (T0SZ = T1SZ = 17, 4 KiB
+ * granules, HPD0 = HPD1 = 1), so both roots are 2 KiB level-0 tables; TTBR1's lies at +0x800 of
+ * its frame, as on hardware (TTBR1_EL1 0x4001001b04e800). Leaves are EL0+EL1 read-only executable
+ * pages (the legacy faults come from EL0t, SPSR 0). The tables live in pages 316..319, which no
+ * legacy group touches. */
+#define S1_PAGE0   316
+#define S1_FRAMES  16
+static u32 s1_next;
+static struct pmu_s1 s1_regs;
+
+bool pmu_host_s1(struct pmu_s1 *s)
+{
+    *s = s1_regs;
+    return g4k;
+}
+
+static u64 s1_frame_ipa(u32 f)
+{
+    return M_BASE + (u64)S1_PAGE0 * HV_XT_PAGE_SIZE + (u64)f * 4096;
+}
+
+static u64 *s1_at(u64 ipa)
+{
+    return (u64 *)((u8 *)m_mem + (ipa - M_BASE));
+}
+
+static void s1_reset(void)
+{
+    memset(s1_at(s1_frame_ipa(0)), 0, S1_FRAMES * 4096);
+    s1_next = 1; /* frame 0: both roots */
+    s1_regs = (struct pmu_s1){.sctlr = 1,
+                              .tcr = 0x615b5513511UL,
+                              .ttbr = {0x0001000000000000UL | s1_frame_ipa(0),
+                                       0x0040000000000000UL | (s1_frame_ipa(0) + 0x800)}};
+}
+
+static void s1_map(u64 va, u64 ipa_frame)
+{
+    bool upper = va >> 55 & 1;
+    u64 table = upper ? s1_frame_ipa(0) + 0x800 : s1_frame_ipa(0);
+    for (int level = 0; level < 3; level++) {
+        u32 shift = 12 + 9 * (3 - level);
+        u64 *d = s1_at(table) + ((va >> shift) & (level ? 511 : 255));
+        if (!(*d & 1)) {
+            if (s1_next >= S1_FRAMES)
+                s1_reset(); /* the pool is per test; a long group starts over */
+            *d = s1_frame_ipa(s1_next++) | 3;
+        }
+        table = *d & 0x0000fffffffff000UL;
+    }
+    s1_at(table)[(va >> 12) & 511] = ipa_frame | 3 | BIT(10) | BIT(7) | BIT(6) | BIT(53);
+}
+
 /* ---- state machine tests ------------------------------------------------------------------------
  */
 
@@ -539,6 +606,8 @@ static bool iabort(int page, u32 word, u64 iss, u64 elr)
 {
     struct exc_info ctx = {.esr = ESR(EC_IABORT_LOWER, iss), .elr = elr, .far = elr};
     m_fault_ipa = ipa_of(page, word);
+    if (g4k && !(iss & ISS_S1PTW) && m_page_of(m_fault_ipa) >= 0)
+        s1_map(elr & ~0xfffUL, m_fault_ipa & ~0xfffUL); /* the fetch's VA maps the faulting frame */
     nev = 0;
     return hv_win_handle_iabort(&ctx);
 }
@@ -576,6 +645,7 @@ static void reset_world(void)
     m_fault_ok = true;
     m_hpfar_ipa = 0;
     host_cpu = 0;
+    hv_win_pmu_set_mode(g4k ? 0 : HV_WIN_PMU_MODE_16K);
 }
 
 /*
@@ -638,7 +708,9 @@ static void test_arm(void)
     CHECK(!hv_win_handle_dabort(&ctx, ESR(EC_DABORT_LOWER, ISS_WNR | FSC_PERM_L3)),
           "dabort handled before arming");
     hv_win_pmu_tick();
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16),
+    /* [n5-1] 4 KiB: ID bit 1 reports the scan granule (HV_WIN_PMU_ID_4K) */
+    u64 id4k = g4k ? HV_WIN_PMU_ID_4K : 0;
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16 | id4k),
           "id 0x%lx before arming", hv_win_pmu_stat(HV_WIN_PMU_ID));
 
     u64 size = (u64)M_PAGES * HV_XT_PAGE_SIZE;
@@ -656,7 +728,7 @@ static void test_arm(void)
     m_heap = 16UL << 20;
     CHECK(hv_win_pmu_arm(M_BASE, size) == -1, "heap check");
     m_heap = 128UL << 20;
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16),
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16 | id4k),
           "armed by a refusal");
 
     /* two ranges, holes and read-only pages skipped */
@@ -666,7 +738,11 @@ static void test_arm(void)
     int b = hv_win_pmu_arm(M_BASE + 16 * HV_XT_PAGE_SIZE, size - 16 * HV_XT_PAGE_SIZE);
     CHECK(b == M_PAGES - 16, "second range: %d pages", b);
     CHECK(nev > 0 && ev[nev - 1].kind == EV_TLBI_BCAST, "no TLB flush after arming");
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16 | 1), "not armed");
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_ID) == (HV_WIN_PMU_MAGIC << 32 | 1UL << 16 | id4k | 1),
+          "not armed");
+    CHECK(hv_win_pmu_set_mode(g4k ? HV_WIN_PMU_MODE_16K : 0) == -1 &&
+              hv_win_pmu_set_mode(g4k ? 0 : HV_WIN_PMU_MODE_16K) == 0 && hv_win_pmu_set_mode(2) == -1,
+          "granule changed after arming, or an unknown flag accepted");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_PAGES) == (u64)(a + b), "pages stat");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_RANGES) == 2, "ranges stat");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_TABLES) == 2, "tables stat %lu",
@@ -682,6 +758,7 @@ static void arm_all(void)
     hv_win.irq_model = HV_WIN_IRQ_VGIC3;
     nev = 0;
     hv_win_pmu_arm(M_BASE, (u64)M_PAGES * HV_XT_PAGE_SIZE);
+    s1_reset();
 }
 
 static void test_exec_and_write(void)
@@ -696,8 +773,9 @@ static void test_exec_and_write(void)
 
     CHECK(iabort(3, 12, FSC_PERM_L3, 0xfffff80001234000UL), "exec fault not handled");
     CHECK(m_pg[3].st == HV_XT_CODE, "state %d after the scan", m_pg[3].st);
+    /* [n5-2] 4 KiB: w[4095] lies in frame 3, which no fetch has proven: it is never touched */
     CHECK(w[10] == 0xd53be045 && w[11] == 0xd503201f && w[12] == 0xd53be041 &&
-              w[4095] == 0xd280001e,
+              w[4095] == (g4k ? 0xd53b9c1e : 0xd280001e),
           "words %08x %08x %08x %08x", w[10], w[11], w[12], w[4095]);
     CHECK(scan_order_ok, "scan before write permission was revoked everywhere");
     CHECK(nev == 7 && ev_is(0, EV_SET, 3, HV_XT_SCANNING) && ev_is(1, EV_TLBI_BCAST, 0, 0) &&
@@ -707,15 +785,15 @@ static void test_exec_and_write(void)
     CHECK(!m_fault_s1ptw_seen, "IPA taken from HPFAR for a plain fetch");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_SCANS) == 1 &&
               hv_win_pmu_stat(HV_WIN_PMU_PAGES_REWRITTEN) == 1 &&
-              hv_win_pmu_stat(HV_WIN_PMU_INSNS) == 3 &&
+              hv_win_pmu_stat(HV_WIN_PMU_INSNS) == (g4k ? 2 : 3) &&
               hv_win_pmu_stat(HV_WIN_PMU_INSNS_PMCCNTR) == 1 &&
-              hv_win_pmu_stat(HV_WIN_PMU_INSNS_MRS) == 1 &&
+              hv_win_pmu_stat(HV_WIN_PMU_INSNS_MRS) == (g4k ? 0 : 1) &&
               hv_win_pmu_stat(HV_WIN_PMU_INSNS_MSR) == 1,
           "rewrite stats");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + 0) == ipa_of(3, 10) &&
               hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_OP + 0) == (0xd53b9d05UL << 32 | 0xd53be045) &&
               hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_ELR + 0) == 0xfffff80001234000UL &&
-              hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + 2) == ipa_of(3, 4095) &&
+              hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + 2) == (g4k ? 0 : ipa_of(3, 4095)) &&
               hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_OP + 1) == (0xd51b9c01UL << 32 | 0xd503201f),
           "log entries");
     CHECK(strstr(last_line, "IPA 0x1000000c000") != NULL, "console line: %s", last_line);
@@ -880,8 +958,12 @@ static void test_stuck(void)
     /* AT fails on a fetch, HPFAR names a DIRTY page: scanned from the hint */
     words_of(21)[3] = 0xd53b9d02;
     m_hpfar_ipa = ipa_of(21, 3);
+    /* [n5-3] 4 KiB: an HPFAR hint is never a proof: the page opens (progress), nothing is read or
+     * written, the fetch counts as unproven */
+    u64 denied = hv_win_pmu_stat(HV_WIN_PMU_EXEC_DENIED);
     CHECK(iabort(21, 3, FSC_PERM_L3, 0xa000) && m_pg[21].st == HV_XT_CODE &&
-              words_of(21)[3] == 0xd53be042,
+              words_of(21)[3] == (g4k ? 0xd53b9d02 : 0xd53be042) &&
+              hv_win_pmu_stat(HV_WIN_PMU_EXEC_DENIED) == denied + g4k,
           "HPFAR hint not used");
     /* ... but never a CODE page (or garbage): that is only a retry */
     u64 fails = hv_win_pmu_stat(HV_WIN_PMU_IPA_FAIL), scans = hv_win_pmu_stat(HV_WIN_PMU_SCANS);
@@ -908,22 +990,48 @@ static void test_log_ring(void)
         words_of(40 + i)[1] = 0xd51b9c00;
 
     CHECK(iabort(30, 0, FSC_PERM_L3, 0xabc0), "full page");
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_INSNS) == M_WORDS, "insns %lu",
+    /* [n5-4] 4 KiB: the fetch proves frame 0 only, so its 1024 words are the scan (the last one is
+     * guarded by word 1024, an instruction); the other three frames are rewritten once each of
+     * them is fetched after the block's re-protection (checked below) */
+    u32 nw = g4k ? M_WORDS / 4 : M_WORDS;
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_INSNS) == nw, "insns %lu",
           hv_win_pmu_stat(HV_WIN_PMU_INSNS));
-    /* rewrite n lives in slot n % 256: the last one is word 4095 */
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + 4095 % 256) == ipa_of(30, 4095), "ring tail");
+    /* rewrite n lives in slot n % 256: the last one is word 4095 (4 KiB: 1023) */
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + (nw - 1) % 256) == ipa_of(30, nw - 1),
+          "ring tail");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_OP + 0) == (0xd53b9d00UL << 32 | 0xd53be040) &&
-              hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + 0) == ipa_of(30, 3840),
-          "slot 0 holds rewrite 3840");
+              hv_win_pmu_stat(HV_WIN_PMU_STAT_LOG_IPA + 0) == ipa_of(30, nw - 256),
+          "slot 0 holds rewrite 3840 (4 KiB: 768)");
     for (u32 i = 0; i < M_WORDS; i++)
-        CHECK(w[i] == (0xd53be040 | (i & 31)), "word %u", i);
+        CHECK(w[i] == (i < nw ? (0xd53be040 | (i & 31)) : (0xd53b9d00 | (i & 31))), "word %u", i);
+    if (g4k) {
+        for (u32 f = 1; f < 4; f++) {
+            for (int t = 0; t < 10; t++)
+                hv_win_pmu_tick();
+            CHECK(m_pg[30].st == HV_XT_SCANNING, "frame %u: block not re-protected", f);
+            CHECK(iabort(30, f * 1024, FSC_PERM_L3, 0xabc0 + f * 0x1000) &&
+                      m_pg[30].st == HV_XT_CODE,
+                  "frame %u fetch", f);
+        }
+        for (u32 i = 0; i < M_WORDS; i++)
+            CHECK(w[i] == (0xd53be040 | (i & 31)), "word %u after every frame ran", i);
+        CHECK(hv_win_pmu_stat(HV_WIN_PMU_INSNS) == M_WORDS &&
+                  hv_win_pmu_stat(HV_WIN_PMU_PAGES_REWRITTEN) == 4,
+              "insns %lu after every frame ran", hv_win_pmu_stat(HV_WIN_PMU_INSNS));
+        /* all four frames scanned: the block stays executable across ticks */
+        for (int t = 0; t < 30; t++)
+            hv_win_pmu_tick();
+        CHECK(m_pg[30].st == HV_XT_CODE, "fully scanned block re-protected");
+    }
 
     for (int i = 0; i < 70; i++)
         iabort(40 + i, 1, FSC_PERM_L3, 0x100);
-    CHECK(hv_win_pmu_stat(HV_WIN_PMU_PAGES_REWRITTEN) == 71, "pages rewritten");
+    u64 rw = g4k ? 74 : 71; /* 4 KiB: + the three frames of page 30 fetched above */
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_PAGES_REWRITTEN) == rw, "pages rewritten");
     CHECK(strstr(last_line, "IPA") != NULL, "last console line: %s", last_line);
     hv_win_pmu_report();
-    CHECK(strstr(last_line, "71 pages rewritten") != NULL, "report: %s", last_line);
+    CHECK(strstr(last_line, g4k ? "74 pages rewritten" : "71 pages rewritten") != NULL, "report: %s",
+          last_line);
 }
 
 /* ---- pmu-reads: EL2 device writes into guest RAM (NVMe READ data, mediated storage) -------------
@@ -977,9 +1085,17 @@ static void test_dma_refill(void)
     img[1000] = 0xd51b9c02; /* msr PMCR_EL0, x2 */
     /* one 4 KiB guest page (the second of the 16 KiB leaf) refilled by an NVMe READ */
     CHECK(dev_read(ipa_of(50, 1024), img, 4096) == 1, "refill reset count");
-    CHECK(m_pg[50].st == HV_XT_DIRTY, "refilled page still executable (state %d)", m_pg[50].st);
-    CHECK(nev == 2 && ev_is(0, EV_SET, 50, HV_XT_DIRTY) && ev_is(1, EV_TLBI_BCAST, 0, 0),
+    /* [n5-5] 4 KiB: the block is re-protected (SCANNING: RO + XN), not made writable; only the
+     * refilled frame loses its state, frame 0 stays scanned */
+    enum hv_xt_state reset_st = g4k ? HV_XT_SCANNING : HV_XT_DIRTY;
+    CHECK(m_pg[50].st == reset_st, "refilled page still executable (state %d)", m_pg[50].st);
+    CHECK(nev == 2 && ev_is(0, EV_SET, 50, reset_st) && ev_is(1, EV_TLBI_BCAST, 0, 0),
           "refill events (%d): reset, then one broadcast TLBI", nev);
+    if (g4k)
+        CHECK(hv_win_pmu_host_frame(ipa_of(50, 1024)) == 0 &&
+                  (hv_win_pmu_host_frame(ipa_of(50, 0)) & PMU_FRAME_SCANNED),
+              "frame states after the refill: %x %x", hv_win_pmu_host_frame(ipa_of(50, 1024)),
+              hv_win_pmu_host_frame(ipa_of(50, 0)));
     CHECK(!dev_exec_window, "EL2 wrote a page that was still executable");
     CHECK(hv_win_pmu_stat(HV_WIN_PMU_DMA_RESETS) == 1, "dma reset stat %lu",
           hv_win_pmu_stat(HV_WIN_PMU_DMA_RESETS));
@@ -999,18 +1115,18 @@ static void test_dma_refill(void)
         iabort(p, 0, FSC_PERM_L3, 0x1000);
     iabort(6, 0, FSC_PERM_L3, 0x1000); /* page 6 CODE; 7 is a hole, 8 read-only (untracked) */
     CHECK(dev_read(ipa_of(60, M_WORDS - 4), img, 32) == 2, "16 bytes either side of a boundary");
-    CHECK(m_pg[60].st == HV_XT_DIRTY && m_pg[61].st == HV_XT_DIRTY && m_pg[62].st == HV_XT_CODE,
+    CHECK(m_pg[60].st == reset_st && m_pg[61].st == reset_st && m_pg[62].st == HV_XT_CODE,
           "boundary: %d %d %d", m_pg[60].st, m_pg[61].st, m_pg[62].st);
     CHECK(nev == 3 && ev_is(2, EV_TLBI_BCAST, 0, 0), "one TLBI for two pages (%d events)", nev);
-    CHECK(dev_read(ipa_of(62, 0), img, HV_XT_PAGE_SIZE) == 1 && m_pg[62].st == HV_XT_DIRTY &&
+    CHECK(dev_read(ipa_of(62, 0), img, HV_XT_PAGE_SIZE) == 1 && m_pg[62].st == reset_st &&
               m_pg[63].st == HV_XT_CODE,
           "exactly one leaf: the next leaf left alone");
     CHECK(dev_read(ipa_of(61, 0), img, 2 * HV_XT_PAGE_SIZE + 4) == 1 &&
-              m_pg[61].st == HV_XT_DIRTY && m_pg[63].st == HV_XT_DIRTY,
+              m_pg[61].st == reset_st && m_pg[63].st == reset_st,
           "DIRTY 61/62 skipped, 4 bytes into 63 reset");
     CHECK(dev_read(ipa_of(61, 0), img, 4096) == 0 && nev == 0, "all DIRTY: no TLBI (%d)", nev);
     CHECK(dev_read(ipa_of(6, 512), img, 3 * HV_XT_PAGE_SIZE - 4096) == 1 &&
-              m_pg[6].st == HV_XT_DIRTY && !m_pg[7].tracked && !m_pg[8].tracked,
+              m_pg[6].st == reset_st && !m_pg[7].tracked && !m_pg[8].tracked,
           "untracked pages in the range");
     CHECK(hv_win_pmu_dma_write(ipa_of(9, 0), 0) == 0, "empty range");
     CHECK(hv_win_pmu_dma_write(~0UL - 100, 1000) == 0, "range wrapping the address space");
@@ -1022,8 +1138,25 @@ static void test_dma_refill(void)
     for (u32 i = 0; i < 3 * M_WORDS; i++)
         img[i] = (i % 7) ? 0xd503201f : (0xd53b9d00 | (i & 31));
     dev_read(ipa_of(70, 0), img, 3 * HV_XT_PAGE_SIZE);
+    /* [n5-6] 4 KiB: a word is rewritten when its own frame is fetched, so every frame of the three
+     * leaves is fetched (one per re-protection); before that, unfetched frames keep their bytes */
     for (int p = 70; p <= 72; p++)
         CHECK(iabort(p, 1, FSC_PERM_L3, 0x1000) && m_pg[p].st == HV_XT_CODE, "rescan %d", p);
+    if (g4k) {
+        CHECK(pmu_rw_classify(img[1029]) != PMU_RW_NONE && words_of(70)[1029] == img[1029] &&
+                  pmu_rw_classify(img[2 * M_WORDS + 3078]) != PMU_RW_NONE &&
+                  words_of(72)[3078] == img[2 * M_WORDS + 3078],
+              "an unfetched refilled frame was rewritten");
+        for (u32 f = 1; f < 4; f++) {
+            for (int t = 0; t < 10; t++)
+                hv_win_pmu_tick();
+            for (int p = 70; p <= 72; p++)
+                CHECK(m_pg[p].st == HV_XT_SCANNING &&
+                          iabort(p, f * 1024 + 1, FSC_PERM_L3, 0x1000 + f * 0x1000) &&
+                          m_pg[p].st == HV_XT_CODE,
+                      "frame %u of %d", f, p);
+        }
+    }
     u32 left = 0;
     for (u32 i = 0; i < 3 * M_WORDS; i++)
         left += pmu_rw_classify(words_of(70)[i]) != PMU_RW_NONE;
@@ -1043,7 +1176,9 @@ static void test_dma_refill(void)
     CHECK(iabort(80, 0, FSC_PERM_L3, 0x1000) && words_of(80)[0] == 0xd53be044, "PINNED rescan");
     for (int t = 0; t < 100; t++)
         hv_win_pmu_tick();
-    CHECK(m_pg[80].st == HV_XT_CODE && hv_win_pmu_stat(HV_WIN_PMU_UNPINS) == 0,
+    /* [n5-7] 4 KiB: frames 1..3 of page 80 were never fetched, so the ticks re-protect it */
+    CHECK(m_pg[80].st == (g4k ? HV_XT_SCANNING : HV_XT_CODE) &&
+              hv_win_pmu_stat(HV_WIN_PMU_UNPINS) == 0,
           "sweep after a reset: state %d", m_pg[80].st);
 
     /* 4. rewrite off: nothing tracked, one test, no TLBI, no state */
@@ -1313,13 +1448,19 @@ int main(int argc, char **argv)
     test_exhaustive();
     test_page();
     test_data_guard();
-    test_arm();
-    test_exec_and_write();
-    test_walker();
-    test_pinning();
-    test_stuck();
-    test_log_ring();
-    test_dma_refill();
+    for (int mode = 0; mode < 2; mode++) {
+        unsigned long c0 = checks, f0 = failures;
+        g4k = mode;
+        test_arm();
+        test_exec_and_write();
+        test_walker();
+        test_pinning();
+        test_stuck();
+        test_log_ring();
+        test_dma_refill();
+        printf("win-pmu-rewrite: %s granule: %lu state-machine checks, %lu failed\n",
+               g4k ? "4 KiB" : "16 KiB", checks - c0, failures - f0);
+    }
 
     free(m_mem);
     printf("win-pmu-rewrite: %lu checks, %lu failed\n", checks, failures);

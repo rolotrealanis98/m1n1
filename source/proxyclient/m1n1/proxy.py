@@ -1237,8 +1237,9 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_CPU_MPIDR, cpu)
     def hv_win_pl011_stats(self):
         return self.request(self.P_HV_WIN_PL011_STATS)
-    def hv_win_pmu_rewrite(self, base, size):
-        return self.request(self.P_HV_WIN_PMU_REWRITE, base, size, signed=True)
+    def hv_win_pmu_rewrite(self, base, size, flags=0):
+        # flags: 0 = 4 KiB scan granule (nightly-5 default), 1 = legacy 16 KiB (HV_WIN_PMU_MODE_16K)
+        return self.request(self.P_HV_WIN_PMU_REWRITE, base, size, flags, signed=True)
     def hv_win_pmu_stats(self, idx):
         return self.request(self.P_HV_WIN_PMU_STATS, idx)
     def hv_win_fb_prepare(self, native_base, flags=0, tuning=0):

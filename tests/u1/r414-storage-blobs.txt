@@ -1,7 +1,7 @@
 66587e368c4e3b1d5627522df4e3dba68d64ad9a source/src/hv/win/hv_win_storage.c
 44876181a7d59c7a163c72cda64253847bf6a034 source/src/hv/win/hv_win_storage.h
-c4e5cdcc064800d0d5c0683a261afad406677094 source/src/hv/win/hv_win_storage_mem.c
-949d8fdbf93b7ad94e4df3c3270a8b02be40bdb5 source/src/hv/win/hv_win_storage_mem.h
+d1795f3e4aa3de2b11c1beb3d413fe4a0486800d source/src/hv/win/hv_win_storage_mem.c
+978ad969dc8ab08b5afc33283dccd8e020919b42 source/src/hv/win/hv_win_storage_mem.h
 f49434bf1e374fa8485fbdafd3d2ae1ba6f2667c source/src/hv/win/hv_win_storage_native.c
 aff0557da45ae68209934ef48887a8112663ca45 source/src/hv/win/s1/LICENSE
 38aa8680ac536baade706d0640ce836714ee62ab source/src/hv/win/s1/ans_ro.c
