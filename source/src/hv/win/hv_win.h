@@ -85,7 +85,16 @@ enum hv_win_exit {
     HV_WIN_EXIT_NONE = 0,
     HV_WIN_EXIT_SYSTEM_OFF = 1,
     HV_WIN_EXIT_SYSTEM_RESET = 2,
+    HV_WIN_EXIT_HOST_STOP = 3, /* nightly-7: P_HV_WIN_SESSION_END */
+    HV_WIN_EXIT_DEADMAN = 4,   /* nightly-7: no host heartbeat within the armed timeout */
 };
+/* nightly-7: cable-independent session end (hv_win_session.c) */
+void hv_win_system_exit(u32 reason);
+s64 hv_win_session_end(u64 code, u64 flags);
+s64 hv_win_session_heartbeat(u64 seconds);
+void hv_win_session_tick(void);
+void hv_win_session_after_exit(void);
+u64 hv_win_session_stat(u64 index);
 
 /* MPIDR affinity fields: Aff3 (bits 39:32) and Aff2..Aff0 (bits 23:0) */
 #define HV_WIN_MPIDR_AFF_MASK 0xff00ffffffUL

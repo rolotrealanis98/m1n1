@@ -93,7 +93,7 @@ paths = ['source/src/hv/win/s1', 'source/src/hv/win/hv_win_storage.c', 'source/s
 # (b) after the merge, only the nightly-7 SMP files listed in N7_STORAGE may differ from the merge commit.
 N7_MERGE, SMP_BASE, SMP_HEAD = '78c0567', '7e803d6', 'efb8883'
 N7_STORAGE = {'source/src/hv/win/hv_win_storage.c', 'source/src/hv/win/hv_win_storage.h',
-              'source/src/hv/win/hv_win_status.c', 'source/src/hv/win/s1/ans_ro.c', 'source/src/hv/win/s1/native_link.c'}
+              'source/src/hv/win/hv_win_status.c', 'source/src/hv/win/s1/ans_ro.c', 'source/src/hv/win/s1/native_link.c'}  # native_link.c: + the session-end allowlist
 def changed_lines(a, b, f):
     out = subprocess.run(['git', '-C', str(WT), 'diff', '-U0', a, b, '--', f], capture_output=True, text=True, check=True).stdout
     return sorted(l for l in out.splitlines() if l[:1] in '+-' and not l.startswith(('+++', '---')))

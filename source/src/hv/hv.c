@@ -355,6 +355,8 @@ void hv_start(void *entry, u64 regs[4])
     spin_unlock(&bhl);
     /* smcp: a guest SYSTEM_OFF/RESET becomes a real power-off/restart, only with the flag */
     hv_win_smcp_after_exit();
+    /* nightly-7: after a host stop or the dead-man (or a guest exit nobody collects), reset without the host */
+    hv_win_session_after_exit();
 }
 
 static void hv_init_secondary(struct hv_secondary_info_t *info)
@@ -719,6 +721,8 @@ void hv_tick(struct exc_info *ctx)
     hv_win_smcp_tick();
     hv_win_n1_tick();
     hv_win_m5wn_tick();
+    /* nightly-7: host-heartbeat dead-man; a no-op until the launcher arms it */
+    hv_win_session_tick();
     /* r4.12: re-present a declined, still-high NVMe INTx line (vGIC hold-off) */
     hv_vgic3_tick();
     /* r4.11 diagnostics: periodic guest/trap/vGIC/NVMe status on the console */

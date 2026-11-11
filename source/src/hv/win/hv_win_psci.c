@@ -217,8 +217,12 @@ static s64 psci_cpu_suspend(u64 power_state)
 static void psci_system_exit(u32 reason)
 {
     hv_win.exit_reason = reason;
-    printf("HV/win: guest requested %s on CPU %d\n",
-           reason == HV_WIN_EXIT_SYSTEM_OFF ? "SYSTEM_OFF" : "SYSTEM_RESET", smp_id());
+    if (reason == HV_WIN_EXIT_HOST_STOP || reason == HV_WIN_EXIT_DEADMAN) /* nightly-7: not the guest's request */
+        printf("HV/win: session end (%s) on CPU %d\n", reason == HV_WIN_EXIT_HOST_STOP ? "host stop" : "dead-man",
+               smp_id());
+    else
+        printf("HV/win: guest requested %s on CPU %d\n",
+               reason == HV_WIN_EXIT_SYSTEM_OFF ? "SYSTEM_OFF" : "SYSTEM_RESET", smp_id());
     hv_win_pmu_report();
     /* smp2d: on a guest reset/bugcheck dump the resetting CPU's exit ring and the WFI/debug/integrity
      * counters, so a single hardware run settles the WFI-state-loss question. */
@@ -235,6 +239,13 @@ static void psci_system_exit(u32 reason)
         if (cpu != smp_id())
             smp_send_ipi(cpu);
     }
+}
+
+/* nightly-7 (hv_win_session.c): end the guest exactly as a guest SYSTEM_OFF does (every started vCPU exits; the
+ * boot CPU then runs hv.c's unchanged exit path: retire HIDM/SMCP/M5WN/N1 and the storage session) */
+void hv_win_system_exit(u32 reason)
+{
+    psci_system_exit(reason);
 }
 
 static s64 psci_features(u64 fid)

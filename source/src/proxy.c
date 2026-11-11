@@ -717,6 +717,15 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WIN_PERF:
             reply->retval = hv_win_perf_configure(request->args[0]);
             break;
+        case P_HV_WIN_SESSION_END: /* nightly-7 */
+            reply->retval = hv_win_session_end(request->args[0], request->args[1]);
+            break;
+        case P_HV_WIN_HEARTBEAT:
+            reply->retval = hv_win_session_heartbeat(request->args[0]);
+            break;
+        case P_HV_WIN_SESSION_STAT:
+            reply->retval = hv_win_session_stat(request->args[0]);
+            break;
         case P_DCPW_LIVE:
 #if defined(DCPW_LIVE) && DCPW_LIVE
             reply->retval = dcpw_live_run(request->args[0], request->args[1], request->args[2],

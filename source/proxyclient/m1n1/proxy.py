@@ -710,6 +710,9 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_CPPC_STAT = 0xc39
     P_HV_WIN_CPPC_DVFS = 0xc3a
     P_HV_WIN_PERF = 0xc58
+    P_HV_WIN_SESSION_END = 0xc5a   # nightly-7
+    P_HV_WIN_HEARTBEAT = 0xc5b
+    P_HV_WIN_SESSION_STAT = 0xc5c
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1229,6 +1232,14 @@ class M1N1Proxy(Reloadable):
         # perf-exits: bit0 stats (PF line), bit1 fast-mdscr, bit2 mdscr-pass; returns the flags applied
         # (fast-mdscr can be dropped) or < 0 when refused. Before the guest starts.
         return self.request(self.P_HV_WIN_PERF, flags, signed=True)
+    def hv_win_session_end(self, code, flags=1):
+        # nightly-7: end the running guest like SYSTEM_OFF (retire storage); flags bit0: the resident resets after
+        return self.request(self.P_HV_WIN_SESSION_END, code, flags, signed=True)
+    def hv_win_session_heartbeat(self, seconds):
+        # nightly-7: host heartbeat; arms the resident's dead-man (10..3600 s; 0 = refresh only)
+        return self.request(self.P_HV_WIN_HEARTBEAT, seconds, signed=True)
+    def hv_win_session_stat(self, index):
+        return self.request(self.P_HV_WIN_SESSION_STAT, index)
     def hv_win_caps(self):
         return self.request(self.P_HV_WIN_CAPS)
     def hv_win_configure(self, irq_model, gicd_base, gicr_base, nr_vcpus, flags, cpus=0):

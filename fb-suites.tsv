@@ -91,3 +91,5 @@ QF	win-perf	source/src/hv/win/hv_win_perf.h source/src/hv/hv_exc.c source/src/hv
 QF	smp-storage-stress	source/src/hv/win/hv_win_storage* source/src/hv/win/s1/* source/tests/smp-storage/*	python3 -I source/tests/smp-storage/run.py > $FB_OUT/smps.json 2>&1; rc=$?; tail -3 $FB_OUT/smps.json | cut -c1-200; exit $rc
 M	smp-storage-mutants	*	SMPS_JOBS=$FB_JOBS python3 -I source/tests/smp-storage/run.py mutants > $FB_OUT/smpsm.json 2>&1; rc=$?; tail -1 $FB_OUT/smpsm.json; exit $rc
 QF	trace-1cpu	source/src/hv/win/* source/src/hv/win/s1/* tests/native/*	FB_JOBS=$FB_JOBS python3 -I tests/native/trace_1cpu.py 7e803d6 > $FB_OUT/trace.json 2>&1; rc=$?; tail -1 $FB_OUT/trace.json; exit $rc
+# ---- nightly-7: cable-independent session end (host stop, dead-man, uncollected guest exit)
+QF	win-session	source/src/hv/win/hv_win_session.c source/tests/win-session/*	OUT=$FB_OUT/ws sh source/tests/win-session/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0

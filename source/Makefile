@@ -154,6 +154,7 @@ HV_OBJECTS := $(patsubst %,hv/%, \
 	win/s1/native_window.o \
 	win/s1/native_link.o \
 	win/hv_win_psci.o \
+	win/hv_win_session.o \
 	win/hv_win_pl011.o \
 	win/hv_win_cppc.o \
 	win/hv_win_pmu.o \

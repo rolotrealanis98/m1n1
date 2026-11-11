@@ -11,7 +11,7 @@ caa8676e9ab0bbbce03db1ca142ad8cdabf69c8e source/src/hv/win/s1/hv_nvme.c
 833583886122428886da6c2a9aa70ee423d6dee3 source/src/hv/win/s1/hv_nvme_queue.h
 5fe87c78ad54bd330165af35a8cc87ba9f81f944 source/src/hv/win/s1/hv_pci.c
 faf87771c9b3c3eafb66fd2c2e7cdc665a2bcd6a source/src/hv/win/s1/model.h
-36fe7ae2d57f1b80bc64fb53d608e0cae19b6790 source/src/hv/win/s1/native_link.c
+fc5ee99d596a421357f66cee99e388c27913e750 source/src/hv/win/s1/native_link.c
 0261a351caf07162c5a02b53a6baef7183670e0d source/src/hv/win/s1/native_link.h
 8e62499cdff670f2822d59809d8240dcdee44b7c source/src/hv/win/s1/native_window.c
 87e9021ca8bc0ae98e97f964d4a60796501f1407 source/src/hv/win/s1/native_window.h

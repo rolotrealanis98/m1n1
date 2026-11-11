@@ -123,6 +123,13 @@ bool s1n_link_proxy(u64 opcode, bool guest_exception)
     case P_EXIT:
         if (guest_exception) return true;
         break;
+    /* nightly-7: cable-independent session end. Only in a host-interrupt or exception session (the guest is
+     * running); they end the guest through the SYSTEM_OFF path and never reach storage state themselves. */
+    case P_HV_WIN_SESSION_END:
+    case P_HV_WIN_HEARTBEAT:
+    case P_HV_WIN_SESSION_STAT:
+        if (guest_exception) return true;
+        break;
     default:
         break;
     }
