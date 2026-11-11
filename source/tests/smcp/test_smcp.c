@@ -115,6 +115,12 @@ static void t_nominal_t1b(void)
     CHECK_EQ(rd(SMCP_R_TIMEOUTS), 0);
     CHECK(max_sends_per_tick <= 1);
     CHECK(max_recv_calls_per_tick <= (int)SMCP_RECV_BUDGET);
+    /* temperatures round to the nearest 0.1 K: 27.56 C -> 3008, -5.56 C -> 2676 */
+    mock_set_u(&M, "TB0T", 0x41dc7ae1);
+    mock_set_u(&M, "TCHP", 0xc0b1eb85);
+    run_ms(2100);
+    CHECK_EQ(rd(SMCP_R_TEMP0 + 4), 3008);
+    CHECK_EQ(rd(SMCP_R_TEMP0 + 8), 2676);
 }
 
 static void t_reads_only(void)
