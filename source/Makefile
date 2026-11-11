@@ -193,6 +193,10 @@ OBJECTS := \
 	proxy.o \
 	ringbuffer.o \
 	rtkit.o \
+	mtp_kbd.o \
+	mtp_kbd_resident.o \
+	hv_win_hidm.o \
+	hidm/service/hidm_service.o \
 	sart.o \
 	sep.o \
 	sio.o \

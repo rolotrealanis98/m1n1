@@ -27,5 +27,7 @@ bool asc_can_send(asc_dev_t *asc);
 bool asc_recv(asc_dev_t *asc, struct asc_message *msg);
 bool asc_recv_timeout(asc_dev_t *asc, struct asc_message *msg, u32 delay_usec);
 bool asc_send(asc_dev_t *asc, const struct asc_message *msg);
+/* No polling or delay: exclusive ASC owner only. */
+bool asc_try_send(asc_dev_t *asc, const struct asc_message *msg);
 
 #endif

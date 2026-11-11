@@ -686,6 +686,7 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_USB_PREP = 0xc1d
     P_HV_WIN_FB_PREPARE = 0xc1e
     P_HV_WIN_FB_STAT = 0xc1f
+    P_HV_WIN_HIDM_CONFIGURE = 0xc28
     P_HV_WIN_STORAGE_PREP = 0xc20
     P_HV_WIN_STORAGE_STAT = 0xc21
     P_HV_WIN_STORAGE_NATIVE = 0xc22
@@ -1222,6 +1223,9 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_FB_PREPARE, native_base, flags, tuning, signed=True)
     def hv_win_fb_stat(self, idx):
         return self.request(self.P_HV_WIN_FB_STAT, idx)
+    def hv_win_hidm_configure(self):
+        return self.request(self.P_HV_WIN_HIDM_CONFIGURE, 1, signed=True)
+
     def hv_win_storage_prepare(self, registration):
         # Exact96-byte header plus copied {base,size} range arrays; one launch only.
         return self.request(self.P_HV_WIN_STORAGE_PREP, registration, len(registration), signed=True)

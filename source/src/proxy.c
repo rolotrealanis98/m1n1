@@ -32,6 +32,7 @@
 
 #include "hv/win/hv_win.h"
 #include "hv/win/hv_win_storage.h"
+#include "hv_win_hidm.h"
 #include "minilzlib/minlzma.h"
 #include "tinf/tinf.h"
 
@@ -633,6 +634,9 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_STORAGE_NATIVE_QUIESCE:
             reply->retval = hv_win_storage_native_quiesce();
+            break;
+        case P_HV_WIN_HIDM_CONFIGURE:
+            reply->retval = hv_win_hidm_configure(request->args[0]);
             break;
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");

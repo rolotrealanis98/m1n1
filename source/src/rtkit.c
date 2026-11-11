@@ -15,6 +15,7 @@
 
 #define rtkit_printf(...)                                                                          \
     do {                                                                                           \
+        if (rtk->mtp) break; /* MTP: no runtime console or key-bearing logs. */               \
         debug_printf("rtkit(%s): ", rtk->name);                                                    \
         debug_printf(__VA_ARGS__);                                                                 \
     } while (0)
@@ -88,6 +89,9 @@ struct rtkit_dev {
     iova_domain_t *dart_iovad;
     sart_dev_t *sart;
     bool sram;
+    bool mtp, tx_pending, oslog_buffer;
+    u64 sram_base, sram_size, tx_deadline;
+    struct asc_message pending_tx;
 
     u64 dva_base;
 
@@ -182,6 +186,27 @@ void rtkit_free(rtkit_dev_t *rtk)
     free(rtk);
 }
 
+void rtkit_mtp_mode(rtkit_dev_t *rtk, u64 base, size_t size)
+{
+    rtk->mtp = true;
+    rtk->sram_base = base;
+    rtk->sram_size = size;
+}
+
+static bool rtkit_mail_send(rtkit_dev_t *rtk, const struct asc_message *msg)
+{
+    if (!rtk->mtp)
+        return asc_send(rtk->asc, msg);
+    if (rtk->tx_pending)
+        return false;
+    if (asc_try_send(rtk->asc, msg))
+        return true;
+    rtk->pending_tx = *msg;
+    rtk->tx_pending = true;
+    rtk->tx_deadline = timeout_calculate(500000);
+    return true;
+}
+
 bool rtkit_send(rtkit_dev_t *rtk, const struct rtkit_message *msg)
 {
     struct asc_message asc_msg;
@@ -189,7 +214,7 @@ bool rtkit_send(rtkit_dev_t *rtk, const struct rtkit_message *msg)
     asc_msg.msg0 = msg->msg;
     asc_msg.msg1 = msg->ep;
 
-    return asc_send(rtk->asc, &asc_msg);
+    return rtkit_mail_send(rtk, &asc_msg);
 }
 
 bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva)
@@ -281,9 +306,13 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
 {
     size_t n_4kpages = FIELD_GET(MSG_BUFFER_REQUEST_SIZE, msg->msg);
     size_t sz = n_4kpages << 12;
-    u64 addr = FIELD_GET(MSG_BUFFER_REQUEST_IOVA, msg->msg);
+    u64 addr = rtk->mtp ? (msg->msg & GENMASK(43, 0)) :
+                         FIELD_GET(MSG_BUFFER_REQUEST_IOVA, msg->msg);
 
     if (rtk->sram) {
+        if (rtk->mtp && (!sz || addr < rtk->sram_base || sz > rtk->sram_size ||
+                         addr - rtk->sram_base > rtk->sram_size - sz))
+            return false;
         if (!addr) {
             rtkit_printf("SRAM buffers needs to be provided by the IOP\n");
             return false;
@@ -320,7 +349,7 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
     if (!addr)
         reply.msg0 |= FIELD_PREP(MSG_BUFFER_REQUEST_IOVA, bfr->dva | rtk->dva_base);
 
-    if (!asc_send(rtk->asc, &reply)) {
+    if (!rtkit_mail_send(rtk, &reply)) {
         rtkit_printf("unable to send buffer reply\n");
         rtkit_free_buffer(rtk, bfr);
         goto error;
@@ -376,7 +405,15 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
     if (rtk->crashed)
         return -1;
 
-    while (asc_recv(rtk->asc, &asc_msg)) {
+    unsigned budget = 8;
+    u64 deadline = rtk->mtp ? timeout_calculate(50) : 0;
+    if (rtk->mtp && rtk->tx_pending) {
+        if (!asc_try_send(rtk->asc, &rtk->pending_tx))
+            return timeout_expired(rtk->tx_deadline) ? -1 : 0;
+        rtk->tx_pending = false;
+    }
+    while ((!rtk->mtp || (budget-- && !timeout_expired(deadline) && !rtk->tx_pending)) &&
+           asc_recv(rtk->asc, &asc_msg)) {
         if (asc_msg.msg1 >= 0x100) {
             rtkit_printf("WARNING: received message for invalid endpoint %x >= 0x100\n",
                          asc_msg.msg1);
@@ -388,7 +425,7 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
 
         /* if this is an app message we can just forward it to the caller */
         if (msg->ep >= 0x20)
-            return 1;
+            return rtk->mtp ? 0 : 1;
 
         u32 msgtype = FIELD_GET(MGMT_TYPE, msg->msg);
         switch (msg->ep) {
@@ -416,6 +453,7 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
                     case MSG_SYSLOG_LOG:
 #ifdef RTKIT_SYSLOG
                     {
+                        if (rtk->mtp) goto skip_mtp_log;
                         u64 index = FIELD_GET(MSG_SYSLOG_LOG_INDEX, msg->msg);
                         u64 stride = rtk->syslog_size + sizeof(struct syslog_log);
                         struct syslog_log *log = rtk->syslog_bfr.bfr + stride * index;
@@ -423,9 +461,12 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
                         if (log->msg[strlen(log->msg) - 1] != '\n')
                             printf("\n");
                     }
+skip_mtp_log:;
 #endif
-                        if (!asc_send(rtk->asc, &asc_msg))
+                        if (!rtkit_mail_send(rtk, &asc_msg)) {
+                            if (rtk->mtp) return -1;
                             rtkit_printf("failed to ack syslog\n");
+                        }
                         break;
                     default:
                         rtkit_printf("unknown syslog message %x\n", msgtype);
@@ -437,6 +478,7 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
                         if (!rtk->crashlog_bfr.bfr) {
                             ok = ok && rtkit_handle_buffer_request(rtk, msg, &rtk->crashlog_bfr);
                         } else {
+                            if (rtk->mtp) { rtk->crashed = true; return -1; }
                             rtkit_crashed(rtk);
                             return -1;
                         }
@@ -461,9 +503,25 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
                 }
                 break;
             case RTKIT_EP_OSLOG:
+                if (rtk->mtp) {
+                    u32 type = msg->msg >> 56;
+                    if (type == 1) {
+                        u64 addr = (msg->msg & 0xfffffffffULL) << 12;
+                        u64 size = (msg->msg >> 36) & 0xfffff;
+                        if (!size || addr < rtk->sram_base || size > rtk->sram_size ||
+                            addr - rtk->sram_base > rtk->sram_size - size)
+                            return -1;
+                        rtk->oslog_buffer = true; /* firmware-owned: no reply */
+                    } else if (type == 2 && rtk->oslog_buffer &&
+                               !(msg->msg & 0x00ffffff00000000ULL)) {
+                        if (!rtkit_mail_send(rtk, &asc_msg)) return -1;
+                    }
+                    break;
+                }
                 rtkit_printf("unknown oslog message %lx\n", msg->msg);
                 break;
             default:
+                if (rtk->mtp) break;
                 rtkit_printf("message to unknown system endpoint 0x%02x: %lx\n", msg->ep, msg->msg);
         }
 
@@ -485,7 +543,7 @@ bool rtkit_start_ep(rtkit_dev_t *rtk, u8 ep)
     msg.msg0 |= FIELD_PREP(MGMT_MSG_START_EP_IDX, ep);
     msg.msg1 = RTKIT_EP_MGMT;
 
-    if (!asc_send(rtk->asc, &msg)) {
+    if (!rtkit_mail_send(rtk, &msg)) {
         rtkit_printf("unable to start endpoint 0x%02x\n", ep);
         return false;
     }
@@ -521,17 +579,17 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     struct asc_message msg;
 
     /* boot the IOP if it isn't already */
-    asc_cpu_start(rtk->asc);
+    if (!rtk->mtp) asc_cpu_start(rtk->asc);
     /* can be sent unconditionally to wake up a possibly sleeping IOP */
     msg.msg0 = FIELD_PREP(MGMT_TYPE, MGMT_MSG_IOP_PWR_STATE) |
                FIELD_PREP(MGMT_PWR_STATE, RTKIT_POWER_INIT);
     msg.msg1 = RTKIT_EP_MGMT;
-    if (!asc_send(rtk->asc, &msg)) {
+    if (!rtkit_mail_send(rtk, &msg)) {
         rtkit_printf("unable to send wakeup message\n");
         return false;
     }
 
-    if (!asc_recv_timeout(rtk->asc, &msg, rtkit_boot_timeout)) {
+    if (!asc_recv_timeout(rtk->asc, &msg, rtk->mtp ? 1000000 : rtkit_boot_timeout)) {
         rtkit_printf("did not receive HELLO\n");
         return false;
     }
@@ -554,7 +612,7 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     max_ver = FIELD_GET(MGMT_MSG_HELLO_MAXVER, msg.msg0);
     want_ver = min(RTKIT_MAX_VERSION, max_ver);
 
-    if (min_ver > RTKIT_MAX_VERSION || max_ver < RTKIT_MIN_VERSION) {
+    if ((rtk->mtp && min_ver > max_ver) || min_ver > RTKIT_MAX_VERSION || max_ver < RTKIT_MIN_VERSION) {
         rtkit_printf("supported versions [%d,%d] must overlap versions [%d,%d]\n",
                      RTKIT_MIN_VERSION, RTKIT_MAX_VERSION, min_ver, max_ver);
         return false;
@@ -566,7 +624,7 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     msg.msg0 |= FIELD_PREP(MGMT_MSG_HELLO_MINVER, want_ver);
     msg.msg0 |= FIELD_PREP(MGMT_MSG_HELLO_MAXVER, want_ver);
     msg.msg1 = RTKIT_EP_MGMT;
-    if (!asc_send(rtk->asc, &msg)) {
+    if (!rtkit_mail_send(rtk, &msg)) {
         rtkit_printf("couldn't send HELLO ack\n");
         return false;
     }
@@ -576,9 +634,12 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     bool has_ioreport = false;
     bool has_syslog = false;
     bool has_oslog = false;
+    bool has_analytics = false;
+    u64 mtp_boot_deadline = timeout_calculate(5000000);
     bool got_epmap = false;
     while (!got_epmap) {
-        if (!asc_recv_timeout(rtk->asc, &msg, rtkit_boot_timeout)) {
+        if (rtk->mtp && timeout_expired(mtp_boot_deadline)) return false;
+        if (!asc_recv_timeout(rtk->asc, &msg, rtk->mtp ? 1000000 : rtkit_boot_timeout)) {
             rtkit_printf("couldn't receive message while waiting for endpoint map\n");
             return false;
         }
@@ -621,6 +682,9 @@ bool rtkit_boot(rtkit_dev_t *rtk)
                         has_oslog = true;
                     case RTKIT_EP_MGMT:
                         break;
+                    case 0xa:
+                        has_analytics = rtk->mtp;
+                        break;
                     default:
                         rtkit_printf("unknown system endpoint 0x%02x\n", ep_idx);
                 }
@@ -639,7 +703,7 @@ bool rtkit_boot(rtkit_dev_t *rtk)
 
         msg.msg1 = RTKIT_EP_MGMT;
 
-        if (!asc_send(rtk->asc, &msg)) {
+        if (!rtkit_mail_send(rtk, &msg)) {
             rtkit_printf("couldn't reply to endpoint map\n");
             return false;
         }
@@ -657,10 +721,11 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     if (has_oslog && !rtkit_start_ep(rtk, RTKIT_EP_OSLOG))
         return false;
 
-    u64 power_deadline = timeout_calculate(rtkit_power_timeout);
+    if (has_analytics && !rtkit_start_ep(rtk, 0xa)) return false;
+    u64 power_deadline = timeout_calculate(rtk->mtp ? 5000000 : rtkit_power_timeout);
     while (rtk->iop_power != RTKIT_POWER_ON) {
         struct rtkit_message rtk_msg;
-        if (rtkit_power_wait_expired(power_deadline)) {
+        if ((rtk->mtp && timeout_expired(power_deadline)) || rtkit_power_wait_expired(power_deadline)) {
             rtkit_printf("timed out waiting for IOP power on\n");
             return false;
         }
@@ -676,11 +741,19 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     msg.msg0 =
         FIELD_PREP(MGMT_TYPE, MGMT_MSG_AP_PWR_STATE) | FIELD_PREP(MGMT_PWR_STATE, RTKIT_POWER_ON);
     msg.msg1 = RTKIT_EP_MGMT;
-    if (!asc_send(rtk->asc, &msg)) {
+    if (!rtkit_mail_send(rtk, &msg)) {
         rtkit_printf("unable to send AP power message\n");
         return false;
     }
 
+    if (rtk->mtp) {
+        u64 ap_deadline = timeout_calculate(5000000);
+        while (rtk->ap_power != RTKIT_POWER_ON) {
+            struct rtkit_message received;
+            if (timeout_expired(ap_deadline) || rtkit_recv(rtk, &received) < 0)
+                return false;
+        }
+    }
     return true;
 }
 
@@ -695,7 +768,7 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
     msg.msg0 = FIELD_PREP(MGMT_TYPE, MGMT_MSG_AP_PWR_STATE) |
                FIELD_PREP(MGMT_PWR_STATE, RTKIT_POWER_QUIESCED);
     msg.msg1 = RTKIT_EP_MGMT;
-    if (!asc_send(rtk->asc, &msg)) {
+    if (!rtkit_mail_send(rtk, &msg)) {
         rtkit_printf("unable to send shutdown message\n");
         return false;
     }
@@ -703,7 +776,7 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
     u64 power_deadline = timeout_calculate(rtkit_power_timeout);
     while (rtk->ap_power != RTKIT_POWER_QUIESCED) {
         struct rtkit_message rtk_msg;
-        if (rtkit_power_wait_expired(power_deadline)) {
+        if ((rtk->mtp && timeout_expired(power_deadline)) || rtkit_power_wait_expired(power_deadline)) {
             rtkit_printf("timed out waiting for AP power quiesce\n");
             return false;
         }
@@ -720,7 +793,7 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
     }
 
     msg.msg0 = FIELD_PREP(MGMT_TYPE, MGMT_MSG_IOP_PWR_STATE) | FIELD_PREP(MGMT_PWR_STATE, target);
-    if (!asc_send(rtk->asc, &msg)) {
+    if (!rtkit_mail_send(rtk, &msg)) {
         rtkit_printf("unable to send shutdown message\n");
         return false;
     }
@@ -728,7 +801,7 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
     power_deadline = timeout_calculate(rtkit_power_timeout);
     while (rtk->iop_power != target) {
         struct rtkit_message rtk_msg;
-        if (rtkit_power_wait_expired(power_deadline)) {
+        if ((rtk->mtp && timeout_expired(power_deadline)) || rtkit_power_wait_expired(power_deadline)) {
             rtkit_printf("timed out waiting for IOP power state\n");
             return false;
         }
@@ -749,11 +822,13 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
 
 bool rtkit_quiesce(rtkit_dev_t *rtk)
 {
+    if (rtk->mtp) return false;
     return rtkit_switch_power_state(rtk, RTKIT_POWER_QUIESCED);
 }
 
 bool rtkit_sleep(rtkit_dev_t *rtk)
 {
+    if (rtk->mtp) return false;
     int ret = rtkit_switch_power_state(rtk, RTKIT_POWER_SLEEP);
     if (ret < 0)
         return ret;
