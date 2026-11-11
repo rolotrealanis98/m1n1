@@ -38,6 +38,8 @@ code = r'''
 typedef uint32_t u32; typedef int64_t s64;
 static struct { u32 nr_vcpus; } hv_win;
 static int lines;
+static bool n1;                                  /* nightly: N1 probe/bring-up ran */
+static bool hv_win_n1_touched(void) { return n1; }
 #define printf(...) (lines++, fprintf(stderr, __VA_ARGS__))
 ''' + gate + r'''
 static int configure(long nr_vcpus) {
@@ -55,6 +57,12 @@ int main(void) {
     int l = lines; bad |= configure(18) != -1; bad |= lines != l + 1;     /* storage touched: SMP refused */
     bad |= configure(1) != 0;
     u1_storage_touched = false; bad |= configure(6) != 0;                 /* no storage: SMP allowed */
+    /* nightly: after the N1 probe/bring-up every storage call is refused, whatever the vCPU count */
+    n1 = true; u1_storage_touched = false;
+    hv_win.nr_vcpus = 1; l = lines; bad |= hv_win_storage_smp_gate("t") != false; bad |= lines != l + 1;
+    bad |= u1_storage_touched;
+    hv_win.nr_vcpus = 0; bad |= hv_win_storage_smp_gate("t") != false;
+    n1 = false;
     printf("gate harness %s\n", bad ? "FAILED" : "passed");
     return bad;
 }

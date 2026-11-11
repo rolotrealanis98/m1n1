@@ -8,6 +8,7 @@
 #include "hv_win_hidm.h"
 #include "hv_win_smcp.h"
 #include "hv_win_m5wn.h"
+#include "hv_win_n1.h"
 #include "aic.h"
 #include "aic_regs.h"
 #include "cpu_regs.h"
@@ -192,6 +193,11 @@ static bool u1_storage_touched;
 
 bool hv_win_storage_smp_gate(const char *what)
 {
+    if (hv_win_n1_touched()) {
+        printf("HV/win nightly: %s REFUSED: the N1 Wi-Fi probe/bring-up ran this session (shared PCIe/PHY); "
+               "no disk path after N1 (wireless/n1-20261111 WRITES.md)\n", what);
+        return false;
+    }
     if (hv_win.nr_vcpus > 1) {
         printf("HV/win u1: %s REFUSED: %u vCPUs configured; the disk path (emulated NVMe, ANS reads/writes) "
                "is single-vCPU only - run storage with -C 1 (SMP-SAFETY.md)\n",

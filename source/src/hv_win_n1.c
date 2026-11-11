@@ -36,6 +36,7 @@ static bool have_addrs;
 static n1_u64 probe_out[N1P_COUNT];
 static struct n1 core;
 static bool started;
+static bool probed; /* nightly: the probe powered/read the shared PCIe ports */
 static u64 pool, pool_used, iova_next[4];
 static dart_dev_t *darts[4];
 
@@ -113,12 +114,20 @@ static bool guest_started(void)
 s64 hv_win_n1_probe(u64 flags)
 {
     if (guest_started() || !get_addrs()) return -1;
+    probed = true;
     if (n1_probe(&hal, &addrs, (unsigned)flags, probe_out)) return -2;
     printf("N1PROBE: verdict 0x%lx rc 0x%lx/0x%lx port0 status 0x%lx linksts 0x%lx ltssm 0x%lx perst 0x%lx ep 0x%lx smc 0x%lx\n",
            probe_out[N1P_VERDICT], probe_out[N1P_RC_CTL], probe_out[N1P_RC_STAT], probe_out[N1P_P0_STATUS],
            probe_out[N1P_P0_LINKSTS], probe_out[N1P_P0_LTSSM], probe_out[N1P_PERST_PAD], probe_out[N1P_EP_ID],
            probe_out[N1P_SMC_VALUE]);
     return 0;
+}
+
+/* nightly: true once the N1 probe or bring-up touched the shared PCIe/PHY this session; the storage gate
+ * (hv_win.c hv_win_storage_smp_gate) then refuses any disk path (the reverse of the START refusal). */
+bool hv_win_n1_touched(void)
+{
+    return started || probed;
 }
 
 u64 hv_win_n1_stat(u64 index)

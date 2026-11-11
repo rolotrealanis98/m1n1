@@ -10,4 +10,5 @@ void *hv_win_n1_core(void); /* struct n1 * once the radio is up, else NULL */
 void hv_win_n1_tick(void);
 s64 hv_win_n1_park(void);
 void hv_win_n1_retire(void);
+bool hv_win_n1_touched(void); /* nightly: probe/start ran this session */
 #endif
