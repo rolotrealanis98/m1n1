@@ -2,6 +2,7 @@
 #ifndef MTP_KBD_H
 #define MTP_KBD_H
 #include "hidm/service/hidm_service.h"
+#include "hidm/tp/hid_filter.h"
 struct mtp_tp; /* trackpad layer (hidm/tp/mtp_tp.h); NULL = keyboard only, unchanged */
 #define MTP_FIFO_SIZE 2048u
 #define MTP_FRAME_MAX (HM_MAX_DESC + 512u)
@@ -43,6 +44,10 @@ struct mtp_kbd {
     /* trackpad (2026-11-11): optional layer; tx_kind tells tx_poll what was sent */
     struct mtp_tp *tp;
     hm_u8 tx_kind; /* 0 other, 1 keyboard enable, 2 stm enable */
+    /* n3tp1 (2026-11-11): vendor TLCs removed from the keyboard descriptor for Windows */
+    struct hid_filter_result kbd_filter;
+    int kbd_filtered;
+    hm_u32 kbd_dropped;
 };
 #define MTP_STM_ANNOUNCE_US 1000000u /* wait for stm INIT after keyboard INIT */
 #define MTP_STM_READY_US 2000000u    /* wait for stm ACK + READY */

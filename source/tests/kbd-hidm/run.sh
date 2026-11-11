@@ -4,7 +4,7 @@ set -eu
 cd "$(dirname "$0")"
 O=${FB_OUT:-$PWD/out}; mkdir -p "$O"
 S=../../src
-TP="$S/hidm/tp/mtp_tp.c $S/hidm/tp/ptp.c $S/hidm/tp/apple_mt.c"
+TP="$S/hidm/tp/mtp_tp.c $S/hidm/tp/ptp.c $S/hidm/tp/apple_mt.c $S/hidm/tp/hid_filter.c"
 CFLAGS='-std=c11 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer'
 clang $CFLAGS -I$S test_backend.c $S/mtp_kbd.c $S/hidm/service/hidm_service.c $TP -o $O/test_backend
 $O/test_backend

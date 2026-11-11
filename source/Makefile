@@ -200,6 +200,7 @@ OBJECTS := \
 	hidm/tp/apple_mt.o \
 	hidm/tp/ptp.o \
 	hidm/tp/mtp_tp.o \
+	hidm/tp/hid_filter.o \
 	mtp_tp_resident.o \
 	mtp_dma.o \
 	sart.o \
