@@ -207,7 +207,13 @@ int smcp_cap_level(const smcp *s)
 
 /* ---- register file ----------------------------------------------------------------------- */
 
-static void raise(smcp *s, uint32_t ev) { s->evt_pending |= ev & SMCP_EV_ALL; }
+static void raise(smcp *s, uint32_t ev)
+{
+    uint32_t fresh = ev & SMCP_EV_ALL & ~s->evt_pending;
+    s->evt_pending |= ev & SMCP_EV_ALL;
+    if (fresh & s->evt_enable)
+        s->irq_edges++;
+}
 
 static void update_status(smcp *s)
 {
@@ -606,12 +612,17 @@ void smcp_reg_write(smcp *s, uint32_t off, uint32_t value)
 {
     if (off == SMCP_R_EVT_ACK)
         s->evt_pending &= ~value;
-    else if (off == SMCP_R_EVT_ENABLE)
+    else if (off == SMCP_R_EVT_ENABLE) {
+        uint32_t newly = value & SMCP_EV_ALL & ~s->evt_enable;
         s->evt_enable = value & SMCP_EV_ALL;
+        if (newly & s->evt_pending)
+            s->irq_edges++; /* events that waited for _INI */
+    }
     /* everything else: write ignored */
 }
 
 bool smcp_irq(const smcp *s) { return (s->evt_pending & s->evt_enable) != 0; }
+uint32_t smcp_irq_edges(const smcp *s) { return s->irq_edges; }
 bool smcp_failed(const smcp *s) { return s->phase == SMCP_PH_FAILED; }
 
 int smcp_cmd_blocking(smcp *s, uint8_t kind, uint32_t key, const uint8_t *wbuf, uint8_t len,

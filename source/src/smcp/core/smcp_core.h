@@ -94,6 +94,7 @@ typedef struct smcp {
     /* outputs */
     uint32_t regs[SMCP_R_REG_END / 4];
     uint32_t evt_pending, evt_enable;
+    uint32_t irq_edges;    /* rising edges for the edge-triggered GED line (see smcp_irq_edges) */
     bool prev_valid;
     uint32_t prev_bst_state, prev_percent, prev_psr, prev_lid, prev_full, prev_bhld;
     uint32_t err_count, last_err_key, timeouts, consecutive_timeouts;
@@ -106,6 +107,11 @@ void smcp_tick(smcp *s);                       /* non-blocking; call often (resi
 uint32_t smcp_reg_read(smcp *s, uint32_t off); /* off: byte offset, 4-aligned */
 void smcp_reg_write(smcp *s, uint32_t off, uint32_t value);
 bool smcp_irq(const smcp *s);
+/* The GED interrupt is edge-triggered: a level line that stays high until _EVT runs (passive level)
+ * storms a single vCPU (twin, runs/i1). The count goes up whenever an enabled event becomes pending
+ * that was not pending before, or an already-pending event is enabled; the glue pulses the line on
+ * every change of this count. */
+uint32_t smcp_irq_edges(const smcp *s);
 bool smcp_failed(const smcp *s);
 
 /* decoders (exported for tests) */

@@ -32,18 +32,23 @@ static smcp core;
 static asc_dev_t *smc_asc;
 static rtkit_dev_t *smc_rtk;
 static volatile u8 *shmem;
-static bool attempted, exposed, retired, irq_level, power_done;
+static bool attempted, exposed, retired, power_done;
 static u32 rec_flags;
 static u32 guest_reads, guest_writes, irq_raises; /* evidence that Windows evaluated the ACPI methods */
 
+/* GED line is edge-triggered (SSDT): one rising edge per new enabled event (smcp_irq_edges). The
+ * vGIC latches pending on the rising edge of an SPI the guest configured as edge (hv_vgic3.c
+ * vgic_set_level), so a pulse is high-then-low under the same lock. */
+static u32 edges_seen;
 static void update_irq(void)
 {
-    bool level = exposed && !retired && smcp_irq(&core);
-    if (level != irq_level) {
-        irq_level = level;
-        irq_raises += level;
-        hv_vgic3_set_spi_level(SMCP_GSIV, level);
-    }
+    u32 e = smcp_irq_edges(&core);
+    if (!exposed || retired || e == edges_seen)
+        return;
+    edges_seen = e;
+    irq_raises++;
+    hv_vgic3_set_spi_level(SMCP_GSIV, true);
+    hv_vgic3_set_spi_level(SMCP_GSIV, false);
 }
 
 bool hv_win_smcp_claims_spi(u64 gsiv) { return attempted && gsiv == SMCP_GSIV; }

@@ -483,6 +483,37 @@ static void t_size_mismatch(void)
     CHECK(!S.v[K_B0CT].ok);
 }
 
+static void t_edges(void)
+{
+    setup(0);
+    run_ms(200);
+    /* first data was raised before _INI: enabling pending events gives one edge */
+    CHECK_EQ(smcp_irq_edges(&S), 0);
+    smcp_reg_write(&S, SMCP_R_EVT_ENABLE, SMCP_EV_ALL);
+    CHECK_EQ(smcp_irq_edges(&S), 1);
+    smcp_reg_write(&S, SMCP_R_EVT_ENABLE, SMCP_EV_ALL); /* no change: no edge */
+    CHECK_EQ(smcp_irq_edges(&S), 1);
+    /* _EVT acks; a new lid event gives a new edge; a repeat while still pending does not */
+    smcp_reg_write(&S, SMCP_R_EVT_ACK, smcp_reg_read(&S, SMCP_R_EVT_PENDING));
+    mock_set_u(&M, "MSLD", 1);
+    run_ms(100);
+    CHECK_EQ(smcp_irq_edges(&S), 2);
+    mock_set_u(&M, "MSLD", 0);
+    run_ms(100);
+    CHECK_EQ(smcp_irq_edges(&S), 2);  /* LID still pending (not acked): coalesced */
+    smcp_reg_write(&S, SMCP_R_EVT_ACK, SMCP_EV_LID);
+    mock_set_u(&M, "MSLD", 1);
+    run_ms(100);
+    CHECK_EQ(smcp_irq_edges(&S), 3);
+    /* disabled events raise no edge */
+    smcp_reg_write(&S, SMCP_R_EVT_ACK, 0xff);
+    smcp_reg_write(&S, SMCP_R_EVT_ENABLE, SMCP_EV_LID);
+    mock_set_u(&M, "bHLD", 1);
+    run_ms(100);
+    CHECK_EQ(smcp_irq_edges(&S), 3);
+    CHECK_EQ(rd(SMCP_R_EVT_PENDING), SMCP_EV_PWRB);
+}
+
 static void t_registers(void)
 {
     setup(SMCP_REC_F_POWER_ACTIONS);
@@ -721,7 +752,7 @@ int main(void)
         {"discharging", t_discharging}, {"status_logic", t_status_logic}, {"chwa", t_chwa},
         {"capacity_level", t_capacity_level}, {"pre27_b0rm", t_pre27_b0rm}, {"lid_and_button", t_lid_and_button},
         {"notifications", t_notifications}, {"timeouts", t_timeouts}, {"stale_and_dead", t_stale_and_dead},
-        {"size_mismatch", t_size_mismatch}, {"registers", t_registers}, {"flt", t_flt},
+        {"size_mismatch", t_size_mismatch}, {"edges", t_edges}, {"registers", t_registers}, {"flt", t_flt},
         {"power_off", t_power_off}, {"restart", t_restart}, {"power_failures", t_power_failures},
         {"fuzz", t_fuzz},
     };
