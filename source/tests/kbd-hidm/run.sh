@@ -15,12 +15,19 @@ clang $CFLAGS upstream/tests/test_hidm.c upstream/service/hidm_service.c upstrea
 $O/test_service
 mkdir -p $O/rt; cp ../../config.h $O/; cp $S/rtkit.c $S/rtkit.h $S/asc.c $S/asc.h $O/rt/
 clang $CFLAGS -Wno-multichar -Wno-sign-compare -Wno-unused-value -Istubs -I$O/rt test_rtkit.c $O/rt/rtkit.c $O/rt/asc.c -o $O/test_rtkit
+clang $CFLAGS -Wno-multichar -Wno-sign-compare -Wno-unused-value -Istubs -I$O/rt test_rtkit_host.c $O/rt/rtkit.c $O/rt/asc.c -o $O/test_rtkit_host
+$O/test_rtkit_host
 $O/test_rtkit
+clang $CFLAGS -Wno-multichar -Wno-sign-compare -Wno-unused-value -Istubs -I$O/rt test_rtkit_host.c $O/rt/rtkit.c $O/rt/asc.c -o $O/test_rtkit_host
+$O/test_rtkit_host
 cp $S/mtp_kbd_resident.c $O/
 clang $CFLAGS -I$O -Istubs -I$O/rt -I$S test_adapter.c $S/mtp_kbd.c $S/hidm/service/hidm_service.c $TP -o $O/test_adapter
 $O/test_adapter
 clang $CFLAGS -I$S test_kbd_tp.c $S/mtp_kbd.c $S/hidm/service/hidm_service.c $TP -o $O/test_kbd_tp
 $O/test_kbd_tp
+cp $S/mtp_dma.c $O/
+clang $CFLAGS -Wno-format -I$O -Istubs-tp -Istubs -I$S test_mtp_dma.c -o $O/test_mtp_dma
+$O/test_mtp_dma
 cp $S/mtp_tp_resident.c $S/mtp_tp_resident.h $O/
 clang $CFLAGS -Wno-format -I$O -Istubs-tp -Istubs -I$S test_tp_resident.c $S/mtp_kbd.c $S/hidm/service/hidm_service.c $TP -o $O/test_tp_resident
 $O/test_tp_resident

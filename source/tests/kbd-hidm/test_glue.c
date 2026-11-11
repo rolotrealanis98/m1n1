@@ -28,6 +28,7 @@ int mtp_kbd_resident_start(struct mtp_kbd *k,hm_service *s)
 }
 /* trackpad adapter stubs (2026-11-11): finish returns a PTP interface when tp_on */
 static bool tp_on; static u64 armed_fw=~0ull;
+void (*mtp_kbd_dma_hook)(struct rtkit_dev *); void mtp_dma_rtkit_hook(struct rtkit_dev *r){(void)r;}
 static const hm_u8 tp_desc[]={5,0x0d,9,5,0xa1,1,0x85,1,0x09,0x42,0x15,0,0x25,1,0x75,8,0x95,1,0x81,2,0xc0};
 void mtp_tp_resident_arm(u64 addr,u64 len){(void)len;armed_fw=addr;}
 const hm_backend_interface *mtp_tp_resident_finish(struct mtp_kbd *k)
@@ -68,7 +69,7 @@ int main(void)
  reset();backend_fail=true;CHECK(hv_win_hidm_configure(1,0,0)==0 && !service.count);cmd(1,HM_HELLO,0,0);cmd(2,HM_ENUM,0,0);CHECK(rdpage(HM_DATA_BASE+HM_RESP_OFF+4,2)==HM_NOT_FOUND);
  reset();CHECK(!hv_win_hidm_configure(1,0,0));service.ready=service.active=service.enabled=1;hm_service_push(&service,2,report,8,0);hv_win_hidm_tick();CHECK(line);hv_win_hidm_retire();CHECK(!line && !rdpage(HM_REG_BASE,2));
  /* trackpad: armed with the launcher's firmware pointer; published as a second interface */
- reset();CHECK(!hv_win_hidm_configure(1,0,0) && armed_fw==0 && service.count==1);
+ reset();mtp_kbd_dma_hook=NULL;CHECK(!hv_win_hidm_configure(1,0,0) && armed_fw==0 && service.count==1 && mtp_kbd_dma_hook==mtp_dma_rtkit_hook); /* host RTKit buffers always armed */
  reset();tp_on=true;CHECK(!hv_win_hidm_configure(1,0x12340000,81420) && armed_fw==0x12340000 && service.count==2);
  CHECK(service.interfaces[0].info.id==2 && service.interfaces[1].info.id==1);
  reset();tp_on=true;backend_fail=true;CHECK(!hv_win_hidm_configure(1,0x12340000,81420) && !service.count); /* no keyboard: nothing */

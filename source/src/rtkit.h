@@ -32,6 +32,7 @@ bool rtkit_start_ep(rtkit_dev_t *rtk, u8 ep);
 bool rtkit_boot(rtkit_dev_t *rtk);
 /* Opt-in SRAM-only MTP policy: bounds, no memory logging, nonblocking receive.
  * CPU is already started by caller after checking the exact platform geometry. */
+void rtkit_mtp_host_buffers(rtkit_dev_t *rtk, bool (*alloc)(size_t sz, void **cpu, u64 *iova));
 void rtkit_mtp_mode(rtkit_dev_t *rtk, u64 sram_base, size_t sram_size);
 /* rtkit_boot()'s HELLO and endpoint-map wait in microseconds; 0 restores the 1 s default */
 void rtkit_set_boot_timeout(u64 us);

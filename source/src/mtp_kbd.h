@@ -59,4 +59,6 @@ hm_u32 mtp_kbd_report_all(void *, hm_u32, hm_u32, hm_u32, hm_u8 *, hm_u32 *);
 /* Resident adapter: called once before guest entry, tick only thereafter. */
 int mtp_kbd_resident_start(struct mtp_kbd *, hm_service *);
 extern void (*mtp_kbd_attach_hook)(struct mtp_kbd *);
+struct rtkit_dev;
+extern void (*mtp_kbd_dma_hook)(struct rtkit_dev *);
 #endif

@@ -1,0 +1,71 @@
+/* SPDX-License-Identifier: MIT */
+/* dart-mtp host DMA (mtp_dma.c): decisions per stream-0 state and the exact writes. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+static unsigned char arena[1 << 21] __attribute__((aligned(16384)));
+#define ARENA_PA 0x800000000ull
+#define TP_PA(p) ((unsigned long long)((unsigned char *)(p) - arena) + ARENA_PA)
+#define TP_PTR(pa) ((void *)(arena + ((pa) - ARENA_PA)))
+#include "mtp_dma.c" /* copied by run.sh so stubs shadow the resident headers */
+static unsigned checks, groups;
+#define CHECK(x) do { checks++; if (!(x)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); abort(); } } while (0)
+u64 test_ticks; void *adt;
+static unsigned used, nw; static u64 wa[16]; static u32 wv[16];
+static u32 tcr, ttbr, err, prot, en, busy; static int geobad; static u64 vmb = 0x10000004000ull;
+void *memalign(size_t a, size_t n) { used = (used + (unsigned)a - 1) & ~((unsigned)a - 1); void *p = arena + used; used += (unsigned)n; CHECK(used <= sizeof(arena)); return p; }
+void free(void *p) { (void)p; }
+bool is_heap(void *p) { (void)p; return true; }
+u32 read32(u64 a)
+{
+    if (a == DART_MTP + T8110_TCR0) return tcr;
+    if (a == DART_MTP + T8110_TTBR0) return ttbr;
+    if (a == DART_MTP + T8110_ERROR) return err;
+    if (a == DART_MTP + T8110_PROTECT) return prot;
+    if (a == DART_MTP + T8110_ENABLE_STREAMS) return en;
+    if (a == DART_MTP + T8110_TLB_CMD) { if (busy) { busy--; return T8110_TLB_BUSY; } return 0; }
+    CHECK(!"unexpected read"); return 0;
+}
+void write32(u64 a, u32 v) { CHECK(nw < 16); wa[nw] = a; wv[nw++] = v; }
+void udelay(u32 us) { (void)us; }
+int adt_path_offset_trace(const void *a, const char *p, int *path) { (void)a; (void)path; CHECK(!strcmp(p, "/arm-io/dart-mtp")); return geobad ? -1 : 1; }
+bool adt_is_compatible(const void *a, int n, const char *c) { (void)a; (void)n; return !strcmp(c, "dart,t8110"); }
+int adt_get_reg(const void *a, int *p, const char *n, int i, u64 *b, u64 *s) { (void)a; (void)p; (void)n; CHECK(i == 0); *b = DART_MTP; *s = 0xc000; return 0; }
+const void *adt_getprop(const void *a, int n, const char *p, u32 *len) { (void)a; (void)n; if (strcmp(p, "vm-base")) return NULL; *len = 8; return &vmb; }
+void rtkit_mtp_host_buffers(rtkit_dev_t *r, bool (*f)(size_t, void **, u64 *)) { (void)r; (void)f; }
+static void reset(void) { memset(arena, 0, sizeof(arena)); used = nw = 0; tcr = ttbr = err = prot = en = busy = 0; geobad = 0;
+    mode = MTP_DMA_OFF; tried = false; window = slot_base = 0; l2 = NULL; next_page = 0; groups++; }
+int main(void)
+{
+    void *cpu; u64 iova;
+    /* bypass: no write, DVA = PA */
+    reset(); tcr = 6; CHECK(mtp_dma_init() == MTP_DMA_BYPASS && nw == 0);
+    CHECK(mtp_dma_alloc(0x5000, &cpu, &iova) && iova == TP_PA(cpu) && !(iova & 0x3fff) && nw == 0);
+    /* stream off, unlocked: Linux attach - TTBR0, ENABLE_STREAMS |= 1, TCR0 = translate, FLUSH_ALL */
+    reset(); en = 0x10; CHECK(mtp_dma_init() == MTP_DMA_OWN_TABLES);
+    CHECK(nw == 4 && wa[0] == DART_MTP + T8110_TTBR0 && (wv[0] & 1) && wa[1] == DART_MTP + T8110_ENABLE_STREAMS && wv[1] == 0x11 &&
+          wa[2] == DART_MTP + T8110_TCR0 && wv[2] == 1 && wa[3] == DART_MTP + T8110_TLB_CMD && wv[3] == 0);
+    u64 *root = TP_PTR((u64)((wv[0] >> 2) & 0xfffffff) << 14);
+    CHECK((root[1] & 1) && !root[0] && !root[2] && slot_base == (1ull << 25) && window == 0x10000000000ull);
+    CHECK(mtp_dma_alloc(0x5000, &cpu, &iova) && iova == 0x10002000000ull && nw == 5 && wv[4] == 0);
+    u64 *L2 = TP_PTR(FIELD_GET(PTE_OFFSET, root[1]) << 14);
+    CHECK((L2[0] & 1) && (FIELD_GET(PTE_OFFSET, L2[0]) << 14) == TP_PA(cpu) && (FIELD_GET(PTE_OFFSET, L2[1]) << 14) == TP_PA(cpu) + 0x4000 && !L2[2]);
+    CHECK(mtp_dma_alloc(81388, &cpu, &iova) && iova == 0x10002008000ull);   /* firmware after the crashlog */
+    CHECK(mtp_dma_init() == MTP_DMA_OWN_TABLES && nw == 6);                  /* idempotent */
+    /* iBoot tables: one root entry in place, no TTBR/TCR write, lowest free slot >= 1 */
+    reset(); u64 *ib = memalign(16384, 16384); ib[1] = 1; tcr = 1; ttbr = (u32)(((TP_PA(ib) >> 14) << 2) | 1);
+    CHECK(mtp_dma_init() == MTP_DMA_IBOOT_TABLES && nw == 1 && wa[0] == DART_MTP + T8110_TLB_CMD && (ib[2] & 1) && ib[1] == 1 && slot_base == (2ull << 25));
+    /* refused states: locked, error, four-level, translate without TTBR, geometry */
+    reset(); prot = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0 && !mtp_dma_alloc(16, &cpu, &iova));
+    reset(); err = 4; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
+    reset(); tcr = 9; ttbr = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
+    reset(); tcr = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
+    reset(); geobad = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
+    /* TLB never idle: own tables were written, then off (no allocation possible) */
+    reset(); busy = 100000; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 3 && !mtp_dma_alloc(16, &cpu, &iova));
+    /* iBoot slots 1..127 all taken -> off, nothing written */
+    reset(); ib = memalign(16384, 16384); for (int k = 0; k < 128; k++) ib[k] = 1; tcr = 1; ttbr = (u32)(((TP_PA(ib) >> 14) << 2) | 1);
+    CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
+    printf("mtp-dma: %u groups, %u checks PASS\n", groups, checks);
+    return 0;
+}

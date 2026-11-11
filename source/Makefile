@@ -201,6 +201,7 @@ OBJECTS := \
 	hidm/tp/ptp.o \
 	hidm/tp/mtp_tp.o \
 	mtp_tp_resident.o \
+	mtp_dma.o \
 	sart.o \
 	sep.o \
 	sio.o \

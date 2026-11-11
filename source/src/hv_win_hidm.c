@@ -2,6 +2,11 @@
 #include "hv_win_hidm.h"
 #include "mtp_kbd.h"
 #include "mtp_tp_resident.h"
+#ifndef HIDM_HOST_TEST
+#include "mtp_dma.h"
+#else
+void mtp_dma_rtkit_hook(struct rtkit_dev *rtk);
+#endif
 #ifdef HIDM_HOST_TEST
 #include "hidm_host.h"
 #else
@@ -59,6 +64,7 @@ s64 hv_win_hidm_configure(u64 version, u64 tp_fw, u64 tp_fw_len)
     if (hv_map_hook(HM_REG_BASE, access_page, 0x4000) < 0 ||
         hv_map_hook(HM_DATA_BASE, access_page, 0x4000) < 0) return -1;
     mtp_tp_resident_arm(tp_fw, tp_fw_len); /* 0 = keyboard only, as before */
+    mtp_kbd_dma_hook = mtp_dma_rtkit_hook;  /* host RTKit buffers via dart-mtp (tp1-a1 finding) */
     if (!mtp_kbd_resident_start(&keyboard, &service)) {
         hm_backend_interface ifs[2];
         hm_u32 n = 0;
