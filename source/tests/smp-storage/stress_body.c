@@ -640,7 +640,7 @@ static void *boot_cpu(void *arg)
 }
 static atomic_ullong retire_at;
 static u8 *retire_disk, *retire_cq;
-static u64 retire_dispatches;
+static u64 retire_dispatches, retire_ctrl_completions;
 static void *retirer(void *arg)
 {
     (void)arg;
@@ -653,6 +653,7 @@ static void *retirer(void *arg)
         hv_storage_lock_take();
         hv_win_storage_retire();
         retire_dispatches = dispatches + rejections + controller.queue.stats.commands;
+        retire_ctrl_completions = controller.queue.stats.completions;
         memcpy(retire_disk, disk, (size_t)(GUARD + W_BLOCKS + GUARD) * BS);
         g_get(retire_cq, IOCQ, QD * 16);
         atomic_store(&retired_flag, 1);
@@ -661,6 +662,7 @@ static void *retirer(void *arg)
         /* as hv.c does it: a plain call, the storage lock taken inside */
         hv_win_storage_retire();
         hv_storage_lock_take();
+        retire_ctrl_completions = controller.queue.stats.completions;
         memcpy(retire_disk, disk, (size_t)(GUARD + W_BLOCKS + GUARD) * BS);
         g_get(retire_cq, IOCQ, QD * 16);
         atomic_store(&retired_flag, 1);
@@ -813,7 +815,8 @@ int main(int argc, char **argv)
         g_get(cq, IOCQ, sizeof(cq));
         /* consumed entries are poisoned by the guest; compare only what the controller writes: phase dwords */
         for (int i = 0; i < QD; i++) if (memcmp(cq + i * 16 + 12, retire_cq + i * 16 + 12, 4)) FAIL("a CQE was written after retire");
-        REQUIRE(atomic_load(&completions_after_retire) == 0);
+        /* the guest may still consume CQEs posted before retire; none may be posted after it */
+        REQUIRE(controller.queue.stats.completions == retire_ctrl_completions);
         REQUIRE(controller.faulted);
         REQUIRE(!strcmp(mode, "retire") || retire_dispatches > 0);
     }

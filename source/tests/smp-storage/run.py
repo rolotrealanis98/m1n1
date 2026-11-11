@@ -6,7 +6,7 @@ under ThreadSanitizer and under AddressSanitizer+UBSan, plus mutants (each must 
   run.py            stress: {tsan, asan} x {2, 6, 18 vCPUs} x {main, latch, retire, retire_nested}
   run.py mutants    lock removed at each concurrent site, broken lock, SQE re-read after validation (TOCTOU),
                     CQE phase stored first
-Env: SMPS_ITERS (commands per worker, default 1500), SMPS_JOBS (default 8). Host only, no hardware.
+Env: SMPS_ITERS (commands per worker, default 1500), SMPS_JOBS (default 8), SMPS_SEED (default 11). Host only, no hardware.
 """
 import json, os, shutil, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +19,7 @@ S1 = WIN / 's1'
 S1F = ['hv_nvme.c', 'hv_pci.c', 'hv_nvme_queue.c', 'ram_disk.c', 'hv_nvme_queue.h', 'model.h', 'ram_disk.h']
 ITERS = int(os.environ.get('SMPS_ITERS', '1500'))
 JOBS = int(os.environ.get('SMPS_JOBS', '8'))
+SEED = int(os.environ.get('SMPS_SEED', '11'))
 
 
 def strip(text):
@@ -139,7 +140,7 @@ def main():
         sys.exit(0 if killed == len(results) else 1)
     exes = {san: build(root, san, san) for san in ('tsan', 'asan')}
     jobs = [(san, nv, mode, seed) for san in ('tsan', 'asan') for nv in (2, 6, 18) for mode in ('main', 'latch', 'retire', 'retire_nested')
-            for seed in ((11,) if mode != 'main' else (11, 12))]
+            for seed in ((SEED,) if mode != 'main' else (SEED, SEED + 1))]
     def go(j):
         san, nv, mode, seed = j
         r = run(exes[san], nv, ITERS if mode == 'main' else max(ITERS // 3, 200), seed, mode)
