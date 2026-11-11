@@ -59,7 +59,7 @@ M = [
     ('state_bit_shared', 'hv_win_pmu.c', '#define PMU_BS_SCANNED(frame) (1U << (frame))', '#define PMU_BS_SCANNED(frame) (1U << ((frame) & 1))'),
     ('state_per_32k', 'hv_win_pmu.c', 'return &pmu.ranges[i].frames[(ipa - pmu.ranges[i].base) / PMU_PAGE];', 'return &pmu.ranges[i].frames[(ipa - pmu.ranges[i].base) / (2 * PMU_PAGE)];'),
     ('heap_need_frames', 'hv_win_pmu.c', 'u64 frame_bytes = pmu.mode16k ? 0 : size / PMU_PAGE;', 'u64 frame_bytes = pmu.mode16k ? 0 : size / PMU_FRAME_SIZE;'),
-    ('heap_need_no_margin', 'hv_win_pmu.c', 'if (tables * PMU_PAGE + PMU_HEAP_MARGIN + frame_bytes > heapblock_remaining()) {', 'if (tables * PMU_PAGE + frame_bytes > heapblock_remaining()) {'),
+    ('heap_need_no_margin', 'hv_win_pmu.c', 'if (tables * PMU_PAGE + PMU_HEAP_MARGIN + frame_bytes > heapblock_total_remaining()) {', 'if (tables * PMU_PAGE + frame_bytes > heapblock_total_remaining()) {'),
     ('dma_keep_x', 'hv_win_pmu.c',
      '            if (st == HV_XT_CODE) {\n                hv_xt_set(page, HV_XT_SCANNING, flips);',
      '            if (st == HV_XT_CODE) {\n                hv_xt_set(page, HV_XT_CODE, flips);'),
