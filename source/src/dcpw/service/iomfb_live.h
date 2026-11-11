@@ -71,9 +71,15 @@ struct live {
 	uint64_t clock0_hz;         /* 810 MHz (D408 PROV 0, macOS) */
 	struct dcpw_dev *dev;
 
-	/* tx stacks: [0] = area 0x0 shared by CMD and nested CB commands, [1] = area 0x8000 (OOB) */
-	struct live_cmd tx[2][LIVE_TXDEPTH];
-	int txn[2];
+	/* AP command stacks: [0] CMD, [1] OOBCMD (top level, from offset 0 of tx area 0x0 / 0x8000),
+	 * [2] nested on CB, [3] nested on OOBCB. A nested command is placed at the end of the innermost
+	 * record on its context's channel stack (callback records and nested commands share it:
+	 * REF/iomfb.c:785,803,1473-1487), in the tx area of that context (0x0 / 0x8000). */
+	struct live_cmd tx[4][LIVE_TXDEPTH];
+	int txn[4];
+	uint32_t chend[2][2 * LIVE_TXDEPTH];   /* channel stack ends: [0] CB, [1] OOBCB */
+	int chn[2];
+	uint64_t alloc_total;
 	/* deferred callbacks (LIFO) */
 	struct live_cb cbs[LIVE_TXDEPTH];
 	int ncb;

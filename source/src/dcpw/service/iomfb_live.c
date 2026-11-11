@@ -57,16 +57,42 @@ void live_init(struct live *l, const struct live_io *io, enum live_stage stage, 
 }
 
 /* ------------------------------------------------------------------ AP commands */
-/* stack 0: tx area 0x0, contexts CMD (top level) and CB (nested in a CB callback); stack 1: 0x8000 OOB */
+static int chclass(unsigned ctx) { return ctx == IOMFB_CTX_CB ? 0 : ctx == IOMFB_CTX_OOBCB ? 1 : -1; }
+static void ch_push(struct live *l, int k, uint32_t end)
+{
+	if (k < 0)
+		return;
+	if (l->chn[k] >= 2 * LIVE_TXDEPTH) { fail(l, "live: channel stack overflow"); return; }
+	l->chend[k][l->chn[k]++] = end;
+}
+static void ch_pop(struct live *l, int k)
+{
+	if (k >= 0 && l->chn[k] > 0)
+		l->chn[k]--;
+}
+
 static int issue(struct live *l, int oob, const char tag[4], const void *in, uint32_t in_len, uint32_t out_len,
                  void (*done)(struct live *, struct live_cmd *, const uint8_t *), uint32_t cookie)
 {
-	int s = oob ? 1 : 0;
-	uint8_t *area = l->shmem + (oob ? 0x8000 : 0);
-	uint32_t off = l->txn[s] ? l->tx[s][l->txn[s] - 1].end : 0;
-	size_t used;
+	/* nested in a deferred callback: that callback's context (iomfb.c dcp_call_context) */
+	int nested = l->ncb > 0;
 	unsigned ctx;
+	int s, k;
+	uint32_t off;
+	size_t used;
 	struct live_cmd *c;
+	if (nested) {
+		ctx = l->cbs[l->ncb - 1].ctx == IOMFB_CTX_OOBCB || oob ? IOMFB_CTX_OOBCB : IOMFB_CTX_CB;
+		k = chclass(ctx);
+		s = 2 + k;
+		off = l->chn[k] ? l->chend[k][l->chn[k] - 1] : 0;
+	} else {
+		ctx = oob ? IOMFB_CTX_OOBCMD : IOMFB_CTX_CMD;
+		k = -1;
+		s = oob ? 1 : 0;
+		off = l->txn[s] ? l->tx[s][l->txn[s] - 1].end : 0;
+	}
+	uint8_t *area = l->shmem + iomfb_tx_offset(ctx);
 	if (l->state == LS_FAILED || l->txn[s] >= LIVE_TXDEPTH)
 		return -1;
 	used = iomfb_pkt_write(area, IOMFB_CHAN_SIZE, off, tag, in, in_len, out_len);
@@ -83,11 +109,7 @@ static int issue(struct live *l, int oob, const char tag[4], const void *in, uin
 	c->out_len = out_len;
 	c->done = done;
 	c->cookie = cookie;
-	/* nested in a deferred callback: the callback's context (iomfb.c dcp_call_context) */
-	if (oob)
-		ctx = l->ncb && l->cbs[l->ncb - 1].ctx == IOMFB_CTX_OOBCB ? IOMFB_CTX_OOBCB : IOMFB_CTX_OOBCMD;
-	else
-		ctx = l->ncb ? IOMFB_CTX_CB : IOMFB_CTX_CMD;
+	ch_push(l, k, c->end);
 	l->cmd_count++;
 	l->io.send(l->io.ctx, IOMFB_EP, iomfb_msg_rpc(ctx, (uint32_t)used, (uint16_t)off));
 	return 0;
@@ -95,15 +117,17 @@ static int issue(struct live *l, int oob, const char tag[4], const void *in, uin
 
 static void on_ack(struct live *l, unsigned ctx)
 {
-	int s = (ctx == IOMFB_CTX_OOBCMD || ctx == IOMFB_CTX_OOBCB) ? 1 : 0;
+	int s = ctx == IOMFB_CTX_CMD ? 0 : ctx == IOMFB_CTX_OOBCMD ? 1 : ctx == IOMFB_CTX_CB ? 2 : ctx == IOMFB_CTX_OOBCB ? 3 : -1;
 	struct live_cmd c;
-	if (!l->txn[s]) {
+	if (s < 0 || !l->txn[s]) {
 		fail(l, "live: ack with no command outstanding");
 		return;
 	}
 	c = l->tx[s][--l->txn[s]];
+	if (s >= 2)
+		ch_pop(l, s - 2);
 	if (c.done)
-		c.done(l, &c, l->shmem + (s ? 0x8000 : 0) + c.off + IOMFB_HDR_SIZE + c.in_len);
+		c.done(l, &c, l->shmem + iomfb_tx_offset(ctx) + c.off + IOMFB_HDR_SIZE + c.in_len);
 }
 
 /* ------------------------------------------------------------------ deferred callbacks */
@@ -120,6 +144,7 @@ static void cb_finish(struct live *l, int ok_byte)
 	cb = l->cbs[--l->ncb];
 	if (cb.out_len >= 1 && ok_byte >= 0)
 		cb_out(l, &cb)[0] = (uint8_t)ok_byte;
+	ch_pop(l, chclass(cb.ctx));
 	l->io.send(l->io.ctx, IOMFB_EP, iomfb_msg_ack(cb.ctx));
 }
 
@@ -173,8 +198,10 @@ static void boot_step(struct live *l, uint32_t step)
 	case B_A000: p32(z, 1); issue(l, 0, "A000", z, 4, 4, boot_done_cmd, step); break;
 	case B_A385: issue(l, 0, "A385", 0, 0, 4, boot_done_cmd, step); break;
 	case B_A526: issue(l, 0, "A526", 0, 0, 4, boot_done_cmd, step); break;
-	default: cb_finish(l, 1); break;                      /* boot_done: out u8 1 */
+	default: cb_finish(l, 1); return;                     /* boot_done: out u8 1 */
 	}
+	if (l->state != LS_FAILED && !l->txn[2] && !l->txn[3])
+		fail(l, "live: boot chain command not issued");
 }
 
 /* ------------------------------------------------------------------ immediate callbacks */
@@ -366,7 +393,9 @@ static int handle_special(struct live *l, const struct iomfb_pkt *p, struct live
 		uint64_t size = g64(in + 4);
 		uint32_t align = g32(in + 12), id;
 		uint64_t len = (size + 0x3fff) & ~0x3fffull;
-		if (!size || size > (1ull << 30) || align > 0x4000 || (align && (align & (align - 1))))
+		/* caps (review item 6): 64 MiB per buffer, 128 MiB in all (macOS asks for about 0.6 MB) */
+		if (!size || size > (64ull << 20) || align > 0x4000 || (align && (align & (align - 1))) ||
+		    l->alloc_total + len > (128ull << 20))
 			return 0;                     /* zeros, acked */
 		for (id = 1; id < LIVE_MAX_MEMDESC && l->md[id].used; id++)
 			;                             /* ids from 1, as macOS (CONV seq 524) */
@@ -378,6 +407,7 @@ static int handle_special(struct live *l, const struct iomfb_pkt *p, struct live
 			if (!dva)
 				return 0;
 			l->md[id].pa = pa; l->md[id].len = len; l->md[id].dva = dva; l->md[id].used = 1;
+			l->alloc_total += len;
 			if (!in[16]) p64(out, dva);
 			if (!in[17]) p64(out + 8, len);
 			p32(out + 16, id);
@@ -422,11 +452,19 @@ static int handle_defer(struct live *l, const struct iomfb_pkt *p, struct live_c
 	if (l->ncb >= LIVE_TXDEPTH)
 		return -1;
 	l->cbs[l->ncb++] = *cb;
-	if (teq(t, "D000")) return issue(l, 0, "A035", 0, 0, 4, d000_done, 0);
-	if (teq(t, "D100")) return issue(l, 0, "A391", 0, 0, 4, d100_done, 0);
-	if (teq(t, "D206")) return issue(l, 0, "A136", 0, 0, 4, d20x_done, 0);
-	if (teq(t, "D207")) return issue(l, 0, "A137", 0, 0, 4, d20x_done, 0);
-	if (teq(t, "D120")) { boot_step(l, B_A390); return 0; }
+	{
+		int r = -2;
+		if (teq(t, "D000")) r = issue(l, 0, "A035", 0, 0, 4, d000_done, 0);
+		else if (teq(t, "D100")) r = issue(l, 0, "A391", 0, 0, 4, d100_done, 0);
+		else if (teq(t, "D206")) r = issue(l, 0, "A136", 0, 0, 4, d20x_done, 0);
+		else if (teq(t, "D207")) r = issue(l, 0, "A137", 0, 0, 4, d20x_done, 0);
+		else if (teq(t, "D120")) { boot_step(l, B_A390); r = l->state == LS_FAILED ? -1 : 0; }
+		if (r != -2) {
+			if (r)
+				l->ncb--;
+			return r;
+		}
+	}
 	if (teq(t, "D586")) {                 /* register the default fb surface (tpl.c:640-672 fw27 branch) */
 		uint8_t s[0x230];
 		uint32_t w = g32(p->in), h = g32(p->in + 4);
@@ -440,7 +478,11 @@ static int handle_defer(struct live *l, const struct iomfb_pkt *p, struct live_c
 		p32(s + 0x35, 5);                 /* surface_id (Linux 5; macOS 3) */
 		p64(s + 0x51, 1);                 /* has_comp */
 		p64(s + 0x149, 1);                /* has_planes */
-		return issue(l, 0, "A534", s, 0x230, 4, d586_done, 0);
+		if (issue(l, 0, "A534", s, 0x230, 4, d586_done, 0)) {
+			l->ncb--;
+			return -1;
+		}
+		return 0;
 	}
 	l->ncb--;
 	return -1;
@@ -456,12 +498,14 @@ static void on_callback(struct live *l, const struct iomfb_msg *m)
 		return;
 	}
 	l->cb_count++;
+	ch_push(l, chclass(m->ctx), (uint32_t)((m->offset + m->length + IOMFB_PKT_ALIGN - 1) & ~(IOMFB_PKT_ALIGN - 1)));
 	for (uint32_t i = 0; i < p.out_len; i++)
 		p.out[i] = 0;                     /* iomfb.c:1480 */
 	e = p.tag[0] == 'D' ? cb_lookup(p.tag) : 0;
 	if (!e) {                             /* unknown: zeroed out + ack, as Linux (iomfb.c:1461-1480); counted */
 		l->cb_unknown++;
 		cpy(l->last_unknown, p.tag, 5);
+		ch_pop(l, chclass(m->ctx));
 		l->io.send(l->io.ctx, IOMFB_EP, iomfb_msg_ack(m->ctx));
 		return;
 	}
@@ -469,6 +513,7 @@ static void on_callback(struct live *l, const struct iomfb_msg *m)
 		/* Linux marks the DCP crashed (iomfb.c:1428-1440); we answer zeros so the DCP is not wedged */
 		l->cb_unknown++;
 		cpy(l->last_unknown, p.tag, 5);
+		ch_pop(l, chclass(m->ctx));
 		l->io.send(l->io.ctx, IOMFB_EP, iomfb_msg_ack(m->ctx));
 		return;
 	}
@@ -487,6 +532,7 @@ static void on_callback(struct live *l, const struct iomfb_msg *m)
 		return;
 	}
 	}
+	ch_pop(l, chclass(m->ctx));
 	l->io.send(l->io.ctx, IOMFB_EP, iomfb_msg_ack(m->ctx));
 }
 
@@ -521,7 +567,7 @@ void live_rx(struct live *l, uint8_t ep, uint64_t w)
 int live_wait_idle(struct live *l, uint32_t polls)
 {
 	for (uint32_t i = 0; i < polls && l->state != LS_FAILED; i++) {
-		if (!l->txn[0] && !l->txn[1] && !l->ncb)
+		if (!l->txn[0] && !l->txn[1] && !l->txn[2] && !l->txn[3] && !l->ncb)
 			return 0;
 		l->io.pump(l->io.ctx);
 	}
