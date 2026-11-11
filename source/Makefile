@@ -207,6 +207,12 @@ OBJECTS := \
 	smcp/core/smcp_core.o \
 	smcp/core/smcp_power.o \
 	hidm/service/hidm_service.o \
+	hv_win_m5wn.o \
+	m5wn/service/m5wn_service.o \
+	m5wn/service/m5wn_fake.o \
+	hv_win_n1.o \
+	m5wn/n1/n1_probe.o \
+	m5wn/n1/n1_core.o \
 	sart.o \
 	sep.o \
 	sio.o \

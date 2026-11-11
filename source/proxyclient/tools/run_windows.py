@@ -318,6 +318,8 @@ def window_frames(args):
         frames.append(("SMCP", 0xF38110000, 0x4000))
     if getattr(args, "cpu_classes", None) == "cppc":
         frames.append(("CPPC", args.cppc_page, CPPC_PAGE_SIZE))
+    if getattr(args, "m5wn_fake", False) or getattr(args, "m5wn_n1", None):
+        frames.append(("M5WN", 0xF38108000, 0x8000))
     return frames
 
 
@@ -802,6 +804,13 @@ def parse_args():
                         help="smcp: guest SYSTEM_OFF/RESET power the machine off / restart it through the SMC "
                              "(Linux macsmc-reboot writes: MBSE, NTAP, PMU 0xf801/0xf80f); implies --smc-power")
     parser.add_argument("--cpu-classes", choices=("uniform", "adt", "cppc"), default="uniform",
+    parser.add_argument("--m5wn-n1", metavar="FTAB",
+                        help="wireless/n1-20261111: bring the N1 up in the resident (stitched FTAB file, e.g. "
+                             "j716s-ftab.bin) before the memory plan and serve it as M5WN0001 (backend 2). "
+                             "Refused with any disk storage path; 1 vCPU, GIC route")
+    parser.add_argument("--m5wn-fake", action="store_true",
+                        help="wireless/n1-20261111: M5WN mediated network device with the fake gateway backend "
+                             "(192.168.77.1, DHCP .2; no Apple hardware). Needs the M5WN firmware DXE, 1 vCPU, GIC route")
                         help="sched1: efficiency classes Mu publishes. uniform (default): the guest ADT gets the boot "
                              "CPU's cluster-type on every CPU, so the MADT has one class and Windows does not park the "
                              "P cores; adt: the ADT's M/P types (classes 0/1, the smpN behaviour); cppc (cpuperf-A): "
@@ -965,6 +974,20 @@ def parse_args():
     if args.usb_host is None and args.mu_profile in USB_PROFILES:
         print(f"note: profile {args.mu_profile} without --usb-host: no /chosen/m5w,xhci, Mu runs without USB",
               file=sys.stderr)
+    if args.m5wn_n1 and args.m5wn_fake:
+        parser.error("--m5wn-n1 and --m5wn-fake are exclusive")
+    if args.m5wn_n1:
+        args.m5wn_fake = False
+        args.m5wn_backend = 2
+        if args.route != "gic" or args.raw_guest or args.cpus != 1:
+            parser.error("--m5wn-n1 needs a firmware guest, --route gic and -C 1")
+    else:
+        args.m5wn_backend = 1
+    if args.m5wn_fake:
+        if args.route != "gic" or args.raw_guest or args.cpus != 1:
+            parser.error("--m5wn-fake needs a firmware guest, --route gic and -C 1")
+        if args.pl011_gsiv == 69 or args.usb_gsiv == 69 or any(g == 69 for _, g in args.irq_pairs):
+            parser.error("--m5wn-fake owns GSIV 69")
     if args.builtin_keyboard:
         if args.route != "gic" or args.raw_guest:
             parser.error("--builtin-keyboard needs a firmware guest and --route gic")
@@ -1387,6 +1410,25 @@ def main():
         record(f"m5w,irq-map: {', '.join(f'{l}->{g}' for l, g in args.irq_pairs) or 'empty (no device interrupts)'}")
 
     # --- 4. memory plan, stage 2, load -------------------------------------------------------------------
+    if args.m5wn_n1:
+        # wireless/n1-20261111: N1 bring-up before the plan, so its DMA pool (top_of_memory_alloc) is
+        # outside guest RAM. The resident refuses if any disk storage path was used this session.
+        fw = pathlib.Path(args.m5wn_n1).read_bytes()
+        if len(fw) < 0x30 or fw[0x20:0x28] != b"rkosftab" or not int.from_bytes(fw[0x10:0x14], "little"):
+            raise SystemExit("--m5wn-n1: not a stitched FTAB (rkosftab magic, ticket offset at 0x10)")
+        fw_addr = u.malloc(len(fw))
+        iface.writemem(fw_addr, fw)
+        old_timeout = iface.dev.timeout
+        iface.dev.timeout = 120
+        try:
+            rc = p.hv_win_n1_start(fw_addr, len(fw), 5, 0)
+        finally:
+            iface.dev.timeout = old_timeout
+        record(f"N1 start: rc {rc}, stage {p.hv_win_n1_stat(100)}, err {p.hv_win_n1_stat(101):#x}, "
+               f"pool {p.hv_win_n1_stat(102):#x}+{p.hv_win_n1_stat(103):#x}")
+        if rc != 0:
+            p.hv_win_n1_park()
+            raise SystemExit(f"N1 bring-up failed ({rc}); port parked; not starting Windows")
     # re-read boot_args: anything m1n1 took with top_of_memory_alloc() during hv_init shrank mem_size
     ba = iface.readstruct(u.ba_addr, {2: BootArgs_r2, 3: BootArgs_r3}.get(u.ba_rev, BootArgs_r1))
     shadow = None
@@ -1500,6 +1542,24 @@ def main():
         if args.smc_power:
             hv.add_tracer(irange(0xF38110000, 0x4000), "WIN-SMCP", TraceMode.RESERVED)
             record(f"SMCP configured (flags {smcp_flags:#x}, rc {rc})")
+    if args.m5wn_fake or args.m5wn_n1:
+        # wireless/n1-20261111: register the final layout (same policy as the S1 storage contract).
+        import m5wn_contract
+        wire, receipt = m5wn_contract.build_registration(
+            plan, resident_base=u.base, heap_top=u.heap_top, adt_size=ba.devtree_size, epoch=time.time_ns(),
+            frames=window_frames(args), shadow=shadow,
+            used_gsivs=[g for _, g in args.irq_pairs] + [args.pl011_gsiv, args.usb_gsiv], backend=args.m5wn_backend)
+        (run_dir / "m5wn-contract.json").write_text(__import__("json").dumps(receipt, indent=2) + "\n")
+        rc = p.hv_win_m5wn_configure(wire)
+        if rc != 0:
+            print(f"WARNING: M5WN configure refused ({rc}); continuing without M5WN0001", file=sys.stderr)
+            record(f"M5WN configure refused ({rc}); no m5w,m5wn handoff")
+            args.m5wn_fake = False
+            args.m5wn_n1 = None
+        else:
+            hv.add_tracer(irange(0xF38108000, 0x8000), "WIN-M5WN", TraceMode.RESERVED)
+            record(f"M5WN configured (backend {args.m5wn_backend}), contract {receipt['wire_sha256'][:16]}, "
+                   f"stat0 {p.hv_win_m5wn_stat(0):#x}")
 
     text = format_plan(plan)
     for name, base, size in window_frames(args):
@@ -1564,6 +1624,9 @@ def main():
     hv.adt["chosen"]._properties.pop("m5w,smcp", None)
     if args.smc_power:
         put("m5w,smcp", struct.pack("<QQII", 0xF38110000, 0x1000, 72, 1 if args.smc_power_actions else 0))
+    hv.adt["chosen"]._properties.pop("m5w,m5wn", None)
+    if args.m5wn_fake or args.m5wn_n1:
+        put("m5w,m5wn", struct.pack("<QQQQI", 0xF38108000, 0x1000, 0xF3810C000, 0x1000, 69))
     if args.builtin_keyboard:
         put("m5w,hidm", struct.pack("<QQQQI", 0xF38100000, 0x1000, 0xF38104000, 0x1000, 68))
     put("m5w,memory", memory_prop)

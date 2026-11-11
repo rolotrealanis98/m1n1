@@ -803,3 +803,141 @@ int pcie_t6050_n1_train_ans(unsigned int flags)
     printf("pcie-t6050: ANS stopped again for Linux\n");
     return ret;
 }
+
+/* ---- wireless/n1-20261111: services for the resident N1 core (hv_win_n1.c) ---------------------
+ * Address export (ADT only, no MMIO), the post-ROM link cycle and RID2SID routing. The cycle
+ * re-runs this file's own port stages B-F; the parts before them (PME_Turn_Off to L2, PERST#, port
+ * disable) follow LINUX-MAP.md 2.3 phase 1 / P0033 port_disable and P0034 reset_root_port as a
+ * behaviour description. Every write is listed in wireless/n1-20261111/WRITES.md. */
+#include "m5wn/n1/n1_hal.h"
+
+int pcie_t6050_n1_addrs(struct n1_addrs *a)
+{
+    int chosen;
+    u32 v;
+
+    memset(a, 0, sizeof(*a));
+    pr.p = &n1_port;
+    TRY(find_regs());
+    TRY(find_port_regs(&pr));
+    TRY(storage_find());
+    a->ecam = r.ecam;
+    a->rc = r.rc;
+    a->phy = r.phy;
+    a->phy_ctl = r.phy_ctl;
+    for (int p = 0; p < T6050_GP_PORTS; p++)
+        a->port[p] = r.port[p];
+    a->lane = pr.lane;
+    a->i2axi = pr.i2axi;
+    a->perst = pr.perst;
+    a->gpio_base = pr.perst - 4 * 80; /* checked by the probe: pin 80 only */
+    a->perst_pin = 80;
+    a->dart = pr.dart;
+    a->reset_key = pr.reset_key;
+    a->reset_template = pr.reset_template;
+    for (int i = 0; i < 7; i++)
+        a->storage[i] = storage_addr[i];
+    chosen = adt_path_offset(adt, "/chosen");
+    if (chosen < 0)
+        FAIL("no /chosen\n");
+    if (ADT_GETPROP(adt, chosen, "board-id", &v) >= 0)
+        a->board_id = v;
+    if (ADT_GETPROP(adt, chosen, "chip-id", &v) >= 0)
+        a->chip_id = v;
+    ADT_GETPROP_ARRAY(adt, chosen, "mac-address-wifi0", a->mac);
+    ADT_GETPROP_ARRAY(adt, chosen, "mac-address-bluetooth0", a->bdaddr);
+    return 0;
+}
+
+/* RID2SID slot `sid` = VALID | sid << 16 | rid (slot index = SID, LINUX-MAP 1.5) */
+int pcie_t6050_n1_route(u32 rid, u32 sid)
+{
+    if (!pr.ctl || sid >= 64 || rid > 0xffff)
+        return -1;
+    u32 want = PORT_RID2SID_EN | (sid << 16) | rid;
+    write32(pr.ctl + PORT_RID2SID + 4 * sid, want);
+    return read32(pr.ctl + PORT_RID2SID + 4 * sid) == want ? 0 : -1;
+}
+
+/* First half of the cycle, and the whole of a park (shutdown/retire, as 0085's shutdown hook):
+ * bridge decoding off, PME_Turn_Off to L2, PERST# asserted, port disabled. */
+static int n1_down(void)
+{
+    u64 p2 = pr.ctl;
+    if (!p2 || !(read32(p2 + PORT_LINKSTS) & BIT(0)))
+        FAIL("n1 down: no live link\n");
+    write32(pr.rp + PCI_COMMAND, read32(pr.rp + PCI_COMMAND) & 0xffff0000); /* bridge decoding off */
+    TRY(rmw("APPCLK bit 8", p2 + PORT_APPCLK, 0, BIT(8)));
+    write32(p2 + 0x088, 0x11);                                              /* PME_Turn_Off */
+    TRY(poll_clear("PME_Turn_Off done", p2 + 0x088, BIT(0), 500));
+    TRY(poll_set("link in L2", p2 + PORT_LINKSTS, BIT(6), 500));
+    u32 old = read32(pr.perst);                                             /* PERST# asserted */
+    if (old & GPIO_PERST_LOCK)
+        FAIL("PERST# pad locked\n");
+    write32(pr.perst, (old & ~GPIO_PERST_MASK) | GPIO_PERST_LOW);
+    TRY(rmw("lane bit 31 clear", pr.lane, BIT(31), 0));
+    /* port disable */
+    if (!(read32(p2 + PORT_STATUS) & BIT(2)))
+        TRY(poll_set("0x820 bit 2", p2 + 0x820, BIT(2), 10));
+    {
+        u64 t = timeout_calculate(10000);
+        u32 st;
+        while (((st = read32(p2 + 0x820)) & 0x1ff) && (st & 0xff0000)) {
+            if (timeout_expired(t))
+                FAIL("n1 cycle: 0x820 = 0x%x not idle\n", st);
+            udelay(1);
+        }
+    }
+    TRY(rmw("0x13c bit 8", p2 + 0x13c, 0, BIT(8)));
+    TRY(wait32("LTSSM out of L1", pr.rp + 0x728, 0x3f, 0x14, false, 5));
+    TRY(poll_set("clk/rst bit 0", p2 + PORT_CLKRST, BIT(0), 10));
+    TRY(rmw("PERST bit 24", p2 + PORT_INT_RESET, 0, BIT(24)));
+    TRY(poll_set("clk/rst bit 16", p2 + PORT_CLKRST, BIT(16), 2));
+    TRY(rmw("PERST bit 16", p2 + PORT_INT_RESET, 0, BIT(16)));
+    udelay(1);
+    TRY(rmw("PERST off", p2 + PORT_INT_RESET, BIT(0), 0));
+    udelay(1);
+    TRY(rmw("PERST bit 24 clear", p2 + PORT_INT_RESET, BIT(24), 0));
+    TRY(rmw("0x13c bit 8 clear", p2 + 0x13c, BIT(8), 0));
+    TRY(rmw("lane bit 10 clear", pr.lane, BIT(10), 0));
+    TRY(rmw("lane bit 9 clear", pr.lane, BIT(9), 0));
+    TRY(rmw("lane bit 4", pr.lane, 0, BIT(4)));
+    TRY(rmw("lane clk0 off", pr.lane, BIT(0), 0));
+    TRY(rmw("lane clk1 off", pr.lane, BIT(1), 0));
+    write32(p2 + 0x100, 0xffffffff);
+    TRY(rmw("APPCLK off", p2 + PORT_APPCLK, BIT(0), 0));
+    TRY(poll_clear("port not ready", p2 + PORT_STATUS, BIT(0), 250));
+    write32(p2 + PORT_LTSSMCTL, read32(p2 + PORT_LTSSMCTL) & ~BIT(0)); /* LTSSM off, as port_park */
+    return 0;
+}
+
+int pcie_t6050_n1_park(void)
+{
+    if (!pr.ctl || !(read32(pr.ctl + PORT_LINKSTS) & BIT(0)))
+        return 0; /* nothing live: leave it alone (0086: never touch an N1 that never booted) */
+    TRY(n1_down());
+    printf("pcie-t6050: n1 port parked (PERST# asserted, port off)\n");
+    return 0;
+}
+
+/* Post-ROM link cycle: n1_down(), then this file's B-F again. */
+int pcie_t6050_n1_cycle(void)
+{
+    u64 p2 = pr.ctl;
+    TRY(n1_down());
+    /* enable (B, RID2SID and MSI map cleared, C, C2), configure (D), train (E, E2, E3), buses (F) */
+    TRY(stage_b(&pr));
+    for (int i = 0; i < 64; i++)
+        write32(p2 + PORT_RID2SID + 4 * i, 0);
+    for (int i = 0; i < 256; i++)
+        write32(p2 + 0x3800 + 4 * i, 0);
+    TRY(stage_c(&pr));
+    TRY(stage_c2(&pr, false));
+    TRY(stage_d(&pr));
+    TRY(stage_e(&pr));
+    TRY(stage_e2(&pr));
+    TRY(stage_e3(&pr, 500));
+    TRY(stage_f(&pr, false));
+    printf("pcie-t6050: n1 link cycled\n");
+    return 0;
+}
