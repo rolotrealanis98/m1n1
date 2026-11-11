@@ -133,6 +133,68 @@ int main(void)
     CHECK(rd(n * CPPC_SLOT + CPPC_DESIRED, 2, 0) == 0);
     CHECK(rd(n * CPPC_SLOT + CPPC_REFERENCE, 3, 5) == 0);
 
+    /* n7cpu Stage C: scaled DELIVERED counter (struct cppc_dl) */
+    {
+        struct cppc_dl d;
+        cppc_dl_init(&d, 1000);
+        CHECK(cppc_dl_value(&d, 1000) == 1000 && cppc_dl_value(&d, 5000) == 5000); /* unscaled = REFERENCE */
+        cppc_dl_rebase(&d, 2000, 1, 2);                                             /* half speed from 2000 */
+        CHECK(cppc_dl_value(&d, 2000) == 2000);
+        CHECK(cppc_dl_value(&d, 2001) == 2000 && cppc_dl_value(&d, 2002) == 2001);
+        CHECK(cppc_dl_value(&d, 1500) == 2000); /* a read before the base clamps, never goes back */
+        cppc_dl_rebase(&d, 2003, 1, 2);         /* remainder carried: 3 ticks at 1/2 = 1.5 */
+        CHECK(cppc_dl_value(&d, 2003) == 2001 && cppc_dl_value(&d, 2004) == 2002);
+        cppc_dl_rebase(&d, 2004, 3, 2); /* 1.5x */
+        CHECK(cppc_dl_value(&d, 2004) == 2002 && cppc_dl_value(&d, 2006) == 2005);
+        cppc_dl_rebase(&d, 2006, 0, 0); /* back to unscaled: 1:1 from the current value, no jump */
+        CHECK(cppc_dl_value(&d, 2006) == 2005 && cppc_dl_value(&d, 2010) == 2009);
+
+        /* exactness: rebasing every tick gives the same value as one long interval (no drift) */
+        struct cppc_dl a, b;
+        cppc_dl_init(&a, 0);
+        cppc_dl_init(&b, 0);
+        cppc_dl_rebase(&a, 0, 796, 957);
+        cppc_dl_rebase(&b, 0, 796, 957);
+        u64 prev = 0, last = 0;
+        bool mono = true;
+        for (u64 t = 1; t <= 1000000; t += 997) {
+            cppc_dl_rebase(&a, t, 796, 957);
+            u64 v = cppc_dl_value(&a, t);
+            mono &= v >= prev;
+            prev = v;
+            last = t;
+        }
+        CHECK(mono);
+        CHECK(cppc_dl_value(&a, last + 5) == cppc_dl_value(&b, last + 5));
+        CHECK(cppc_dl_value(&b, last + 5) == (last + 5) * 796 / 957);
+
+        /* monotonic across rate changes in both directions, 1 GHz ticks, an hour without a rebase */
+        cppc_dl_init(&a, 0);
+        cppc_dl_rebase(&a, 0, 1024, 957);
+        u64 hour = 3600ULL * 1000000000ULL;
+        u64 v1 = cppc_dl_value(&a, hour);
+        CHECK(v1 == hour / 957 * 1024 + (hour % 957) * 1024 / 957);
+        cppc_dl_rebase(&a, hour, 67, 957);
+        CHECK(cppc_dl_value(&a, hour) == v1 && cppc_dl_value(&a, hour + 957) == v1 + 67);
+    }
+    {
+        /* cppc_access2: REFERENCE words = now, DELIVERED words = the delivered argument */
+        u64 v = 0;
+        CHECK(cppc_access2(&s, 3 * CPPC_SLOT + CPPC_REFERENCE, &v, false, 3, 0x1122334455667788ULL, 7) &&
+              v == 0x1122334455667788ULL);
+        CHECK(cppc_access2(&s, 3 * CPPC_SLOT + CPPC_DELIVERED, &v, false, 3, 5, 0x99aabbccddeeff00ULL) &&
+              v == 0x99aabbccddeeff00ULL);
+        CHECK(cppc_access2(&s, 3 * CPPC_SLOT + CPPC_DELIVERED + 4, &v, false, 2, 5, 0x99aabbccddeeff00ULL) &&
+              v == 0x99aabbccULL);
+        CHECK(cppc_access2(&s, 3 * CPPC_SLOT + CPPC_DELIVERED, &v, false, 2, 5, 0x99aabbccddeeff00ULL) &&
+              v == 0xddeeff00ULL);
+        CHECK(cppc_access2(&s, 3 * CPPC_SLOT + CPPC_REFERENCE + 4, &v, false, 2, 0x1122334455667788ULL, 9) &&
+              v == 0x11223344ULL);
+        u64 w = 0x1234; /* writes to the counters are dropped */
+        CHECK(cppc_access2(&s, 3 * CPPC_SLOT + CPPC_DELIVERED, &w, true, 3, 5, 6));
+        CHECK(cppc_access2(&s, 3 * CPPC_SLOT + CPPC_DELIVERED, &v, false, 3, 5, 6) && v == 6);
+    }
+
     printf("%s: win-cppc %d checks, %d failures\n", fails ? "FAIL" : "PASS", checks, fails);
     return fails != 0;
 }

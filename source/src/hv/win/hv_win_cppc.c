@@ -67,10 +67,49 @@ static u32 gov_prev_expected[DVFS_MAX_CLUSTERS];
 static u64 gov_res_ns[DVFS_MAX_CLUSTERS][DVFS_PSTATES];
 static u64 gov_res_last, gov_t0;
 
+/*
+ * n7cpu Stage C: scaled Delivered counters (hv_win_cppc_core.h struct cppc_dl), one per cluster. On only
+ * with the CPPC page and cpuperf-B, when the launcher appended the per-cluster Reference Performance
+ * (the _CPC Nominal it published) to the DVFS config. Rate = perf(STATUS current p-state) / reference,
+ * re-read and rebased at every boot-CPU tick.
+ */
+#define DL_TAIL_SIZE (DVFS_MAX_CLUSTERS * sizeof(u32))
+static bool dl_on;
+static u32 dl_ref[DVFS_MAX_CLUSTERS];
+static struct cppc_dl dl[DVFS_MAX_CLUSTERS];
+static u32 dl_cur[DVFS_MAX_CLUSTERS];
+static u64 dl_start_t[DVFS_MAX_CLUSTERS], dl_start_d[DVFS_MAX_CLUSTERS];
+static u64 dl_status_odd[DVFS_MAX_CLUSTERS];
+
 static bool cppc_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width)
 {
     UNUSED(ctx);
-    return cppc_access(&cppc, addr - cppc.base, val, write, width, mrs(CNTPCT_EL0));
+    u64 now = mrs(CNTPCT_EL0), off = addr - cppc.base, delivered = now;
+    u64 cpu = off / CPPC_SLOT;
+    if (dl_on && cpu < dvfs.ncpus && dvfs.cluster_of[cpu] < dvfs.nclusters)
+        delivered = cppc_dl_value(&dl[dvfs.cluster_of[cpu]], now);
+    return cppc_access2(&cppc, off, val, write, width, now, delivered);
+}
+
+/* The cluster's current p-state for the Delivered rate: STATUS bits 9:5 when that is an operating point of
+ * the table, else the state EL2 last wrote or inherited. */
+static u32 dl_pstate(u32 i)
+{
+    struct dvfs_cluster *c = &dvfs.c[i];
+    u32 cur = DVFS_STATUS_CUR(read32(c->cfg.base + DVFS_STATUS)); /* read only, as Linux get() */
+    if (cur < DVFS_PSTATES && c->cfg.perf[cur])
+        return cur;
+    dl_status_odd[i]++;
+    return c->expected;
+}
+
+static void dl_update(u64 t)
+{
+    for (u32 i = 0; i < dvfs.nclusters; i++) {
+        u32 p = dl_pstate(i);
+        dl_cur[i] = p;
+        cppc_dl_rebase(&dl[i], t, dvfs.c[i].cfg.perf[p], dl_ref[i]);
+    }
 }
 
 int hv_win_cppc_configure(u64 base, u64 ncpus)
@@ -112,13 +151,29 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
         printf("HV/win cpuperf-B: chip 0x%x is not T6050, refused\n", chip_id);
         return -1;
     }
-    if ((len != sizeof(dvfs_cfg_copy) && len != DVFS_CFG_V1_SIZE) || !cfg_addr) {
-        printf("HV/win cpuperf-B: config length %ld is neither %ld (v2) nor %d (v1)\n", len,
-               (long)sizeof(dvfs_cfg_copy), DVFS_CFG_V1_SIZE);
+    /* n7cpu: v2 + a 16-byte tail = u32 Reference Performance per cluster for the scaled Delivered counter */
+    bool tail = len == sizeof(dvfs_cfg_copy) + DL_TAIL_SIZE;
+    if ((len != sizeof(dvfs_cfg_copy) && len != DVFS_CFG_V1_SIZE && !tail) || !cfg_addr) {
+        printf("HV/win cpuperf-B: config length %ld is neither %ld (v2), %ld (v2 + reference perf) nor %d (v1)\n",
+               len, (long)sizeof(dvfs_cfg_copy), (long)(sizeof(dvfs_cfg_copy) + DL_TAIL_SIZE), DVFS_CFG_V1_SIZE);
         return -1;
     }
     memset(&dvfs_cfg_copy, 0, sizeof(dvfs_cfg_copy));
-    memcpy(&dvfs_cfg_copy, (void *)cfg_addr, len);
+    memset(dl_ref, 0, sizeof(dl_ref));
+    memcpy(&dvfs_cfg_copy, (void *)cfg_addr, tail ? sizeof(dvfs_cfg_copy) : len);
+    if (tail) {
+        memcpy(dl_ref, (u8 *)cfg_addr + sizeof(dvfs_cfg_copy), DL_TAIL_SIZE);
+        if (dvfs_cfg_copy.version != DVFS_CFG_VERSION || !cppc.configured) {
+            printf("HV/win cpuperf-C: reference perf needs a v%d config and the CPPC page\n", DVFS_CFG_VERSION);
+            return -1;
+        }
+        for (u32 i = 0; i < DVFS_MAX_CLUSTERS; i++) {
+            if (dl_ref[i] > 0xffff || (i >= dvfs_cfg_copy.nclusters && dl_ref[i])) {
+                printf("HV/win cpuperf-C: reference perf %d for cluster %d refused\n", dl_ref[i], i);
+                return -1;
+            }
+        }
+    }
     if (len == DVFS_CFG_V1_SIZE && dvfs_cfg_copy.version != 1) {
         printf("HV/win cpuperf-B: a %d-byte config must be version 1\n", DVFS_CFG_V1_SIZE);
         return -1;
@@ -155,6 +210,21 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
     u32 nfixed = 0;
     for (u32 i = 0; i < dvfs.nclusters; i++)
         nfixed += dvfs.c[i].cfg.pmin == dvfs.c[i].cfg.pmax;
+    bool scaled = false;
+    for (u32 i = 0; i < dvfs.nclusters; i++)
+        scaled |= dl_ref[i] != 0;
+    if (scaled) {
+        u64 t = mrs(CNTPCT_EL0);
+        for (u32 i = 0; i < dvfs.nclusters; i++) {
+            cppc_dl_init(&dl[i], t);
+            dl_start_t[i] = dl_start_d[i] = t;
+        }
+        dl_update(t);
+        dl_on = true; /* the hook uses dl[] only from here on */
+        for (u32 i = 0; i < dvfs.nclusters; i++)
+            printf("HV/win cpuperf-C: cluster %d delivered counter scaled: p%d perf %d / reference %d\n", i,
+                   dl_cur[i], dvfs.c[i].cfg.perf[dl_cur[i]], dl_ref[i]);
+    }
     printf("HV/win cpuperf-B: ON, rate limit %ld ns per cluster, timeout %ld ns, %d of %d cluster(s) fixed, "
            "CPPC page %s\n",
            dvfs.min_interval_ns, (long)DVFS_TIMEOUT_NS, nfixed, dvfs.nclusters, cppc.configured ? "yes" : "no");
@@ -171,6 +241,56 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
                    dvfs.c[i].cfg.pmin, dvfs.gov.mid[i], dvfs.c[i].cfg.pmax, dvfs.gov.safe_ceiling[i]);
     }
     return 0;
+}
+
+/*
+ * n7cpu: one compact line every 30 s while cpuperf-B is on, so the run log carries the CPPC/DVFS state without a
+ * host dump request: per cluster the p-state EL2 expects, STATUS current, CMD writes, and (Stage C) the average
+ * delivered/reference since the last line; per vCPU the last Desired (and total Desired writes).
+ */
+#define CPPC_PERIODIC_NS 30000000000UL
+static u64 periodic_last, periodic_t[DVFS_MAX_CLUSTERS], periodic_d[DVFS_MAX_CLUSTERS];
+
+static void cppc_periodic(u64 now)
+{
+    if (!periodic_last) {
+        periodic_last = now;
+        for (u32 i = 0; i < dvfs.nclusters && dl_on; i++) {
+            periodic_t[i] = mrs(CNTPCT_EL0);
+            periodic_d[i] = cppc_dl_value(&dl[i], periodic_t[i]);
+        }
+        return;
+    }
+    if (now - periodic_last < CPPC_PERIODIC_NS)
+        return;
+    periodic_last = now;
+    char buf[640];
+    int n = snprintf(buf, sizeof(buf), "HV/win cpuperf-P +%lds |", (long)((now - gov_t0) / 1000000000UL));
+    for (u32 i = 0; i < dvfs.nclusters && n < 560; i++) {
+        struct dvfs_cluster *c = &dvfs.c[i];
+        n += snprintf(buf + n, sizeof(buf) - n, " cl%d p%d st p%d w%ld f%d", i, c->expected, dl_on ? dl_cur[i] : 0,
+                      (long)c->writes, c->fail);
+        if (dl_on) {
+            u64 t = mrs(CNTPCT_EL0), d = cppc_dl_value(&dl[i], t);
+            u64 dt = t - periodic_t[i], dd = d - periodic_d[i];
+            n += snprintf(buf + n, sizeof(buf) - n, " dl %ld%%", dt ? (long)(dd * 100 / dt) : 0);
+            periodic_t[i] = t;
+            periodic_d[i] = d;
+        }
+        n += snprintf(buf + n, sizeof(buf) - n, " |");
+    }
+    u64 wsum = 0;
+    if (cppc.configured && n < 560) {
+        n += snprintf(buf + n, sizeof(buf) - n, " des");
+        for (u32 k = 0; k < cppc.ncpus && n < 620; k++) {
+            n += snprintf(buf + n, sizeof(buf) - n, " %d", cppc.slot[k].desired);
+            wsum += cppc.slot[k].desired_writes;
+        }
+    }
+    if (n >= (int)sizeof(buf))
+        n = sizeof(buf) - 1;
+    buf[n] = 0;
+    printf("%s (writes %ld)\n", buf, (long)wsum);
 }
 
 /* hv_tick() (boot CPU, big HV lock held): a no-op unless cpuperf-B is on. */
@@ -208,6 +328,9 @@ void hv_win_cppc_tick(void)
         dvfs_governor(&dvfs, idle_ns, online, hv_win_cpu_temp_mc(), now);
     }
     dvfs_service(&dvfs, &dvfs_hw, desired, seen, now);
+    if (dl_on)
+        dl_update(tk);
+    cppc_periodic(now);
 
     /* residency (by the state we last wrote / inherited) and a bounded change timeline */
     if (!gov_res_last) {
@@ -258,6 +381,14 @@ int hv_win_cppc_dump(void)
                i, st, DVFS_STATUS_CUR(st), st & 0x1f, c->expected, c->target, c->writes,
                c->writes ? c->min_written : 0, c->max_written, c->busy_ticks, c->rate_limited, c->fail,
                c->fail_cmd);
+        if (dl_on) {
+            u64 t = mrs(CNTPCT_EL0);
+            u64 dr = t - dl_start_t[i], dd = cppc_dl_value(&dl[i], t) - dl_start_d[i];
+            printf("HV/win cpuperf-C: cluster %d delivered/reference avg %ld.%02ld%% (p%d now, perf %d / ref %d), "
+                   "status not an OPP %ld\n",
+                   i, dr ? (long)(dd * 100 / dr) : 0, dr ? (long)((dd * 10000 / dr) % 100) : 0, dl_cur[i],
+                   c->cfg.perf[dl_cur[i]], dl_ref[i], dl_status_odd[i]);
+        }
         if (dvfs.gov.enabled) {
             char buf[256];
             int n = 0;
