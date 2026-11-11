@@ -6,6 +6,7 @@
 
 #define PMU_FRAME_SIZE 0x1000UL
 #define PMU_FRAME_WORDS (PMU_FRAME_SIZE / 4)
+/* hv_win_pmu_host_frame()'s per-frame view of the block state byte (host tests) */
 #define PMU_FRAME_EXECUTED 1U
 #define PMU_FRAME_SCANNED 2U
 #define PMU_FRAME_LISTED 0x80U /* first frame of a block only: block is on the open list */

@@ -23,7 +23,7 @@ M = [
     ('ignore_pc', 'hv_win_pmu.c', '        ctx->far != ctx->elr)\n        return false;\n    struct pmu_s1 s;',
      '        false)\n        return false;\n    struct pmu_s1 s;'),
     ('hint_is_proof', 'hv_win_pmu.c', 'if (hint || (ctx->esr', 'if (false || (ctx->esr'),
-    ('no_execution_mark', 'hv_win_pmu.c', 'fr[frame] |= PMU_FRAME_EXECUTED;', '(void)0;'),
+    ('no_execution_mark', 'hv_win_pmu.c', 'pmu_scan_frame(ctx, block, pa, frame, fr, true);', 'pmu_scan_frame(ctx, block, pa, frame, fr, false);'),
     # scan extent
     ('scan_two_frames', 'hv_win_pmu_rewrite.c',
      'for (u32 i = 0; i < 1024; i++) {\n        u32 old = words[i];\n        enum pmu_rw_kind kind = pmu_rw_classify(old);\n        if (kind == PMU_RW_NONE) {\n            counts[PMU_RW_SKIP_OTHER]',
@@ -53,9 +53,13 @@ M = [
      'if (false && pmu.nr_open)'),
     ('list_full_no_close', 'hv_win_pmu.c', '    if (pmu.nr_open >= PMU_MAX_OPEN)\n        pmu_close_open();',
      '    if (pmu.nr_open >= 2 * PMU_MAX_OPEN)\n        pmu_close_open();'),
-    ('listed_dedup_off', 'hv_win_pmu.c', '    if (fr[0] & PMU_FRAME_LISTED)\n        return;', '    (void)0;'),
+    ('listed_dedup_off', 'hv_win_pmu.c', '    if (*fr & PMU_BS_LISTED)\n        return;', '    (void)0;'),
     # device fills
-    ('dma_no_frame_reset', 'hv_win_pmu.c', 'fr[f] &= f ? 0 : PMU_FRAME_LISTED;', 'fr[f] &= 0xff;'),
+    ('dma_no_frame_reset', 'hv_win_pmu.c', '*fr &= ~PMU_BS_SCANNED(f);', '*fr &= 0xff;'),
+    ('state_bit_shared', 'hv_win_pmu.c', '#define PMU_BS_SCANNED(frame) (1U << (frame))', '#define PMU_BS_SCANNED(frame) (1U << ((frame) & 1))'),
+    ('state_per_32k', 'hv_win_pmu.c', 'return &pmu.ranges[i].frames[(ipa - pmu.ranges[i].base) / PMU_PAGE];', 'return &pmu.ranges[i].frames[(ipa - pmu.ranges[i].base) / (2 * PMU_PAGE)];'),
+    ('heap_need_frames', 'hv_win_pmu.c', 'u64 frame_bytes = pmu.mode16k ? 0 : size / PMU_PAGE;', 'u64 frame_bytes = pmu.mode16k ? 0 : size / PMU_FRAME_SIZE;'),
+    ('heap_need_no_margin', 'hv_win_pmu.c', 'if (tables * PMU_PAGE + PMU_HEAP_MARGIN + frame_bytes > heapblock_remaining()) {', 'if (tables * PMU_PAGE + frame_bytes > heapblock_remaining()) {'),
     ('dma_keep_x', 'hv_win_pmu.c',
      '            if (st == HV_XT_CODE) {\n                hv_xt_set(page, HV_XT_SCANNING, flips);',
      '            if (st == HV_XT_CODE) {\n                hv_xt_set(page, HV_XT_CODE, flips);'),
@@ -105,9 +109,16 @@ def build_and_run(d):
                          '-iquote', str(d), str(legacy / 'test_pmu_rewrite.c'), str(d / 'hv_win_pmu_rewrite.c'),
                          str(d / 'hv_win_pmu.c'), '-o', str(lg)],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if c1.returncode or c2.returncode:
-        return False, False, (c1.stdout + c2.stdout)[-400:].replace('\n', ' ')
+    c3 = subprocess.run(['clang', *CFLAGS, '-iquote', str(legacy / 'shim'), '-iquote', str(d), str(here / 'test_sizing.c'),
+                         str(d / 'hv_win_pmu.c'), str(d / 'hv_win_pmu_rewrite.c'), '-o', str(d / 'test_sizing')],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if c1.returncode or c2.returncode or c3.returncode:
+        return False, False, (c1.stdout + c2.stdout + c3.stdout)[-400:].replace('\n', ' ')
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
+    r0 = subprocess.run([str(d / 'test_sizing')], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    if r0.returncode:
+        lines = [l for l in r0.stdout.splitlines() if 'FAIL' in l or 'ERROR' in l] or r0.stdout.splitlines()[-1:]
+        return True, True, 'sizing: ' + (lines[0] if lines else '')[:160]
     r1 = subprocess.run([str(t4)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
                         timeout=900)
     if r1.returncode:

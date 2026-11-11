@@ -9,7 +9,11 @@ SOURCES := test_4k.c $(WIN)/hv_win_pmu.c $(WIN)/hv_win_pmu_rewrite.c
 $(OUT)/test_4k: $(SOURCES) $(WIN)/hv_win_pmu_4k.h $(WIN)/hv_win.h $(WIN)/hv_win_pmu_rewrite.h replay.h Makefile
 	mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(SOURCES) -o $@
-check: $(OUT)/test_4k
+$(OUT)/test_sizing: test_sizing.c $(WIN)/hv_win_pmu.c $(WIN)/hv_win_pmu_rewrite.c $(WIN)/hv_win.h Makefile
+	mkdir -p $(OUT)
+	$(CC) $(CFLAGS) test_sizing.c $(WIN)/hv_win_pmu.c $(WIN)/hv_win_pmu_rewrite.c -o $@
+check: $(OUT)/test_4k $(OUT)/test_sizing
+	$(OUT)/test_sizing
 	$(OUT)/test_4k
 mutants:
 	python3 mutants.py

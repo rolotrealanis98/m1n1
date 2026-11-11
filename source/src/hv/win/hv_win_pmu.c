@@ -19,10 +19,10 @@
  * Two scan granules (hv_win_pmu_set_mode(), launcher --pmu-granule; fixed before the first arm):
  *
  * 4 KiB (default, nightly-5). Windows uses 4 KiB pages, so the four frames of a block can belong to
- * unrelated owners (code next to a page table: bugcheck 0x1A/0x404, 2026-11-10/11). A byte per
- * 4 KiB frame records EXECUTED (the frame's instruction fetch faulted at stage 2 and a walk of the
- * guest's stage-1 tables confirmed that VA executable at the faulting EL and translated to this
- * frame) and SCANNED. Only the faulting frame is scanned, and only after that proof; a frame that
+ * unrelated owners (code next to a page table: bugcheck 0x1A/0x404, 2026-11-10/11). A bit per
+ * 4 KiB frame records SCANNED (n5b: one byte per 16 KiB block holds the four bits); a frame is scanned
+ * only right after its proof (its instruction fetch faulted at stage 2 and a walk of the guest's
+ * stage-1 tables confirmed that VA executable at the faulting EL and translated to this frame). Only the faulting frame is scanned, and only after that proof; a frame that
  * fails the proof is never read or written (the block still opens, so the guest always makes
  * progress). Frame state is valid only while the block is read-only (CODE, or SCANNING after a
  * re-protect): every transition to a writable state (write flip, pin, device refill of a PINNED
@@ -105,7 +105,7 @@ static struct {
     u32 nr_ranges;
     struct {
         u64 base, size;
-        u8 *frames; /* 4 KiB mode: one byte per 4 KiB frame (PMU_FRAME_*) */
+        u8 *frames; /* 4 KiB mode: one byte per 16 KiB block: PMU_BS_SCANNED(frame), PMU_BS_LISTED */
     } ranges[PMU_MAX_RANGES];
     u64 stats[HV_WIN_PMU_NR_STATS];
     u64 pinned[PMU_MAX_PINNED];
@@ -136,31 +136,35 @@ static bool overlaps(u64 a, u64 a_size, u64 b, u64 b_size)
     return a < b + b_size && b < a + a_size;
 }
 
-/* 4 KiB mode: the four frame bytes of the block holding ipa, or NULL outside the armed ranges */
+/*
+ * 4 KiB mode state: one byte per 16 KiB block (n5b: was one byte per 4 KiB frame; 41.4 GiB of guest RAM
+ * needed 10.6 MiB of it and the arm did not fit the heap on hardware). Bits 0..3: frame N scanned (a frame
+ * is only ever scanned right after its execution proof, so no separate "executed" bit is kept); bit 7: the
+ * block is on the open list.
+ */
+#define PMU_BS_SCANNED(frame) (1U << (frame))
+#define PMU_BS_ALL_SCANNED    0x0fU
+#define PMU_BS_LISTED         0x80U
+
+/* the state byte of the block holding ipa, or NULL outside the armed ranges (or in the 16 KiB mode) */
 static u8 *pmu_frames(u64 ipa)
 {
     for (u32 i = 0; i < pmu.nr_ranges; i++) {
         if (pmu.ranges[i].frames && ipa >= pmu.ranges[i].base &&
             ipa - pmu.ranges[i].base < pmu.ranges[i].size)
-            return &pmu.ranges[i]
-                        .frames[((ipa & ~(PMU_PAGE - 1)) - pmu.ranges[i].base) / PMU_FRAME_SIZE];
+            return &pmu.ranges[i].frames[(ipa - pmu.ranges[i].base) / PMU_PAGE];
     }
     return NULL;
 }
 
 static void pmu_clear_frames(u8 *fr)
 {
-    fr[0] &= PMU_FRAME_LISTED;
-    for (u32 i = 1; i < PMU_BLOCK_FRAMES; i++)
-        fr[i] = 0;
+    *fr &= PMU_BS_LISTED;
 }
 
 static bool pmu_all_scanned(const u8 *fr)
 {
-    for (u32 i = 0; i < PMU_BLOCK_FRAMES; i++)
-        if (!(fr[i] & PMU_FRAME_SCANNED))
-            return false;
-    return true;
+    return (*fr & PMU_BS_ALL_SCANNED) == PMU_BS_ALL_SCANNED;
 }
 
 int hv_win_pmu_set_mode(u64 flags)
@@ -218,10 +222,12 @@ int hv_win_pmu_arm(u64 base, u64 size)
                base, size);
         return -1;
     }
-    u64 frame_bytes = pmu.mode16k ? 0 : size / PMU_FRAME_SIZE;
+    u64 frame_bytes = pmu.mode16k ? 0 : size / PMU_PAGE;
     if (tables * PMU_PAGE + PMU_HEAP_MARGIN + frame_bytes > heapblock_remaining()) {
-        printf("HV/win: PMU rewrite: %lu L3 tables (%lu KiB) do not fit the heap (%lu KiB left)\n",
-               tables, tables * PMU_PAGE >> 10, (u64)heapblock_remaining() >> 10);
+        printf("HV/win: PMU rewrite: %lu L3 tables (%lu KiB) + %lu KiB 4 KiB-granule state + %lu KiB margin "
+               "do not fit the heap (%lu KiB left)\n",
+               tables, tables * PMU_PAGE >> 10, frame_bytes >> 10, PMU_HEAP_MARGIN >> 10,
+               (u64)heapblock_remaining() >> 10);
         return -1;
     }
 
@@ -229,7 +235,7 @@ int hv_win_pmu_arm(u64 base, u64 size)
     if (frame_bytes) {
         frames = calloc(frame_bytes, 1);
         if (!frames) {
-            printf("HV/win: PMU rewrite: no heap for %lu frame bytes\n", frame_bytes);
+            printf("HV/win: PMU rewrite: no heap for %lu block state bytes\n", frame_bytes);
             return -1;
         }
     }
@@ -270,6 +276,8 @@ u64 hv_win_pmu_stat(u64 idx)
             return (u64)pmu.log[slot].old_insn << 32 | pmu.log[slot].new_insn;
         case HV_WIN_PMU_STAT_LOG_ELR:
             return pmu.log[slot].elr;
+        case HV_WIN_PMU_STAT_HEAP: /* n5b: launcher preflight (need vs available before select) */
+            return slot == 0 ? (u64)heapblock_remaining() : slot == 1 ? PMU_HEAP_MARGIN : ~0UL;
         default:
             return ~0UL;
     }
@@ -459,12 +467,12 @@ static bool pmu_exec_proof(struct exc_info *ctx, u64 ipa, bool hint)
 }
 
 /* Scan one proven frame (block in SCANNING). frame = 4 KiB index in the block, pa = block PA. */
-static void pmu_scan_frame(struct exc_info *ctx, u64 block, u64 pa, u32 frame, u8 *fr)
+static void pmu_scan_frame(struct exc_info *ctx, u64 block, u64 pa, u32 frame, u8 *fr, bool proven)
 {
     u64 fipa = block + frame * PMU_FRAME_SIZE, fpa = pa + frame * PMU_FRAME_SIZE;
 
     /* Session assertion, checked before anything is read: only a proven frame is scanned. */
-    if (!(fr[frame] & PMU_FRAME_EXECUTED)) {
+    if (!proven) {
         pmu.stats[HV_WIN_PMU_MODIFIED_NEVER_EXECUTED]++;
         return;
     }
@@ -485,7 +493,7 @@ static void pmu_scan_frame(struct exc_info *ctx, u64 block, u64 pa, u32 frame, u
     struct pmu_scan sc = {.ipa = fipa, .elr = ctx->elr};
     u64 kinds[PMU_RW_NR_KINDS] = {0};
     u32 n = pmu_rw_rewrite_frame((u32 *)fpa, next, pmu_record, pmu_skip, &sc, kinds);
-    fr[frame] |= PMU_FRAME_SCANNED;
+    *fr |= PMU_BS_SCANNED(frame);
     pmu.stats[HV_WIN_PMU_FRAMES_SCANNED]++;
     pmu_scanned(ctx, fpa, PMU_FRAME_SIZE, n, &sc, kinds);
     pmu.stats[HV_WIN_PMU_SCANS]++;
@@ -502,7 +510,7 @@ static void pmu_close_open(void)
         u32 flips;
         if (!fr)
             continue;
-        fr[0] &= ~PMU_FRAME_LISTED;
+        *fr &= ~PMU_BS_LISTED;
         if (hv_xt_get(block, NULL, &flips) == HV_XT_CODE && !pmu_all_scanned(fr)) {
             hv_xt_set(block, HV_XT_SCANNING, flips);
             pmu.stats[HV_WIN_PMU_REPROTECTS]++;
@@ -517,11 +525,11 @@ static void pmu_close_open(void)
 
 static void pmu_open_add(u64 block, u8 *fr)
 {
-    if (fr[0] & PMU_FRAME_LISTED)
+    if (*fr & PMU_BS_LISTED)
         return;
     if (pmu.nr_open >= PMU_MAX_OPEN)
         pmu_close_open();
-    fr[0] |= PMU_FRAME_LISTED;
+    *fr |= PMU_BS_LISTED;
     pmu.open[pmu.nr_open++] = block;
 }
 
@@ -552,10 +560,9 @@ static bool pmu_exec_fault_4k(struct exc_info *ctx, u64 ipa, bool hint)
     }
 
     pmu.stats[HV_WIN_PMU_EXEC_FAULTS]++;
-    if (!(fr[frame] & PMU_FRAME_SCANNED)) {
+    if (!(*fr & PMU_BS_SCANNED(frame))) {
         if (pmu_exec_proof(ctx, ipa, hint)) {
-            fr[frame] |= PMU_FRAME_EXECUTED;
-            pmu_scan_frame(ctx, block, pa, frame, fr);
+            pmu_scan_frame(ctx, block, pa, frame, fr, true);
         } else {
             /* not proven: neither read nor written; the block opens anyway (progress) */
             pmu.stats[HV_WIN_PMU_EXEC_DENIED]++;
@@ -718,7 +725,7 @@ u32 hv_win_pmu_dma_write(u64 ipa, u64 size)
             u64 lo = ipa > page ? ipa : page;
             u64 hi = last < page + (PMU_PAGE - 1) ? last : page + (PMU_PAGE - 1);
             for (u64 f = (lo - page) / PMU_FRAME_SIZE; f <= (hi - page) / PMU_FRAME_SIZE; f++)
-                fr[f] &= f ? 0 : PMU_FRAME_LISTED;
+                *fr &= ~PMU_BS_SCANNED(f);
             if (st == HV_XT_CODE) {
                 hv_xt_set(page, HV_XT_SCANNING, flips);
                 n++;
@@ -796,8 +803,13 @@ void hv_win_pmu_report(void)
 #ifdef PMU_REWRITE_HOST_TEST
 u8 hv_win_pmu_host_frame(u64 ipa)
 {
+    /* the old per-frame view: SCANNED implies EXECUTED (proof precedes every scan); LISTED on frame 0 */
     u8 *fr = pmu_frames(ipa);
-    return fr ? fr[(ipa & (PMU_PAGE - 1)) / PMU_FRAME_SIZE] : 0;
+    u32 f = (ipa & (PMU_PAGE - 1)) / PMU_FRAME_SIZE;
+    if (!fr)
+        return 0;
+    return ((*fr & PMU_BS_SCANNED(f)) ? PMU_FRAME_EXECUTED | PMU_FRAME_SCANNED : 0) |
+           (f == 0 ? (*fr & PMU_BS_LISTED) : 0);
 }
 void hv_win_pmu_host_reset(void)
 {

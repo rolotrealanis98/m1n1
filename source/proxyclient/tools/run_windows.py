@@ -1184,6 +1184,17 @@ def parse_args():
     return parser, args
 
 
+HV_WIN_PMU_STAT_HEAP = 0x500           # n5b: + 0 heap bytes left, + 1 the arm's margin
+
+
+def pmu_heap_need(ranges, granule, margin):
+    """n5b: upper bound of what arming every range takes from the resident heap (hv_win_pmu_arm): 16 KiB per
+    32 MiB stage-2 block it may split, + (4k) one byte per 16 KiB of the range, + the margin. (bytes, text)"""
+    tables = sum(((e - 1) >> 25) - (s >> 25) + 1 for s, e in ranges if e > s)
+    state = sum((e - s) >> 14 for s, e in ranges) if granule == "4k" else 0
+    return tables * 16384 + state + margin, f"{tables} L3 tables {tables * 16} KiB + state {state >> 10} KiB + margin {margin >> 10} KiB"
+
+
 def report_pmu_rewrite(p, run_dir, record):
     """P_HV_WIN_PMU_STATS at guest exit: one RUN.txt line, the counters and the last rewrites in pmu-rewrite.txt."""
     st = {name: p.hv_win_pmu_stats(i) for i, name in enumerate(HV_WIN_PMU_STATS)}
@@ -1832,6 +1843,13 @@ def main():
         ram_ranges = list(plan["ranges"])
 
         def start_with_pmu_rewrite(entry, x0, *rest):
+            heap_left = p.hv_win_pmu_stats(HV_WIN_PMU_STAT_HEAP)   # n5b preflight, before any arm
+            if heap_left != (1 << 64) - 1:
+                need, detail = pmu_heap_need(ram_ranges, args.pmu_granule, p.hv_win_pmu_stats(HV_WIN_PMU_STAT_HEAP + 1))
+                record(f"PMU rewrite heap preflight ({args.pmu_granule}): need <= {need >> 10} KiB ({detail}), "
+                       f"heap left {heap_left >> 10} KiB")
+                if need > heap_left:
+                    raise SystemExit(f"PMU rewrite heap preflight: need {need >> 10} KiB > {heap_left >> 10} KiB left")
             pages = 0
             for s, e in ram_ranges:
                 n = p.hv_win_pmu_rewrite(s, e - s, HV_WIN_PMU_MODE_16K if args.pmu_granule == "16k" else 0)
