@@ -687,6 +687,9 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_FB_PREPARE = 0xc1e
     P_HV_WIN_FB_STAT = 0xc1f
     P_HV_WIN_HIDM_CONFIGURE = 0xc28
+    P_HV_WIN_SMCP_CONFIGURE = 0xc40
+    P_HV_WIN_SMCP_STAT = 0xc41
+    P_HV_WIN_SMCP_POWER = 0xc42
     P_HV_WIN_STORAGE_PREP = 0xc20
     P_HV_WIN_STORAGE_STAT = 0xc21
     P_HV_WIN_STORAGE_NATIVE = 0xc22
@@ -1225,6 +1228,12 @@ class M1N1Proxy(Reloadable):
         return self.request(self.P_HV_WIN_FB_STAT, idx)
     def hv_win_hidm_configure(self):
         return self.request(self.P_HV_WIN_HIDM_CONFIGURE, 1, signed=True)
+    def hv_win_smcp_configure(self, flags=0):
+        return self.request(self.P_HV_WIN_SMCP_CONFIGURE, 1, flags, signed=True)
+    def hv_win_smcp_stat(self):
+        return self.request(self.P_HV_WIN_SMCP_STAT, signed=True)
+    def hv_win_smcp_power(self, action):
+        return self.request(self.P_HV_WIN_SMCP_POWER, action, signed=True)
 
     def hv_win_storage_prepare(self, registration):
         # Exact96-byte header plus copied {base,size} range arrays; one launch only.

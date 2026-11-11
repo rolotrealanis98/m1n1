@@ -202,6 +202,9 @@ OBJECTS := \
 	mtp_kbd.o \
 	mtp_kbd_resident.o \
 	hv_win_hidm.o \
+	hv_win_smcp.o \
+	smcp/core/smcp_core.o \
+	smcp/core/smcp_power.o \
 	hidm/service/hidm_service.o \
 	sart.o \
 	sep.o \

@@ -60,3 +60,5 @@ F	harness-work	source/src/hv/win/*fb* harness/*	mkdir -p $FB_OUT/t && cp -R harn
 F	harness-card	source/src/hv/win/*fb* harness/*	mkdir -p $FB_OUT/t && cp -R harness $FB_OUT/t/ && rm -rf $FB_OUT/t/harness/build && ln -s "$PWD/source" $FB_OUT/t/source && PREV_TREE=/Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp-20261109/source PARENT_TREE=/Users/rolo/Work/agents/win-el2/storage/s1-resident-r3.2-disp2-20261110/source ORIG_FB=/Users/rolo/Work/agents/win-el2/display/improve-20261109/orig/src/hv/win/hv_win_fb.c $FB_OUT/t/harness/run.sh card > $FB_OUT/harness-card.out 2>&1; rc=$?; echo "$(grep -c '(expected)' $FB_OUT/harness-card.out) expected outcomes; last: $(tail -1 $FB_OUT/harness-card.out | cut -c1-90)"; grep UNEXPECTED $FB_OUT/harness-card.out; exit $rc
 # ---- u1 (unified)
 QF	u1	source/src/hv/win/* source/src/proxy.* source/proxyclient/m1n1/proxy.py tests/u1/*	python3 -I tests/u1/test_u1.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+# ---- smcp (platform/power-audio-20261111)
+QF	smcp	source/src/smcp/* source/src/hv_win_smcp.* source/tests/smcp/*	source/tests/smcp/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0

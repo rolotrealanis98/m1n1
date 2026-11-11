@@ -33,6 +33,7 @@
 #include "hv/win/hv_win.h"
 #include "hv/win/hv_win_storage.h"
 #include "hv_win_hidm.h"
+#include "hv_win_smcp.h"
 #include "hv/win/s1/native_link.h"
 #include "hv/win/s1/ans_ro.h"
 #include "minilzlib/minlzma.h"
@@ -655,6 +656,15 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
             break;
         case P_HV_WIN_HIDM_CONFIGURE:
             reply->retval = hv_win_hidm_configure(request->args[0]);
+            break;
+        case P_HV_WIN_SMCP_CONFIGURE:
+            reply->retval = hv_win_smcp_configure(request->args[0], request->args[1]);
+            break;
+        case P_HV_WIN_SMCP_STAT:
+            reply->retval = hv_win_smcp_stat();
+            break;
+        case P_HV_WIN_SMCP_POWER:
+            reply->retval = hv_win_smcp_power(request->args[0]);
             break;
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");
