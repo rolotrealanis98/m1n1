@@ -637,6 +637,12 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");
             break;
+        case P_HV_WIN_CPPC_CONFIGURE:
+            reply->retval = hv_win_cppc_configure(request->args[0], request->args[1]);
+            break;
+        case P_HV_WIN_CPPC_STAT:
+            reply->retval = hv_win_cppc_dump();
+            break;
         case P_HV_WIN_USB_PREP:
             reply->retval = hv_win_usb_prep(request->args[0], request->args[1], request->args[2],
                                             request->args[3]);

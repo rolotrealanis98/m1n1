@@ -243,6 +243,10 @@ static inline void hv_win_fiq_entry(void)
  *                             raises RX without a guest access
  */
 int hv_win_pl011_configure(u64 base, u64 gsiv);
+
+/* cpuperf-A (hv_win_cppc.c): EL2-emulated CPPC page behind the firmware _CPC; no DVFS access */
+int hv_win_cppc_configure(u64 base, u64 ncpus);
+int hv_win_cppc_dump(void);
 void hv_win_pl011_poll(void);
 bool hv_win_pl011_irq_level(void);
 void hv_win_pl011_raise(u32 gsiv);

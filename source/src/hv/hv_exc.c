@@ -974,6 +974,7 @@ int hv_win_smp_dump(const char *why)
     hv_vgic3_smp_dump();
     hv_win_pl011_kd_dump(); /* smp2g */
     hv_win_diag_dump_all();
+    hv_win_cppc_dump(); /* cpuperf-A: -1 (silent) when no CPPC page */
     printf("HV/win smp2g: ==== end of SMP dump ====\n");
     return 0;
 }

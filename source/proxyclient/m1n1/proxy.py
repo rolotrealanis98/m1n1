@@ -692,6 +692,8 @@ class M1N1Proxy(Reloadable):
     P_HV_WIN_STORAGE_NATIVE_STAT = 0xc23
     P_HV_WIN_STORAGE_NATIVE_QUIESCE = 0xc24
     P_HV_WIN_SMP_DUMP = 0xc25
+    P_HV_WIN_CPPC_CONFIGURE = 0xc38
+    P_HV_WIN_CPPC_STAT = 0xc39
 
     P_FB_INIT = 0xd00
     P_FB_SHUTDOWN = 0xd01
@@ -1197,6 +1199,11 @@ class M1N1Proxy(Reloadable):
     def hv_win_smp_dump(self):
         # smp2f: EL2 prints the SMP/WFI/timer/vGIC dump on its console (boot CPU only; -1 otherwise)
         return self.request(self.P_HV_WIN_SMP_DUMP, signed=True)
+    def hv_win_cppc_configure(self, base, ncpus):
+        # cpuperf-A: EL2 maps the CPPC hook page behind the firmware's _CPC (0 ok, -1 refused)
+        return self.request(self.P_HV_WIN_CPPC_CONFIGURE, base, ncpus, signed=True)
+    def hv_win_cppc_stat(self):
+        return self.request(self.P_HV_WIN_CPPC_STAT, signed=True)
     def hv_win_caps(self):
         return self.request(self.P_HV_WIN_CAPS)
     def hv_win_configure(self, irq_model, gicd_base, gicr_base, nr_vcpus, flags, cpus=0):

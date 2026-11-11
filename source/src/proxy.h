@@ -169,6 +169,9 @@ typedef enum {
     P_HV_WIN_STORAGE_NATIVE_STAT, /* 0xc23 */
     P_HV_WIN_STORAGE_NATIVE_QUIESCE, /* 0xc24, r3.1: stage-1 quiesce, no guest running */
     P_HV_WIN_SMP_DUMP, /* 0xc25, smp2f: print the SMP/WFI/timer/vGIC dump (boot CPU; -1 elsewhere) */
+    /* 0xc26..0xc37 used or reserved by other lines (ANSM, HIDM, untethered) */
+    P_HV_WIN_CPPC_CONFIGURE = 0xc38, /* cpuperf-A: arg0 page base, arg1 vCPU count */
+    P_HV_WIN_CPPC_STAT = 0xc39,      /* cpuperf-A: print the CPPC page counters */
 
     P_FB_INIT = 0xd00,
     P_FB_SHUTDOWN,

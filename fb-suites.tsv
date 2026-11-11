@@ -7,3 +7,5 @@ QF	win-pmu-rewrite	source/src/hv/win/*pmu* source/src/hv/win/hv_win.h source/tes
 QF	launcher-args	source/proxyclient/* source/tests/win-launcher-smp2/*	python3 -I source/tests/win-launcher-smp2/test_args.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 QF	hv-sysreg	source/proxyclient/* source/src/hv/* source/tests/win-launcher-smp2/*	/Users/rolo/Work/m1n1/.venv/bin/python source/tests/win-launcher-smp2/test_hv_sysreg.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 QF	launcher-classes	source/proxyclient/* source/tests/win-launcher-smp2/*	python3 -I source/tests/win-launcher-smp2/test_cpu_classes.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+QF	win-cppc	source/src/hv/win/*cppc* source/tests/win-cppc/*	make -s -C source/tests/win-cppc clean >/dev/null 2>&1; make -s -C source/tests/win-cppc check 2>&1 | tail -3; test ${PIPESTATUS[0]} = 0
+QF	launcher-cppc	source/proxyclient/* source/tests/win-launcher-smp2/*	python3 -I source/tests/win-launcher-smp2/test_cppc.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
