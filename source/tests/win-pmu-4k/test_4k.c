@@ -208,6 +208,7 @@ static struct {
     u32 flips[BLOCKS];
     bool listed[BLOCKS], scanned[FRAMES];
     unsigned nlisted, close_ticks, npinned, pin_ticks;
+    bool covered; /* nightly-8: the catcher covers unscanned frames: nothing is listed (catcher_covers()) */
     /* nightly-7 storm guard (hv_win_pmu.c): pins in a row within 300 ticks; 3 -> sticky for 50 sweeps */
     u64 clock, pin_tick[BLOCKS];
     unsigned storm_pins[BLOCKS], sticky[BLOCKS];
@@ -347,7 +348,7 @@ static unsigned execute_at(unsigned f, unsigned off)
             m.denied++;
     }
     m.st[b] = HV_XT_CODE;
-    if (!ref_all(b) && !m.listed[b]) {
+    if (!ref_all(b) && !m.listed[b] && !m.covered) {
         if (m.nlisted >= PMU_MAX_OPEN) /* list full: everything listed is re-protected first */
             ref_close();
         m.listed[b] = true;
@@ -1075,7 +1076,7 @@ static void ref_catch(unsigned f, unsigned word)
         m.words++;
     }
     m.st[b] = HV_XT_CODE;
-    if (!ref_all(b) && !m.listed[b]) {
+    if (!ref_all(b) && !m.listed[b] && !m.covered) {
         if (m.nlisted >= PMU_MAX_OPEN)
             ref_close();
         m.listed[b] = true;
@@ -1224,7 +1225,7 @@ static void catcher_data(void)
 }
 
 /* G7/G8 randomized: the existing operations plus native runs of words in executable blocks */
-static void catcher_differential(void)
+static void catcher_differential(bool covered)
 {
     static const u32 vals[] = {NOP, 0xd53b9d01, 0xd51befc3, 0x00200100, 0xd53bec03, 0x87654321, BRK};
     unsigned long runs = 0, undefs = 0;
@@ -1232,6 +1233,10 @@ static void catcher_differential(void)
         reset();
         table(TABLE0)[0] = table(TABLE0)[256];
         ref_sync();
+        if (covered) { /* nightly-8: the catcher is armed: no timed re-protect */
+            hv_win_pmu_catch_note(true, 0x30000);
+            m.covered = true;
+        }
         rng = 0x6d20261111UL + seed;
         for (unsigned n = 0; n < 3000; n++) {
             unsigned f = random32() % 24, off = f * 4096 + (random32() % 1024) * 4;
@@ -1279,6 +1284,71 @@ static void catcher_differential(void)
     printf("win-pmu-4k catcher: %lu native runs, %lu would-be UNDEFs caught and retried\n", runs, undefs);
 }
 
+
+/* ---- nightly-8: no timed re-protect while the catcher covers ------------------------------------ */
+/*
+ * G9 with the catcher armed on every CPU that reported and an OS running, a block opened with unscanned frames
+ *    stays executable (no re-protect, no re-fault); an unscanned frame's PMU word is caught when it runs; a
+ *    guest write into the open block still revokes execution and every frame is rescanned at the next fetch
+ *    before anything in it runs; a device fill re-protects only the block it touches; before the OS (TTBR1
+ *    walks disabled) or with the catcher unavailable on any CPU the timed re-protect works as before.
+ */
+static void catcher_covers(void)
+{
+    reset();
+    table(TABLE0)[0] = table(TABLE0)[256];
+    ref_sync();
+    hv_win_pmu_catch_note(true, 0x30000);
+    m.covered = true;
+    CHECK(execute(0) == 1 && states[0] == HV_XT_CODE && !m.scanned[2]);
+    ticks(250);
+    CHECK(states[0] == HV_XT_CODE && hv_win_pmu_stat(HV_WIN_PMU_REPROTECTS) == 0);
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_OPEN_UNLISTED) == 1);
+    CHECK(execute(0) == 0 && execute(2) == 0); /* hot code never re-faults */
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_EXEC_FAULTS) == 1);
+    /* the unscanned sibling's PMU word: caught when it runs */
+    CHECK(guest_run(2, 128, 5) && mem[2048 + 32] == 0xd53be045 && m.scanned[2]);
+    /* a guest write into the open block: X revoked on every CPU first, all frame state cleared ... */
+    store(1 * 4096 + 8, 4, 0x1234);
+    CHECK(states[0] == HV_XT_DIRTY && !m.scanned[0] && !m.scanned[2]);
+    /* ... the guest then writes a PMU read into code frame 0 (block writable, lands natively) ... */
+    store(0x300, 4, 0xd53b9d07);
+    CHECK(mem[0x300 / 4] == 0xd53b9d07);
+    /* ... and its next fetch faults and rescans frame 0 before anything runs */
+    CHECK(execute_at(0, 0x300 / 4) == 1 && mem[0x300 / 4] == 0xd53be047 && states[0] == HV_XT_CODE);
+    /* a device fill into the open block: that block only is re-protected, the filled frame rescanned */
+    execute(4);
+    CHECK(states[1] == HV_XT_CODE);
+    fill(2 * 4096 + 64, 8, 0xd53b9d02);
+    CHECK(states[0] == HV_XT_SCANNING && states[1] == HV_XT_CODE && !m.scanned[2]);
+    CHECK(execute_at(2, 16) == 1 && mem[2048 + 16] == 0xd53be042 && mem[2048 + 17] == 0xd53be042);
+    ticks(100);
+    CHECK(hv_win_pmu_stat(HV_WIN_PMU_REPROTECTS) == 0);
+
+    /* before the OS (TTBR1 walks disabled): listed and re-protected as before */
+    reset();
+    hv_win_pmu_catch_note(true, 0x30000);
+    s1.tcr |= BIT(23);
+    execute(0);
+    CHECK(m.listed[0]);
+    ticks(10);
+    CHECK(states[0] == HV_XT_SCANNING && hv_win_pmu_stat(HV_WIN_PMU_REPROTECTS) == 1);
+    /* the catcher unavailable on one CPU: listed and re-protected as before */
+    reset();
+    hv_win_pmu_catch_note(true, 0x30000);
+    host_cpu = 1;
+    hv_win_pmu_catch_note(false, 0);
+    host_cpu = 0;
+    execute(0);
+    ticks(10);
+    CHECK(states[0] == HV_XT_SCANNING && hv_win_pmu_stat(HV_WIN_PMU_OPEN_UNLISTED) == 0);
+    /* never armed (host default): as before */
+    reset();
+    execute(0);
+    ticks(10);
+    CHECK(states[0] == HV_XT_SCANNING);
+}
+
 int main(void)
 {
 #ifndef PMU_4K_BASELINE_DEMO /* make demo-baseline: this file against aa98ccf, which has no diagnostics */
@@ -1296,7 +1366,9 @@ int main(void)
     replay();
     catcher_sibling();
     catcher_data();
-    catcher_differential();
+    catcher_differential(false);
+    catcher_differential(true);
+    catcher_covers();
     hv_win_pmu_host_reset();
     printf("win-pmu-4k: %lu checks, %lu differential operations, 0 failed\n", checks, ops);
     return 0;

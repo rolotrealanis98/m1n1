@@ -759,10 +759,40 @@ static void pmu_close_open(void)
         hv_xt_tlbi(true);
 }
 
+/*
+ * nightly-8: does the UNDEF catcher cover an unscanned frame of an executable block? The timed re-protect exists
+ * only so that an unscanned sibling's first fetch faults and gets scanned before its PMU words run. With the
+ * catcher armed (on at least one CPU, unavailable on none) and an OS running (the catcher's own activity
+ * condition: TTBR1 walks enabled), an unrewritten PMU word in such a frame is scanned when it UNDEFs, so the
+ * block can stay executable until a write fault (all frame state cleared, rescanned at the next fetch) or a
+ * device fill (hv_win_pmu_dma_write: the touched block re-protected, the touched frames rescanned). Before the
+ * OS (firmware, boot applications: catcher passive) and when the catcher is unavailable, blocks are listed and
+ * re-protected every PMU_CLOSE_TICKS ticks as before.
+ */
+static bool pmu_catch_covers(void)
+{
+    if (!pmu.stats[HV_WIN_PMU_CATCH_CPUS] || pmu.stats[HV_WIN_PMU_CATCH_UNAVAIL])
+        return false;
+    u64 tcr;
+#ifdef PMU_REWRITE_HOST_TEST
+    struct pmu_s1 s;
+    if (!pmu_host_s1(&s))
+        return false;
+    tcr = s.tcr;
+#else
+    tcr = mrs(TCR_EL12);
+#endif
+    return !(tcr & BIT(23));
+}
+
 static void pmu_open_add(u64 block, u8 *fr)
 {
     if (*fr & PMU_BS_LISTED)
         return;
+    if (pmu_catch_covers()) {
+        pmu.stats[HV_WIN_PMU_OPEN_UNLISTED]++;
+        return;
+    }
     if (pmu.nr_open >= PMU_MAX_OPEN)
         pmu_close_open();
     *fr |= PMU_BS_LISTED;
@@ -1224,6 +1254,9 @@ void hv_win_pmu_report(void)
                "the OS, %lu repeated PCs handed on; armed on %lu CPU(s), unavailable on %lu\n",
                s[HV_WIN_PMU_CATCHES], s[HV_WIN_PMU_CATCH_SKIPS], s[HV_WIN_PMU_CATCH_PASSIVE],
                s[HV_WIN_PMU_CATCH_LOOPS], s[HV_WIN_PMU_CATCH_CPUS], s[HV_WIN_PMU_CATCH_UNAVAIL]);
+    if (!pmu.mode16k)
+        printf("HV/win: PMU 4 KiB: %lu block openings left executable (catcher covers), %lu timed re-protects\n",
+               s[HV_WIN_PMU_OPEN_UNLISTED], s[HV_WIN_PMU_REPROTECTS]);
     printf(
         "HV/win: PMU rewrite: %lu pages tracked, %lu scans, %lu pages rewritten, %lu words "
         "(PMCCNTR %lu, other mrs %lu, msr %lu); flips: write %lu, walker %lu; pinned %lu (list "

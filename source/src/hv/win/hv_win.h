@@ -327,6 +327,8 @@ enum hv_win_pmu_stat {
     HV_WIN_PMU_CATCH_LOOPS,         /* same PC caught again and again on one CPU: handed to the guest */
     HV_WIN_PMU_CATCH_CPUS,          /* CPUs on which the FGT ESR/FAR read trap was armed (incl. re-arms) */
     HV_WIN_PMU_CATCH_UNAVAIL,       /* CPUs on which it could not be armed (no FGT, bits read back 0) */
+    HV_WIN_PMU_OPEN_UNLISTED,       /* nightly-8: blocks opened with an unscanned frame but not put on the timed
+                                     * re-protect list: the catcher covers them (armed, none unavailable, OS up) */
     HV_WIN_PMU_NR_STATS,
 };
 #define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */
@@ -360,6 +362,7 @@ u64 hv_win_pmu_el1_read(struct exc_info *ctx, bool far);
 void hv_win_pmu_catch_cpu(bool reset);
 void hv_win_pmu_catch_note(bool ok, u64 hfgrtr);
 bool hv_win_handle_msr_locked(struct exc_info *ctx, u64 iss); /* hv_exc.c locked MSR path */
+int hv_win_el1_read_fast(u64 esr_el2, u64 *regs); /* nightly-8: hv_exc_sync_fast; -1 = not handled */
 void hv_win_pmu_report(void);                             /* printf summary (guest exit) */
 /* EL2 is about to store into guest RAM for a device (DMA write): re-arm the scan of what the range
  * touches (hv_win_pmu.c). Under the big HV lock, before the copy. Returns pages whose X was revoked. */

@@ -125,6 +125,18 @@ static u64 hv_perf_fast_mdscr[MAX_CPUS];               /* MDSCR_EL1 accesses don
 static u64 hv_perf_el2_sync, hv_perf_el2_irq, hv_perf_el2_fiq; /* CNTPCT ticks in the C exit paths */
 static struct hv_perf_sr hv_perf_sr_tab[HV_PERF_SR_N];  /* busiest trapped system registers */
 static u64 hv_perf_sr_other;
+/* nightly-8 (HV_PERF_STATS): ESR_EL1/FAR_EL1 read traps per CPU, [0] slow path / [1] fast path: count and CNTPCT
+ * ticks in C; and the EC of the ESR value the guest read (64 = a FAR read) */
+static u64 hv_perf_el1r_n[2][MAX_CPUS], hv_perf_el1r_t[2][MAX_CPUS];
+static u32 hv_perf_el1r_ec[MAX_CPUS][65];
+
+static bool hv_perf_is_el1_read(u64 esr)
+{
+    u64 iss = FIELD_GET(ESR_ISS, esr);
+    u64 reg = iss & (ESR_ISS_MSR_OP0 | ESR_ISS_MSR_OP2 | ESR_ISS_MSR_OP1 | ESR_ISS_MSR_CRn | ESR_ISS_MSR_CRm);
+    return FIELD_GET(ESR_EC, esr) == ESR_EC_MSR && (iss & ESR_ISS_MSR_DIR) &&
+           (reg == SYSREG_ISS(SYS_ESR_EL1) || reg == SYSREG_ISS(SYS_FAR_EL1));
+}
 
 void hv_exc_perf_set(u32 flags)
 {
@@ -1853,6 +1865,11 @@ bool hv_exc_sync(struct exc_info *ctx)
     bool r = hv_exc_sync_body(ctx);
     if (ec != ESR_EC_WFI)
         hv_perf_t1(&hv_perf_el2_sync, t0);
+    if (t0 && hv_perf_is_el1_read(esr)) {
+        u64 cpu = mrs(TPIDR_EL2);
+        hv_perf_el1r_n[0][cpu]++;
+        hv_perf_el1r_t[0][cpu] += mrs(CNTPCT_EL0) - t0;
+    }
     return r;
 }
 
@@ -1886,6 +1903,23 @@ void hv_exc_fiq(struct exc_info *ctx)
 u64 hv_exc_sync_fast(struct exc_info *ctx)
 {
     u64 esr = mrs(ESR_EL2);
+    /* nightly-8: the catcher's ESR_EL1/FAR_EL1 read traps (all but EC 0), same accounting as below */
+    u64 t0 = hv_perf_t0();
+    int ec1 = hv_win_el1_read_fast(esr, ctx->regs);
+    if (ec1 >= 0) {
+        msr(ELR_EL2, mrs(ELR_EL2) + 4);
+        __atomic_fetch_add(&hv_exits_sync, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&hv_trap_ec[ESR_EC_MSR], 1, __ATOMIC_RELAXED);
+        hv_trap_ec_pc[ESR_EC_MSR] = mrs(ELR_EL2) - 4;
+        if (t0) {
+            u64 cpu = mrs(TPIDR_EL2);
+            hv_perf_sr_note(hv_perf_sr_tab, &hv_perf_sr_other, esr);
+            hv_perf_el1r_ec[cpu][ec1]++;
+            hv_perf_el1r_n[1][cpu]++;
+            hv_perf_el1r_t[1][cpu] += mrs(CNTPCT_EL0) - t0;
+        }
+        return 1;
+    }
     if (!hv_perf_mdscr_emulate(esr, ctx->regs, &PERCPU(mdscr)))
         return 0;
     msr(ELR_EL2, mrs(ELR_EL2) + 4);
@@ -1999,6 +2033,34 @@ static void hv_perf_report(const char *P, u64 now, u64 freq)
     printf(" other %lu | flags 0x%x mdcr 0x%lx | fb refresh %lu fixes %lu/%lu wprefail %lu\n",
            (unsigned long)hv_perf_sr_other, hv_perf_flags, mrs(MDCR_EL2), (unsigned long)rr, (unsigned long)rx,
            (unsigned long)rp, (unsigned long)wf);
+    /* nightly-8 PE line: ESR_EL1/FAR_EL1 read traps, slow vs fast path, C time per trap; guest ESR classes read */
+    {
+        static u64 prev_n[2], prev_t[2];
+        u64 n[2] = {0, 0}, t[2] = {0, 0}, ecs[65] = {0};
+        for (int c = 0; c < MAX_CPUS; c++) {
+            for (int k = 0; k < 2; k++) {
+                n[k] += hv_perf_el1r_n[k][c];
+                t[k] += hv_perf_el1r_t[k][c];
+            }
+            for (int e = 0; e < 65; e++) {
+                ecs[e] += hv_perf_el1r_ec[c][e];
+                hv_perf_el1r_ec[c][e] = 0; /* racy reset: a count may be lost, never invented */
+            }
+        }
+        printf("%s PE el1r slow %lu/s %lu ns fast %lu/s %lu ns | fast reads: far %lu esr", P,
+               (unsigned long)hv_perf_rate(n[0] - prev_n[0], dt, freq),
+               (unsigned long)(n[0] - prev_n[0] ? (t[0] - prev_t[0]) * 1000000000UL / (freq ? freq : 1) /
+                                                     (n[0] - prev_n[0]) : 0),
+               (unsigned long)hv_perf_rate(n[1] - prev_n[1], dt, freq),
+               (unsigned long)(n[1] - prev_n[1] ? (t[1] - prev_t[1]) * 1000000000UL / (freq ? freq : 1) /
+                                                     (n[1] - prev_n[1]) : 0),
+               (unsigned long)hv_perf_rate(ecs[64], dt, freq));
+        for (int e = 0; e < 64; e++)
+            if (ecs[e])
+                printf(" %02x:%lu", e, (unsigned long)hv_perf_rate(ecs[e], dt, freq));
+        printf("\n");
+        prev_n[0] = n[0], prev_n[1] = n[1], prev_t[0] = t[0], prev_t[1] = t[1];
+    }
     /* the table restarts every interval, so registers that appear late are not lost to "other" */
     memset(hv_perf_sr_tab, 0, sizeof(hv_perf_sr_tab));
     hv_perf_sr_other = 0;
@@ -2085,7 +2147,7 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
         {HV_WIN_PMU_CATCHES, "catch"},
         {HV_WIN_PMU_CATCH_SKIPS, "cskip"}, {HV_WIN_PMU_CATCH_PASSIVE, "cpass"},
         {HV_WIN_PMU_CATCH_LOOPS, "cloop"}, {HV_WIN_PMU_CATCH_CPUS, "ccpu"},
-        {HV_WIN_PMU_CATCH_UNAVAIL, "cunavail"}};
+        {HV_WIN_PMU_CATCH_UNAVAIL, "cunavail"}, {HV_WIN_PMU_OPEN_UNLISTED, "unlisted"}};
     for (unsigned i = 0; i < sizeof(pk) / sizeof(pk[0]); i++) {
         u64 v = hv_win_pmu_stat(pk[i].idx);
         printf(" %s %lu(+%lu)", pk[i].name, (unsigned long)v, (unsigned long)(v - st_prev_pmu[pk[i].idx]));
