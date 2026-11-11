@@ -17,4 +17,10 @@ for f in "$R"/source/src/dcpw/service/*.[ch] "$R"/source/src/dcpw/abi/dcpw_abi.h
     || { echo "dcpw-pinned: $rel differs from dcpw-live-1 280f964"; exit 1; }
 done
 cd "$T"
-if [ "${1:-}" = mutants ]; then OUT="$T/mut" bash tests/mutants.sh; else OUT="$T/out" bash tests/run-tests.sh; fi
+if [ "${1:-}" = mutants ]; then
+  OUT="$T/mut" bash tests/mutants.sh | tee "$T/mutants.txt"
+  last=$(tail -1 "$T/mutants.txt"); k=$(echo "$last" | sed -n 's|^mutants: \([0-9]*\)/\([0-9]*\) killed$|\1 \2|p')
+  set -- $k; [ -n "${1:-}" ] && [ "$1" = "$2" ] && [ "$1" -gt 0 ] || { echo "dcpw mutants: not all killed ($last)"; exit 1; }
+else
+  OUT="$T/out" bash tests/run-tests.sh
+fi
