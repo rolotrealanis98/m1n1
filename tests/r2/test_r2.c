@@ -451,6 +451,40 @@ static void test_r21_fixes(void)
     t[2]=L+2*PAGE;perms[(L-RAM)/PAGE+2]=0;u64 rb=m.backend_reads;
     CHECK(submit(&ioq,r,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR&&m.backend_reads==rb);  /* chained page refused */
     perms[(L-RAM)/PAGE+2]=3;nx[4]=L+2*PAGE;CHECK(submit(&ioq,r,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR); /* overlap */
+    /* r4.14: each refusal above is recorded with its rule (the last one: data page over a list fragment) */
+    {const struct vnvme_prp_refusal *lr=&m.queue.prp_log[(m.queue.prp_refusal_total-1)%VNVME_PRP_LOG];
+     CHECK(m.queue.prp_refusal_total>=4&&lr->rule==VNVME_PRP_DATA_LIST&&lr->addr==L+2*PAGE&&lr->len==PAGE&&
+           lr->index==7&&lr->opcode==2&&lr->to_guest&&lr->ordinal==m.queue.prp_refusal_total);
+     const struct vnvme_prp_refusal *l3=&m.queue.prp_log[(m.queue.prp_refusal_total-2)%VNVME_PRP_LOG];
+     CHECK(l3->rule==VNVME_PRP_LIST_ADMIT&&l3->addr==L+2*PAGE&&l3->index==1);
+     const struct vnvme_prp_refusal *l2=&m.queue.prp_log[(m.queue.prp_refusal_total-3)%VNVME_PRP_LOG];
+     CHECK(l2->rule==VNVME_PRP_LIST_PTR&&l2->addr==L+3*PAGE+64&&l2->index==1);
+     const struct vnvme_prp_refusal *l1=&m.queue.prp_log[(m.queue.prp_refusal_total-4)%VNVME_PRP_LOG];
+     CHECK(l1->rule==VNVME_PRP_LIST_PTR&&l1->addr==L+PAGE-20&&l1->index==0);}
+    /* r4.14: a READ may name one destination page more than once (Windows' clustered in-page reads
+     * point already-resident pages at one dummy page). It succeeds; the repeated page holds the last
+     * copy, every other page its block, the skipped page is untouched. A list fragment or a queue as
+     * a destination is still refused (above / review-tests). */
+    {u64 rf=m.queue.prp_refusal_total,dd=m.queue.prp_dup_dest_reads,rb2=m.backend_reads;
+     nx[4]=DATA+5*PAGE;memset(ptr(DATA),0,32*PAGE);CHECK(submit(&ioq,r,true,NULL)==0);
+     for(unsigned b=0;b<32;b++){if(b==7)continue;pattern(DATA+b*PAGE,b==5?7:b);}
+     {const u8 *z=ptr(DATA+7*PAGE);for(unsigned i=0;i<PAGE;i++)CHECK(z[i]==0);}
+     CHECK(m.queue.prp_refusal_total==rf&&m.queue.prp_dup_dest_reads==dd+1&&m.queue.prp_dup_dest_last==DATA&&
+           m.backend_reads>rb2);
+     /* the first segment (PRP1) repeated later in the list, as in RUN B #33/#35 */
+     nx[4]=DATA;memset(ptr(DATA),0,32*PAGE);CHECK(submit(&ioq,r,true,NULL)==0);
+     for(unsigned b=1;b<32;b++){if(b==7)continue;pattern(DATA+b*PAGE,b);}
+     pattern(DATA,7);CHECK(m.queue.prp_refusal_total==rf&&m.queue.prp_dup_dest_reads==dd+2);
+     /* a repeated page that is not admitted is still refused, by data admission */
+     nx[4]=RAM+RAM_SIZE+PAGE;CHECK(submit(&ioq,r,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR);
+     CHECK(m.queue.prp_refusal_total==rf+1&&m.queue.prp_log[rf%VNVME_PRP_LOG].rule==VNVME_PRP_DATA_ADMIT);
+     /* a partial overlap (unaligned PRP1 repeated in the list) is still refused, rule data-overlap */
+     {u64 L5=L+5*PAGE;u64 *e5=ptr(L5);e5[0]=DATA;e5[1]=DATA+PAGE;e5[2]=DATA+2*PAGE;
+      struct vnvme_command p3=cmd(2,1,DATA+2048,0,0);p3.prp2=L5;p3.cdw12=2;u64 rb3=m.backend_reads;
+      CHECK(submit(&ioq,p3,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR&&m.backend_reads==rb3);
+      const struct vnvme_prp_refusal *x=&m.queue.prp_log[(m.queue.prp_refusal_total-1)%VNVME_PRP_LOG];
+      CHECK(x->rule==VNVME_PRP_DATA_DATA&&x->index==1&&x->addr==DATA&&x->other==DATA+2048&&x->to_guest);}
+     nx[4]=DATA+7*PAGE;}
     /* N2: shutdown after fatal posts nothing more (held AER discarded, admin CQ untouched) */
     fresh();enable(8);io_pair(8);
     {u16 aer;CHECK(submit(&aq,cmd(0x0c,0,0,0,0),true,&aer)==-1);}

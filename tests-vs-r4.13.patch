@@ -1,0 +1,384 @@
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/handoff/handoff-tests.c s1-resident-r4.14-native-rw-20261110/tests/handoff/handoff-tests.c
+--- s1-resident-r4.13-native-rw-20261110/tests/handoff/handoff-tests.c	2026-11-09 16:55:25
++++ s1-resident-r4.14-native-rw-20261110/tests/handoff/handoff-tests.c	2026-11-10 21:36:16
+@@ -103,7 +103,14 @@
+  u64 *list=gp(GUEST+24576);list[0]=GUEST+24576;list[1]=GUEST+28672;
+  c=cmd(VNVME_IO_READ,1,GUEST+16384);c.prp2=GUEST+24576;c.cdw12=2;
+  u64 before=controller.backend_reads;CHECK(command(1,c,true)==VNVME_SC_DATA_TRANSFER_ERROR);CHECK(controller.backend_reads==before);
+- list[0]=GUEST+16384;list[1]=GUEST+28672;CHECK(command(1,c,true)==VNVME_SC_DATA_TRANSFER_ERROR);CHECK(controller.backend_reads==before);
++ /* r4.14: an exact whole-page repeat of PRP1 in the list (Windows' in-page dummy page) is accepted;
++  * r2.1-r4.13 completed it 0x04. Segments are copied in order: PRP1's page ends with block 1 (the
++  * last copy wins) and the third page holds block 2. */
++ list[0]=GUEST+16384;list[1]=GUEST+28672;CHECK(command(1,c,true)==0);CHECK(controller.backend_reads>before);
++ pattern(GUEST+16384,1);pattern(GUEST+28672,2);
++ /* the same repeat behind an unaligned PRP1 is a partial overlap: still refused */
++ before=controller.backend_reads;c.prp1=GUEST+16384+512;list[0]=GUEST+16384;list[1]=GUEST+28672;list[2]=GUEST+32768;
++ CHECK(command(1,c,true)==VNVME_SC_DATA_TRANSFER_ERROR);CHECK(controller.backend_reads==before);c.prp1=GUEST+16384;
+  /* Adjacent disjoint queue/data pages are legal, as is old queue storage after reset. */
+  read_block(GUEST+16384,39,true);disable();admin_init(GUEST+20480,GUEST+24576,8);io_init(GUEST+28672,GUEST+32768,8);read_block(GUEST+8192,0,true);
+ }
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/native/run.py s1-resident-r4.14-native-rw-20261110/tests/native/run.py
+--- s1-resident-r4.13-native-rw-20261110/tests/native/run.py	2026-11-10 20:55:46
++++ s1-resident-r4.14-native-rw-20261110/tests/native/run.py	2026-11-10 21:35:24
+@@ -67,7 +67,7 @@
+ if os.environ.get("S1N_STAGE", "3") == "3":
+     # CHECK.md: split differential (flat reference, scattered guest pages), mid-request failure, FUA order
+     SCENARIOS += ["chk_split_diff", "chk_split_fua"] + [f"chk_split_error_{i}" for i in (1, 2, 5, 8)]
+-    SCENARIOS += [f"secA_rw_write_{i}" for i in range(6)] + ["secA_rw_read_max1", "secA_rw_random", "secA_stray_slots"]
++    SCENARIOS += [f"secA_rw_write_{i}" for i in range(6)] + ["secA_rw_read_max1", "secA_rw_random", "secA_stray_slots", "r414_dup_pages"]
+ else:
+     SCENARIOS += [f"secA_stage_guest_read_{i}" for i in range(6)]
+ 
+@@ -399,6 +399,10 @@
+     '            dma.prp_list[i - 1] = (u64)buf + (u64)(i + 1) * ANS_RO_BLOCK;')]),
+  ('r4_canary_missing',
+   [('s1/ans_ro.c', '        if (first < st.w_abs_min_first) st.w_abs_min_first = first;\n', '')]),
++ ('r414_write_src_overlap_allowed',
++  [('s1/hv_nvme_queue.c', 'if (!to_guest || n != VNVME_PAGE_SIZE ||', 'if (n != VNVME_PAGE_SIZE ||')]),
++ ('r414_read_dup_dest_refused',
++  [('s1/hv_nvme_queue.c', 'if (!to_guest || n != VNVME_PAGE_SIZE ||', 'if (true ||')]),
+  ('r4_vwc_dishonest', [('s1/hv_nvme_queue.c', '    data[525] = ctrl->caps.vwc ? 1 : 0;', '    data[525] = 0;')]),
+  ('r4_nsattr_wp_in_rw',
+   [('s1/hv_nvme_queue.c', '    data[99] = ctrl->caps.writable ? 0 : 1;', '    data[99] = 1;')]),
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/native/secA_cases.h s1-resident-r4.14-native-rw-20261110/tests/native/secA_cases.h
+--- s1-resident-r4.13-native-rw-20261110/tests/native/secA_cases.h	2026-11-10 20:54:54
++++ s1-resident-r4.14-native-rw-20261110/tests/native/secA_cases.h	2026-11-10 21:32:00
+@@ -253,8 +253,47 @@
+     if (ans_ro_state() == ANS_RO_FROZEN) r45_frozen();
+     else { CHECK(ans_ro_test_submit(false, 0x02) == 0); CHECK(F.nio == n + 1); }
+ }
++/* r4.14: one PRP list naming the same guest page twice. A READ may (Windows points the already
++ * resident pages of a clustered in-page read at one dummy page): it succeeds, the last copy wins.
++ * A WRITE may not: its source segments must stay disjoint (0x04, rule recorded, nothing reaches ANS). */
++static void r414_dup_pages(void)
++{
++    rw_up(rw_cfg(), 0);
++    CHECK(guest_write(100, 4, 5, 0) == 0); expect_guest(100, 4, 5);
++    unsigned w = F.io_writes, r = F.io_reads;
++    struct vnvme_command c = {.opcode = VNVME_IO_READ, .nsid = 1, .prp1 = RDATA, .cdw10 = 100, .cdw12 = 3, .prp2 = PRPL};
++    u64 e[3] = {RDATA + 4096, RDATA, RDATA + 3 * 4096};   /* block 102 lands on PRP1's page again */
++    memcpy(G(PRPL), e, sizeof(e));
++    memset(G(RDATA), 0, 4 * 4096);
++    CHECK(submit(1, c) == 0);
++    u8 b[4096];
++    gen_block(101, 5, b); CHECK(!memcmp(G(RDATA) + 4096, b, 4096));
++    gen_block(102, 5, b); CHECK(!memcmp(G(RDATA), b, 4096));
++    gen_block(103, 5, b); CHECK(!memcmp(G(RDATA) + 3 * 4096, b, 4096));
++    for (unsigned i = 0; i < 4096; i++) CHECK(G(RDATA)[2 * 4096 + i] == 0);
++    CHECK(F.io_reads > r && F.io_writes == w);
++    CHECK(controller.queue.prp_dup_dest_reads == 1 && controller.queue.prp_dup_dest_last == RDATA);
++    CHECK(controller.queue.prp_refusal_total == 0);
++    unsigned n = F.nio;
++    for (u32 i = 0; i < 4; i++) gen_block(100 + i, 6, G(WDATA) + 4096ULL * i);
++    c.opcode = VNVME_IO_WRITE; c.prp1 = WDATA;
++    u64 f[3] = {WDATA + 4096, WDATA, WDATA + 3 * 4096};
++    memcpy(G(PRPL), f, sizeof(f));
++    CHECK(submit(1, c) == VNVME_SC_DATA_TRANSFER_ERROR);
++    CHECK(F.nio == n && F.io_writes == w);                 /* nothing reached ANS */
++    const struct vnvme_prp_refusal *x = &controller.queue.prp_log[0];
++    CHECK(controller.queue.prp_refusal_total == 1 && controller.queue.prp_refusals[VNVME_PRP_DATA_DATA] == 1);
++    CHECK(x->rule == VNVME_PRP_DATA_DATA && x->index == 2 && x->addr == WDATA && x->len == 4096 &&
++          x->other == WDATA && !x->to_guest && x->opcode == VNVME_IO_WRITE && x->ordinal == 1);
++    expect_guest(100, 4, 5);                                /* old data, session live */
++    CHECK(io_cmd(VNVME_IO_FLUSH, 0, 1, 0, 0) == 0);
++    expect_media(100, 4, 5);
++    outside_untouched();
++    live_policy();
++}
+ static bool secA_dispatch(const char *s)
+ {
++    if (!strcmp(s, "r414_dup_pages")) { r414_dup_pages(); return true; }
+     if (!strncmp(s, "secA_raw_ro_op_", 15)) { secA_raw_ro_op((u8)atoi(s + 15)); return true; }
+     if (!strncmp(s, "secA_ro_guest_read_", 19)) secA_ro_guest_read(atoi(s + 19), false);
+     else if (!strncmp(s, "secA_stage_guest_read_", 22)) secA_ro_guest_read(atoi(s + 22), true);
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/r2/run.py s1-resident-r4.14-native-rw-20261110/tests/r2/run.py
+--- s1-resident-r4.13-native-rw-20261110/tests/r2/run.py	2026-11-09 19:18:27
++++ s1-resident-r4.14-native-rw-20261110/tests/r2/run.py	2026-11-10 21:35:24
+@@ -36,6 +36,8 @@
+  ('cq_ack_blocked_after_cfs', N, 'if (!cq && (m->regs.csts&CSTS_CFS)) why|=S1DG_DB_CFS;', 'if (m->regs.csts&CSTS_CFS) why|=S1DG_DB_CFS;'),
+  ('prp_list_offset_rejected', Q, 'if (!list || (list & 7) || frags == VNVME_MAX_LIST_FRAGS) return false;', 'if (!list || (list & (VNVME_PAGE_SIZE - 1)) || frags == VNVME_MAX_LIST_FRAGS) return false;'),
+  ('prp_chain_offset_accepted', Q, '                if (frags && (list & (VNVME_PAGE_SIZE - 1))) return false; /* chained: page aligned */\n', ''),
++ ('r414_read_dup_dest_refused', Q, 'if (!to_guest || n != VNVME_PAGE_SIZE ||', 'if (true ||'),
++ ('r414_rule_not_recorded', Q, '    ctrl->prp_refusals[rule]++;', '    ctrl->prp_refusals[rule]++; rule = 0;'),
+  ('prp_fragment_overlap_unchecked', Q, '        for (size_t i = 0; i < frags; i++)\n            if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;\n', ''),
+  ('intms_not_reset', N, 'm->regs.csts=0;m->regs.cc=value;m->regs.intms=0;', 'm->regs.csts=0;m->regs.cc=value;'),
+  ('iosqes_strict_at_enable', N, 'return (sq==0||sq==6) && (cq==0||cq==4);', 'return sq==6 && cq==4;'),
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/r2/test_r2.c s1-resident-r4.14-native-rw-20261110/tests/r2/test_r2.c
+--- s1-resident-r4.13-native-rw-20261110/tests/r2/test_r2.c	2026-11-09 16:56:01
++++ s1-resident-r4.14-native-rw-20261110/tests/r2/test_r2.c	2026-11-10 21:36:16
+@@ -451,6 +451,40 @@
+     t[2]=L+2*PAGE;perms[(L-RAM)/PAGE+2]=0;u64 rb=m.backend_reads;
+     CHECK(submit(&ioq,r,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR&&m.backend_reads==rb);  /* chained page refused */
+     perms[(L-RAM)/PAGE+2]=3;nx[4]=L+2*PAGE;CHECK(submit(&ioq,r,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR); /* overlap */
++    /* r4.14: each refusal above is recorded with its rule (the last one: data page over a list fragment) */
++    {const struct vnvme_prp_refusal *lr=&m.queue.prp_log[(m.queue.prp_refusal_total-1)%VNVME_PRP_LOG];
++     CHECK(m.queue.prp_refusal_total>=4&&lr->rule==VNVME_PRP_DATA_LIST&&lr->addr==L+2*PAGE&&lr->len==PAGE&&
++           lr->index==7&&lr->opcode==2&&lr->to_guest&&lr->ordinal==m.queue.prp_refusal_total);
++     const struct vnvme_prp_refusal *l3=&m.queue.prp_log[(m.queue.prp_refusal_total-2)%VNVME_PRP_LOG];
++     CHECK(l3->rule==VNVME_PRP_LIST_ADMIT&&l3->addr==L+2*PAGE&&l3->index==1);
++     const struct vnvme_prp_refusal *l2=&m.queue.prp_log[(m.queue.prp_refusal_total-3)%VNVME_PRP_LOG];
++     CHECK(l2->rule==VNVME_PRP_LIST_PTR&&l2->addr==L+3*PAGE+64&&l2->index==1);
++     const struct vnvme_prp_refusal *l1=&m.queue.prp_log[(m.queue.prp_refusal_total-4)%VNVME_PRP_LOG];
++     CHECK(l1->rule==VNVME_PRP_LIST_PTR&&l1->addr==L+PAGE-20&&l1->index==0);}
++    /* r4.14: a READ may name one destination page more than once (Windows' clustered in-page reads
++     * point already-resident pages at one dummy page). It succeeds; the repeated page holds the last
++     * copy, every other page its block, the skipped page is untouched. A list fragment or a queue as
++     * a destination is still refused (above / review-tests). */
++    {u64 rf=m.queue.prp_refusal_total,dd=m.queue.prp_dup_dest_reads,rb2=m.backend_reads;
++     nx[4]=DATA+5*PAGE;memset(ptr(DATA),0,32*PAGE);CHECK(submit(&ioq,r,true,NULL)==0);
++     for(unsigned b=0;b<32;b++){if(b==7)continue;pattern(DATA+b*PAGE,b==5?7:b);}
++     {const u8 *z=ptr(DATA+7*PAGE);for(unsigned i=0;i<PAGE;i++)CHECK(z[i]==0);}
++     CHECK(m.queue.prp_refusal_total==rf&&m.queue.prp_dup_dest_reads==dd+1&&m.queue.prp_dup_dest_last==DATA&&
++           m.backend_reads>rb2);
++     /* the first segment (PRP1) repeated later in the list, as in RUN B #33/#35 */
++     nx[4]=DATA;memset(ptr(DATA),0,32*PAGE);CHECK(submit(&ioq,r,true,NULL)==0);
++     for(unsigned b=1;b<32;b++){if(b==7)continue;pattern(DATA+b*PAGE,b);}
++     pattern(DATA,7);CHECK(m.queue.prp_refusal_total==rf&&m.queue.prp_dup_dest_reads==dd+2);
++     /* a repeated page that is not admitted is still refused, by data admission */
++     nx[4]=RAM+RAM_SIZE+PAGE;CHECK(submit(&ioq,r,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR);
++     CHECK(m.queue.prp_refusal_total==rf+1&&m.queue.prp_log[rf%VNVME_PRP_LOG].rule==VNVME_PRP_DATA_ADMIT);
++     /* a partial overlap (unaligned PRP1 repeated in the list) is still refused, rule data-overlap */
++     {u64 L5=L+5*PAGE;u64 *e5=ptr(L5);e5[0]=DATA;e5[1]=DATA+PAGE;e5[2]=DATA+2*PAGE;
++      struct vnvme_command p3=cmd(2,1,DATA+2048,0,0);p3.prp2=L5;p3.cdw12=2;u64 rb3=m.backend_reads;
++      CHECK(submit(&ioq,p3,true,NULL)==VNVME_SC_DATA_TRANSFER_ERROR&&m.backend_reads==rb3);
++      const struct vnvme_prp_refusal *x=&m.queue.prp_log[(m.queue.prp_refusal_total-1)%VNVME_PRP_LOG];
++      CHECK(x->rule==VNVME_PRP_DATA_DATA&&x->index==1&&x->addr==DATA&&x->other==DATA+2048&&x->to_guest);}
++     nx[4]=DATA+7*PAGE;}
+     /* N2: shutdown after fatal posts nothing more (held AER discarded, admin CQ untouched) */
+     fresh();enable(8);io_pair(8);
+     {u16 aer;CHECK(submit(&aq,cmd(0x0c,0,0,0,0),true,&aer)==-1);}
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/storage/s0/MANIFEST.json s1-resident-r4.14-native-rw-20261110/tests/storage/s0/MANIFEST.json
+--- s1-resident-r4.13-native-rw-20261110/tests/storage/s0/MANIFEST.json	2026-11-10 20:55:03
++++ s1-resident-r4.14-native-rw-20261110/tests/storage/s0/MANIFEST.json	2026-11-10 21:38:49
+@@ -48,11 +48,11 @@
+     "run.py": "9caeb62271bf1ee3557352730888ddf6f02bcc63b42d5c16914aa26b997f6414",
+     "src/guest_memory.c": "9c03edcd440e0838dd07e64bef49eefb5d346c290b4eeca27c2c65ccd9d5d36c",
+     "src/guest_memory.h": "1a30526fd36587e81fcd0930526463b613d9f022604b06cf07ccb22c0015f73f",
+-    "src/hv_nvme_queue.c": "1b66466f81ec5777efa6b30d462b718af62428c9471790a05a9e3fe4e2728fb0",
+-    "src/hv_nvme_queue.h": "6faf91719f8c584ef69492155a893b4706cdeac3d8791a8aa00798adce2e34c2",
++    "src/hv_nvme_queue.c": "d3ecdafb81c958b3fc8e49eca9c7651a9874dcb1076e4ddb953f331eda0e2954",
++    "src/hv_nvme_queue.h": "da251480e6b9f3dfa281b0fa65dde38273ccce394c385475c162ed7b2eed303c",
+     "src/ram_disk.c": "b2e96d255d4691d7e27407d6f9f48a4ad3e5ac5b5c6f136288f09f023ad60078",
+     "src/ram_disk.h": "d42a06974a23e6f680ed99e612983f7f8daa53953596078d2a512d896578b66e",
+-    "test_s0.c": "e911a48be7bd09c43190e2f17a66c7dae71d8d87aafff5a997317acac710d011",
++    "test_s0.c": "dba0ad2b532a38d2bdf00e9d52fae9acfc33005e6b6b4ad990bf9dcfa630f5a6",
+     "upstream/LICENSE": "11ca423a564b52d3b7f260398baa20d016c25ae180fbdd0067c27b7d1ed7b420",
+     "upstream/hv_nvme_queue.c": "915fdb08bffe15165e5b283dd8fb23e14f13d90ba63616712e4428e745daa6ee",
+     "upstream/hv_nvme_queue.h": "8a9273956c5893a513bbcaf1f02ffc9711cebbee8755adb539f89367a8124c8c",
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.c s1-resident-r4.14-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.c
+--- s1-resident-r4.13-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.c	2026-11-10 20:55:03
++++ s1-resident-r4.14-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.c	2026-11-10 21:38:49
+@@ -220,6 +220,7 @@
+     u64 addr[VNVME_MAX_XFER_BLOCKS + 1];
+     size_t len[VNVME_MAX_XFER_BLOCKS + 1];
+     size_t count;
++    bool dup_dest; /* r4.14: a destination segment repeats an earlier one (to_guest only) */
+ };
+ /* r4: data buffer for READ/WRITE: the backend's private transfer buffer when it has one
+  * (single copy), else the 128 KiB frontend bounce (fixture, r2.2 behaviour). */
+@@ -243,10 +244,21 @@
+ {
+     return plan_prps_dir(ctrl, cmd, total, plan, sizeof(ctrl->bounce), true);
+ }
+-static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
+-                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
++/* r4.14: the rule each check below enforces is noted just before it (PRP_AT), so a refusal can be
++ * reported by rule; plan_prps_dir records it. Static: single-threaded under bhl, like the plan. */
++static struct {
++    u8 rule;
++    u16 index;
++    u64 addr, len, other;
++} prp_at;
++#define PRP_AT(r, i, a, l, o)                                                                       \
++    (prp_at.rule = (r), prp_at.index = (u16)(i), prp_at.addr = (u64)(a), prp_at.len = (u64)(l),     \
++     prp_at.other = (u64)(o))
++static bool plan_prps_body(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
++                           size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
+ {
+     memset(plan, 0, sizeof(*plan));
++    PRP_AT(VNVME_PRP_SIZE, 0, cmd->prp1, total, capacity);
+     if (!total || total > capacity || !cmd->prp1)
+         return false;
+     size_t first = VNVME_PAGE_SIZE - (cmd->prp1 & (VNVME_PAGE_SIZE - 1));
+@@ -261,20 +273,24 @@
+     size_t frags = 0;
+     if (rest) {
+         size_t count = (rest + VNVME_PAGE_SIZE - 1) / VNVME_PAGE_SIZE; /* <= 256 */
++        PRP_AT(VNVME_PRP_PRP2, 1, cmd->prp2, count, 0);
+         if (!cmd->prp2 || count > VNVME_MAX_XFER_BLOCKS) return false;
+         if (count == 1) {
++            PRP_AT(VNVME_PRP_PRP2_ALIGN, 1, cmd->prp2, VNVME_PAGE_SIZE, 0);
+             if (cmd->prp2 & (VNVME_PAGE_SIZE - 1)) return false; /* data pointer */
+             entries[0] = cmd->prp2;
+         } else {
+             u64 list = cmd->prp2;
+             size_t got = 0;
+             while (got < count) {
++                PRP_AT(VNVME_PRP_LIST_PTR, frags, list, 0, frags);
+                 if (!list || (list & 7) || frags == VNVME_MAX_LIST_FRAGS) return false;
+                 if (frags && (list & (VNVME_PAGE_SIZE - 1))) return false; /* chained: page aligned */
+                 size_t in_page = (VNVME_PAGE_SIZE - (size_t)(list & (VNVME_PAGE_SIZE - 1))) / sizeof(u64);
+                 size_t need = count - got;
+                 bool last = need <= in_page;
+                 size_t n = last ? need : in_page;          /* 1..512 entries, <= 4096 bytes */
++                PRP_AT(VNVME_PRP_LIST_ADMIT, frags, list, n * sizeof(u64), 0);
+                 const u8 *src = guest_span(ctrl, list, n * sizeof(u64), false);
+                 if (!src) return false;
+                 frag_addr[frags] = list;
+@@ -294,21 +310,68 @@
+         size_t n = plan->count ? (remaining < VNVME_PAGE_SIZE ? remaining : VNVME_PAGE_SIZE) : first;
+         if (plan->count) {
+             addr = entries[plan->count - 1];
++            PRP_AT(VNVME_PRP_ENTRY_ALIGN, plan->count, addr, n, 0);
+             if (!addr || (addr & (VNVME_PAGE_SIZE - 1))) return false;
+         }
++        PRP_AT(VNVME_PRP_COUNT, plan->count, addr, n, 0);
+         if (plan->count >= VNVME_MAX_XFER_BLOCKS + 1) return false;
++        PRP_AT(VNVME_PRP_DATA_ADMIT, plan->count, addr, n, 0);
+         u8 *ptr = guest_span(ctrl, addr, n, to_guest);
++        if (ptr) PRP_AT(VNVME_PRP_DATA_QUEUE, plan->count, addr, n, 0);
+         if (!ptr || overlaps_queue(ctrl, addr, n)) return false;
++        PRP_AT(VNVME_PRP_DATA_LIST, plan->count, addr, n, frags ? frag_addr[0] : 0);
+         for (size_t i = 0; i < frags; i++)
+             if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;
++        /* r4.14: in the device-to-guest direction (READ, Identify, log pages) a data segment may be
++         * an exact repeat of an earlier whole, page-aligned segment. Windows' memory manager does this
++         * for clustered in-page reads: pages of the cluster that are already resident are pointed at
++         * one system-wide dummy page, so one PRP list names that page several times (and a later read
++         * can start on it). Every segment has been admitted (guest_span, write) on its own above and
++         * still may not touch a queue or a list fragment; a repeated destination only means the last
++         * copy wins, as on a real controller. r2.1-r4.13 refused this with 0x04 (31 READs in RUN B
++         * 20261110-211000, 248 in 20261110-212026). Any other overlap (partial, unaligned PRP1) and
++         * every overlap between WRITE source segments keep the r2.1 refusal. */
+         for (size_t i = 0; i < plan->count; i++)
+-            if (overlaps(addr, n, plan->addr[i], plan->len[i])) return false;
++            if (overlaps(addr, n, plan->addr[i], plan->len[i])) {
++                if (!to_guest || n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i]) {
++                    PRP_AT(VNVME_PRP_DATA_DATA, plan->count, addr, n, plan->addr[i]);
++                    return false;
++                }
++                plan->dup_dest = true;
++            }
+         plan->addr[plan->count] = addr;
+         plan->ptr[plan->count] = ptr;
+         plan->len[plan->count++] = n;
+         remaining -= n;
+     }
+     return true;
++}
++/* r4.14: plan_prps_body, recording which rule refused (count by rule, last VNVME_PRP_LOG refusals),
++ * and READs that repeat a destination page. Same result as plan_prps_body. */
++static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
++                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
++{
++    if (plan_prps_body(ctrl, cmd, total, plan, capacity, to_guest)) {
++        if (plan->dup_dest && cmd->opcode == VNVME_IO_READ) {
++            ctrl->prp_dup_dest_reads++;
++            ctrl->prp_dup_dest_last = cmd->prp1;
++        }
++        return true;
++    }
++    u8 rule = prp_at.rule < VNVME_PRP_RULES ? prp_at.rule : VNVME_PRP_NONE;
++    ctrl->prp_refusals[rule]++;
++    struct vnvme_prp_refusal *r = &ctrl->prp_log[ctrl->prp_refusal_total++ % VNVME_PRP_LOG];
++    r->ordinal = ctrl->prp_refusal_total;
++    r->command = ctrl->stats.commands;
++    r->addr = prp_at.addr;
++    r->len = prp_at.len;
++    r->other = prp_at.other;
++    r->cid = cmd->cid;
++    r->index = prp_at.index;
++    r->opcode = cmd->opcode;
++    r->rule = rule;
++    r->to_guest = to_guest;
++    return false;
+ }
+ static void copy_to_plan(const struct prp_plan *plan, const u8 *buffer)
+ {
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.h s1-resident-r4.14-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.h
+--- s1-resident-r4.13-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.h	2026-11-10 20:55:03
++++ s1-resident-r4.14-native-rw-20261110/tests/storage/s0/src/hv_nvme_queue.h	2026-11-10 21:38:49
+@@ -211,6 +211,37 @@
+     bool owner_kick_pending;
+ };
+ 
++/* r4.14: the PRP planner rule that refused a transfer (completed DATA TRANSFER ERROR, 0x04).
++ * Recorded per refusal (count by rule + a small log) so the firmware status lines can name it. */
++enum vnvme_prp_rule {
++    VNVME_PRP_NONE = 0,
++    VNVME_PRP_SIZE,         /* total 0, above the transfer buffer, or PRP1 zero */
++    VNVME_PRP_PRP2,         /* more than one page but PRP2 zero, or too many pages */
++    VNVME_PRP_PRP2_ALIGN,   /* two-page transfer: PRP2 (data pointer) not page aligned */
++    VNVME_PRP_LIST_PTR,     /* list pointer zero / not qword aligned / chained not page aligned / >2 fragments */
++    VNVME_PRP_LIST_ADMIT,   /* list fragment refused by guest-memory admission */
++    VNVME_PRP_ENTRY_ALIGN,  /* a list entry zero or not page aligned */
++    VNVME_PRP_COUNT,        /* more segments than the plan holds */
++    VNVME_PRP_DATA_ADMIT,   /* data segment refused by guest-memory admission */
++    VNVME_PRP_DATA_QUEUE,   /* data segment overlaps an active SQ/CQ */
++    VNVME_PRP_DATA_LIST,    /* data segment overlaps a consumed PRP list fragment */
++    VNVME_PRP_DATA_DATA,    /* data segment overlaps an earlier one (READ: other than an exact whole-page repeat) */
++    VNVME_PRP_RULES
++};
++#define VNVME_PRP_LOG 16
++struct vnvme_prp_refusal {
++    u64 ordinal;  /* 1-based refusal number (ctrl->prp_refusal_total after it) */
++    u64 command;  /* ctrl->stats.commands at the time (identifies the command) */
++    u64 addr;     /* the segment / list fragment / pointer that failed */
++    u64 len;
++    u64 other;    /* rule specific: capacity, the overlapped range base, the fragment count */
++    u16 cid;
++    u16 index;    /* data segment (0 = PRP1) or list fragment index */
++    u8 opcode;
++    u8 rule;
++    bool to_guest;
++};
++
+ struct vnvme_ctrl {
+     u64 namespace_blocks;
+     const struct vnvme_backend_ops *ops;
+@@ -241,6 +272,12 @@
+     bool wce;
+     u64 refused_reads; /* guest past-end READ: nonterminal, no backend I/O */
+     u64 backend_writes, backend_flushes, fua_flushes;
++    /* r4.14: PRP planner refusals by rule, the last VNVME_PRP_LOG of them, and READs whose
++     * destination segments repeat a guest page (allowed; see plan_prps_dir). */
++    u64 prp_refusals[VNVME_PRP_RULES];
++    u64 prp_refusal_total;
++    struct vnvme_prp_refusal prp_log[VNVME_PRP_LOG];
++    u64 prp_dup_dest_reads, prp_dup_dest_last;
+     u8 bounce[VNVME_MAX_BLOCKS * VNVME_LBA_SIZE] ALIGNED(VNVME_PAGE_SIZE);
+ };
+ 
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/storage/s0/test_s0.c s1-resident-r4.14-native-rw-20261110/tests/storage/s0/test_s0.c
+--- s1-resident-r4.13-native-rw-20261110/tests/storage/s0/test_s0.c	2026-11-10 20:54:15
++++ s1-resident-r4.14-native-rw-20261110/tests/storage/s0/test_s0.c	2026-11-10 21:36:02
+@@ -301,7 +301,12 @@
+     memcpy(mem(LIST),entries,2*sizeof(u64));
+     read_reject(cmd(VNVME_IO_READ,1,0,3,DATA,LIST),VNVME_SC_DATA_TRANSFER_ERROR);
+     entries[1]=DATA+PAGE;memcpy(mem(LIST),entries,2*sizeof(u64));
+-    read_reject(cmd(VNVME_IO_READ,1,0,3,DATA,LIST),VNVME_SC_DATA_TRANSFER_ERROR);
++    /* r4.14: an exact whole-page repeat of a READ destination is accepted (Windows points the
++     * resident pages of a clustered in-page read at one dummy page); r2.1-r4.13 completed it 0x04.
++     * The last copy wins, the third page is untouched; the partial overlap below is still refused. */
++    {memset(mem(DATA),0x5c,32*PAGE);unsigned b4=reads;
++     CHECK(submit(1,cmd(VNVME_IO_READ,1,0,3,DATA,LIST))==0);CHECK(reads>b4);
++     pattern(DATA,0,1);pattern(DATA+PAGE,2,1);unchanged(DATA+2*PAGE,30*PAGE,0x5c);}
+     entries[0]=DATA;entries[1]=DATA+PAGE;memcpy(mem(LIST),entries,2*sizeof(u64));
+     read_reject(cmd(VNVME_IO_READ,1,0,2,DATA+19,LIST),VNVME_SC_DATA_TRANSFER_ERROR);
+     /* Writable metadata: alias rejection must not depend on a read-only list. */
+diff -ruN -x __pycache__ -x last.json s1-resident-r4.13-native-rw-20261110/tests/storage/s1/MANIFEST.json s1-resident-r4.14-native-rw-20261110/tests/storage/s1/MANIFEST.json
+--- s1-resident-r4.13-native-rw-20261110/tests/storage/s1/MANIFEST.json	2026-11-10 20:55:03
++++ s1-resident-r4.14-native-rw-20261110/tests/storage/s1/MANIFEST.json	2026-11-10 21:38:49
+@@ -35,9 +35,9 @@
+     "upstream/hv_pci.c": "9ab55c0505a07957e6f87fc4d6a91998eb39d66bc2cd85ecc577152acb7bf58f"
+   },
+   "s0_dependencies": {
+-    "MANIFEST.json": "8812989191d02ddf17f73ca0d86a052f06a086234ceb908509066040c1ef0f8b",
+-    "src/hv_nvme_queue.c": "1b66466f81ec5777efa6b30d462b718af62428c9471790a05a9e3fe4e2728fb0",
+-    "src/hv_nvme_queue.h": "6faf91719f8c584ef69492155a893b4706cdeac3d8791a8aa00798adce2e34c2",
++    "MANIFEST.json": "d042db27d243b72e23d2c5aa8916db260ebe708ecff446d8953c9fd4aa851fe2",
++    "src/hv_nvme_queue.c": "d3ecdafb81c958b3fc8e49eca9c7651a9874dcb1076e4ddb953f331eda0e2954",
++    "src/hv_nvme_queue.h": "da251480e6b9f3dfa281b0fa65dde38273ccce394c385475c162ed7b2eed303c",
+     "src/ram_disk.c": "b2e96d255d4691d7e27407d6f9f48a4ad3e5ac5b5c6f136288f09f023ad60078",
+     "src/ram_disk.h": "d42a06974a23e6f680ed99e612983f7f8daa53953596078d2a512d896578b66e",
+     "src/guest_memory.c": "9c03edcd440e0838dd07e64bef49eefb5d346c290b4eeca27c2c65ccd9d5d36c",

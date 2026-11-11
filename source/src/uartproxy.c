@@ -134,8 +134,14 @@ int uartproxy_run(struct uartproxy_msg_start *start)
 {
     bool exception = start && start->reason != START_BOOT;
     if (exception) __atomic_add_fetch(&uartproxy_storage_exceptions, 1, __ATOMIC_ACQ_REL);
+    /* r4.8: expose only THIS exception's context block to the locked host link for the session. */
+    if (exception)
+        s1n_link_exc_ctx((u64)start->info, sizeof(struct exc_info));
     int ret = uartproxy_run_inner(start);
-    if (exception) __atomic_sub_fetch(&uartproxy_storage_exceptions, 1, __ATOMIC_ACQ_REL);
+    if (exception) {
+        s1n_link_exc_ctx(0, 0);
+        __atomic_sub_fetch(&uartproxy_storage_exceptions, 1, __ATOMIC_ACQ_REL);
+    }
     return ret;
 }
 
@@ -239,7 +245,8 @@ static int uartproxy_run_inner(struct uartproxy_msg_start *start)
                     printf("Proxy req error: %d\n", ret);
                 break;
             case REQ_MEMREAD:
-                if (!s1n_link_raw()) { reply.status = ST_BADCMD; break; }
+                if (!s1n_link_mem_ok(request.mrequest.addr, request.mrequest.size)) {
+                    reply.status = ST_BADCMD; break; }
                 if (request.mrequest.size == 0)
                     break;
                 exc_count = 0;
@@ -251,7 +258,7 @@ static int uartproxy_run_inner(struct uartproxy_msg_start *start)
                 reply.mreply.dchecksum = checksum_val;
                 break;
             case REQ_MEMWRITE:
-                if (!s1n_link_raw()) {
+                if (!s1n_link_mem_ok(request.mrequest.addr, request.mrequest.size)) {
                     if (!s1n_link_discard(request.mrequest.size, disable_data_csums, discard_read))
                         return -1; /* truncated stream cannot safely resume parsing */
                     reply.status = ST_BADCMD;

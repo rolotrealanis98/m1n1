@@ -76,6 +76,21 @@ bool hv_win_storage_claims_spi(u32 gsiv)
 {
     return attempted && gsiv==HV_S1_GSIV;
 }
+/* r4.8: is [addr, addr+size) entirely inside ONE registered guest-RAM range? Used by the link lock to
+ * admit host exception-handler access to guest memory while the storage session is armed. Reads only the
+ * ranges the launcher registered at PREP (identity IPA==PA); never the controller MMIO, resident or
+ * protected ranges (those are not in ram[]). False until a registration exists. */
+bool hv_win_storage_guest_ram_contains(u64 addr, u64 size)
+{
+    if(!attempted || !size || addr>UINT64_MAX-size)
+        return false;
+    for(size_t i=0;i<memory.nr_ram;i++) {
+        struct hv_sm_range r=memory.ram[i];
+        if(r.size && addr>=r.base && size<=r.size && addr-r.base<=r.size-size)
+            return true;
+    }
+    return false;
+}
 static bool access(struct exc_info *ctx,u64 address,u64 *value,bool write,int width)
 {
     (void)ctx;
@@ -172,4 +187,12 @@ u64 hv_win_storage_stat(u64 index)
     case 12:return controller.queue.refused_reads; /* r4.6: nonterminal guest READ range errors */
     default:return UINT64_MAX;
     }
+}
+
+/* r4.11 diagnostics: read-only view of the model for hv_win_status.c (firmware-only reporting). */
+const struct s1_model *hv_win_storage_model(bool *is_attempted, bool *is_ready)
+{
+    *is_attempted = attempted;
+    *is_ready = ready;
+    return &controller;
 }

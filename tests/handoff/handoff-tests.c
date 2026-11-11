@@ -103,7 +103,14 @@ static void test_aliases(void){
  u64 *list=gp(GUEST+24576);list[0]=GUEST+24576;list[1]=GUEST+28672;
  c=cmd(VNVME_IO_READ,1,GUEST+16384);c.prp2=GUEST+24576;c.cdw12=2;
  u64 before=controller.backend_reads;CHECK(command(1,c,true)==VNVME_SC_DATA_TRANSFER_ERROR);CHECK(controller.backend_reads==before);
- list[0]=GUEST+16384;list[1]=GUEST+28672;CHECK(command(1,c,true)==VNVME_SC_DATA_TRANSFER_ERROR);CHECK(controller.backend_reads==before);
+ /* r4.14: an exact whole-page repeat of PRP1 in the list (Windows' in-page dummy page) is accepted;
+  * r2.1-r4.13 completed it 0x04. Segments are copied in order: PRP1's page ends with block 1 (the
+  * last copy wins) and the third page holds block 2. */
+ list[0]=GUEST+16384;list[1]=GUEST+28672;CHECK(command(1,c,true)==0);CHECK(controller.backend_reads>before);
+ pattern(GUEST+16384,1);pattern(GUEST+28672,2);
+ /* the same repeat behind an unaligned PRP1 is a partial overlap: still refused */
+ before=controller.backend_reads;c.prp1=GUEST+16384+512;list[0]=GUEST+16384;list[1]=GUEST+28672;list[2]=GUEST+32768;
+ CHECK(command(1,c,true)==VNVME_SC_DATA_TRANSFER_ERROR);CHECK(controller.backend_reads==before);c.prp1=GUEST+16384;
  /* Adjacent disjoint queue/data pages are legal, as is old queue storage after reset. */
  read_block(GUEST+16384,39,true);disable();admin_init(GUEST+20480,GUEST+24576,8);io_init(GUEST+28672,GUEST+32768,8);read_block(GUEST+8192,0,true);
 }

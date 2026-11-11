@@ -9,9 +9,12 @@
 int s1n_test_cpu;
 bool s1n_test_exception;
 #endif
+/* r4.8: the storage lease's guest-RAM containment query (hv_win_storage.c; host tests provide a stub). */
+bool hv_win_storage_guest_ram_contains(u64 addr, u64 size);
 
 static bool locked, prep_used, start_used;
 static u64 refusals;
+static u64 exc_ctx_addr, exc_ctx_size;
 bool s1n_storage_context(void)
 {
 #ifdef ANS_RO_HOST_TEST
@@ -28,6 +31,37 @@ u64 s1n_link_refusals(void) { return refusals; }
 bool s1n_link_raw(void)
 {
     if (!locked) return true;
+    refusals++;
+    return false;
+}
+
+void s1n_link_exc_ctx(u64 addr, u64 size)
+{
+    exc_ctx_addr = addr;
+    exc_ctx_size = size;
+}
+
+static bool within(u64 base, u64 len, u64 addr, u64 size)
+{
+    /* [addr, addr+size) entirely inside [base, base+len); all precomputed, no overflow (size>0). */
+    return len && addr >= base && size <= len && addr - base <= len - size;
+}
+
+bool s1n_link_mem_ok(u64 addr, u64 size)
+{
+    if (!locked || size == 0)
+        return true;
+    if (addr > UINT64_MAX - size) { refusals++; return false; }
+    /* Admitted ONLY during a guest-exception session (exc_ctx_size != 0 is the session bracket), and
+     * only for the context block the resident passed for THIS exception, or guest RAM registered by the
+     * active storage lease. Outside an exception session, and for controller MMIO / the resident / the
+     * image in any case, access stays refused. */
+    if (exc_ctx_size) {
+        if (within(exc_ctx_addr, exc_ctx_size, addr, size))
+            return true;
+        if (hv_win_storage_guest_ram_contains(addr, size))
+            return true;
+    }
     refusals++;
     return false;
 }

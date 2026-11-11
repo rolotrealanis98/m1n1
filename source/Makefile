@@ -145,6 +145,7 @@ HV_OBJECTS := $(patsubst %,hv/%, \
 	win/hv_win_storage_mem.o \
 	win/hv_win_storage.o \
 	win/hv_win_storage_native.o \
+	win/hv_win_status.o \
 	win/s1/hv_nvme_queue.o \
 	win/s1/hv_nvme.o \
 	win/s1/hv_pci.o \

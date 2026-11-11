@@ -1,0 +1,373 @@
+File s1-resident-r4.13-native-rw-20261110/source/data/bootlogo_128.png is a unknown type while file s1-resident-r4.14-native-rw-20261110/source/data/bootlogo_128.png is a unknown type
+File s1-resident-r4.13-native-rw-20261110/source/data/bootlogo_256.png is a unknown type while file s1-resident-r4.14-native-rw-20261110/source/data/bootlogo_256.png is a unknown type
+File s1-resident-r4.13-native-rw-20261110/source/data/bootlogo_48.png is a unknown type while file s1-resident-r4.14-native-rw-20261110/source/data/bootlogo_48.png is a unknown type
+diff -ruN -x build -x *.o -x *.dSYM -x test_intx -x test_sysreg -x test_pmu_rewrite -x test_vgic3 s1-resident-r4.13-native-rw-20261110/source/src/hv/hv_exc.c s1-resident-r4.14-native-rw-20261110/source/src/hv/hv_exc.c
+--- s1-resident-r4.13-native-rw-20261110/source/src/hv/hv_exc.c	2026-11-10 20:51:59
++++ s1-resident-r4.14-native-rw-20261110/source/src/hv/hv_exc.c	2026-11-10 21:28:59
+@@ -237,7 +237,7 @@
+     struct hv_esc_info e;
+     hv_esc_decode(ctx->esr, ctx->afsr1, &e);
+ 
+-    printf("HV/win r4.13 %s #%ld cpu%ld reason %u type %u EC 0x%02x ESR 0x%lx PC 0x%lx link %s", what,
++    printf("HV/win r4.14 %s #%ld cpu%ld reason %u type %u EC 0x%02x ESR 0x%lx PC 0x%lx link %s", what,
+            (long)n, (long)ctx->cpu_id, reason, type, e.ec, ctx->esr, ctx->elr,
+            s1n_link_locked() ? "locked" : "open");
+     if (e.is_sysreg)
+@@ -790,7 +790,7 @@
+         return;
+     static const char *const mname[16] = {"EL0t", "?", "?", "?", "EL1t", "EL1h"};
+     u32 m = ctx->spsr & 0xf;
+-    printf("HV/win r4.13 EC 0x%02x #%ld%s %s: cpu%ld ESR 0x%lx PC 0x%lx FAR 0x%lx from %s", ec, (long)n,
++    printf("HV/win r4.14 EC 0x%02x #%ld%s %s: cpu%ld ESR 0x%lx PC 0x%lx FAR 0x%lx from %s", ec, (long)n,
+            fresh ? " NEW-SITE" : "", what, (long)ctx->cpu_id, ctx->esr, ctx->elr, ctx->far,
+            (ctx->spsr & 0x10) ? "AArch32" : (mname[m] ? mname[m] : "?"));
+     if (vbar)
+@@ -1126,7 +1126,7 @@
+ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
+ {
+     static const char *const mname[16] = {"EL0t", "?", "?", "?", "EL1t", "EL1h"};
+-    const char *P = "HV/win r4.13";
++    const char *P = "HV/win r4.14";
+     u32 m = ctx->spsr & 0xf;
+     st_n++;
+     printf("%s ST #%lu t+%lus PC 0x%lx LR 0x%lx SP0 0x%lx SP1 0x%lx PSTATE 0x%lx (%s DAIF %lx) | exits irq +%lu "
+@@ -1181,8 +1181,8 @@
+            "hv-masked 0x%x guest-imask 0x%x\n", P, mrs(SYS_CNTV_CTL_EL02), mrs(SYS_CNTV_CVAL_EL02),
+            mrs(SYS_CNTP_CTL_EL02), mrs(SYS_CNTP_CVAL_EL02), now - voff, now, voff, PERCPU(tmr_hv_masked),
+            PERCPU(tmr_guest_imask));
+-    hv_vgic3_status_line("HV/win r4.13 VG");
+-    hv_win_storage_status_lines("HV/win r4.13 NV");
++    hv_vgic3_status_line("HV/win r4.14 VG");
++    hv_win_storage_status_lines("HV/win r4.14 NV");
+     u64 pl = hv_win_pl011_stats();
+     printf("%s PU pl011 tx %lu rx %lu drop %lu | pmu", P, (unsigned long)(pl & 0xffffffff),
+            (unsigned long)((pl >> 32) & 0xffff), (unsigned long)(pl >> 48));
+diff -ruN -x build -x *.o -x *.dSYM -x test_intx -x test_sysreg -x test_pmu_rewrite -x test_vgic3 s1-resident-r4.13-native-rw-20261110/source/src/hv/win/hv_win_status.c s1-resident-r4.14-native-rw-20261110/source/src/hv/win/hv_win_status.c
+--- s1-resident-r4.13-native-rw-20261110/source/src/hv/win/hv_win_status.c	2026-11-10 20:51:59
++++ s1-resident-r4.14-native-rw-20261110/source/src/hv/win/hv_win_status.c	2026-11-10 21:35:24
+@@ -14,6 +14,15 @@
+     "none", "lease-state", "context", "args/span", "not-guest-RAM", "resident", "protected",
+     "s2-walk", "s2-attr", "pmu-scanning"};
+ 
++/* r4.14: names of the PRP planner rules (enum vnvme_prp_rule) */
++static const char *const prp_rule_name[VNVME_PRP_RULES] = {
++    "none", "size/prp1", "prp2", "prp2-align", "list-ptr", "list-admission", "entry-align", "count",
++    "data-admission", "data-over-queue", "data-over-list", "data-overlap"};
++static const char *prp_rule(u8 r)
++{
++    return r < VNVME_PRP_RULES ? prp_rule_name[r] : "?";
++}
++
+ static void err_note(u32 status)
+ {
+     for (int i = 0; i < 8; i++) {
+@@ -78,7 +87,12 @@
+     for (int i = 1; i < HV_SM_WHY_NR; i++)
+         if (hv_sm_last_refusal.count[i])
+             printf(" %s:%lu", sm_why_name[i], (unsigned long)hv_sm_last_refusal.count[i]);
+-    printf(" | out-of-range reads %lu\n", (unsigned long)q->refused_reads);
++    printf(" | out-of-range reads %lu | prp refusals", (unsigned long)q->refused_reads);
++    for (int i = 0; i < VNVME_PRP_RULES; i++)
++        if (q->prp_refusals[i])
++            printf(" %s:%lu", prp_rule((u8)i), (unsigned long)q->prp_refusals[i]);
++    printf(" | dup-dest reads %lu (last prp1 0x%lx)\n", (unsigned long)q->prp_dup_dest_reads,
++           (unsigned long)q->prp_dup_dest_last);
+     const struct s1dg_entry *sq = diag_last(S1DG_SQE), *cq = diag_last(S1DG_CQE);
+     printf("%s nvme: q1 sq h%u t%u cq h%u t%u pend %u ien %d", prefix, q->queues[1].sq_head,
+            q->queues[1].sq_tail, q->queues[1].cq_head, q->queues[1].cq_tail, q->queues[1].cq_pending,
+@@ -133,7 +147,7 @@
+         rerr = hv_win_storage_native_stat(8), wref = hv_win_storage_native_stat(19);
+     if (primed && (g->fatal_count != last_fatal || ref != last_ref || werr != last_werr ||
+                    rerr != last_rerr || wref != last_wref || st2 != last_st2 || g->nonzero_status != last_err)) {
+-        printf("HV/win r4.13 STORAGE EVENT: ctrl fatal %lu (first reason %lu) refusals %lu nvme-err %lu "
++        printf("HV/win r4.14 STORAGE EVENT: ctrl fatal %lu (first reason %lu) refusals %lu nvme-err %lu "
+                "(last q%lu c%lu st 0x%lx) | ans state %lu reason %lu rerr %lu werr %lu window-refusals %lu\n",
+                (unsigned long)g->fatal_count, (unsigned long)g->first_fatal_reason, (unsigned long)ref,
+                (unsigned long)g->nonzero_status, (unsigned long)g->last_err_qid, (unsigned long)g->last_err_cid,
+@@ -155,7 +169,7 @@
+     static u8 nq;
+     u64 seq = g->write_seq;
+     if (seen < seq && seq - seen > S1DG_RING) {
+-        printf("HV/win r4.13 NVME-EV: %lu events not shown (ring wrapped)\n", (unsigned long)(seq - seen - S1DG_RING));
++        printf("HV/win r4.14 NVME-EV: %lu events not shown (ring wrapped)\n", (unsigned long)(seq - seen - S1DG_RING));
+         seen = seq - S1DG_RING;
+         printed = true;
+     }
+@@ -169,13 +183,13 @@
+         else if (e->type == S1DG_MMIO_W && e->a == 0x10 && intmc_logged < 32)
+             what = "INTMC write", intmc_logged++;
+         if (what) {
+-            printf("HV/win r4.13 NVME-EV t 0x%08x %s 0x%lx ok %u csts 0x%x\n", e->t, what, (unsigned long)e->b,
++            printf("HV/win r4.14 NVME-EV t 0x%08x %s 0x%lx ok %u csts 0x%x\n", e->t, what, (unsigned long)e->b,
+                    e->status, e->c);
+             printed = true;
+             continue;
+         }
+         if (e->type == S1DG_RESET || e->type == S1DG_ENABLE) {
+-            printf("HV/win r4.13 NVME-EV t 0x%08x %s cc 0x%lx -> 0x%lx\n", e->t,
++            printf("HV/win r4.14 NVME-EV t 0x%08x %s cc 0x%lx -> 0x%lx\n", e->t,
+                    e->type == S1DG_RESET ? "controller RESET (CC.EN=0)" : "controller ENABLE", (unsigned long)e->a,
+                    (unsigned long)e->b);
+             printed = true;
+@@ -184,7 +198,7 @@
+         if (e->type == S1DG_SQE && e->qid == 0 &&
+             (e->opcode == 0x00 || e->opcode == 0x01 || e->opcode == 0x04 || e->opcode == 0x05)) {
+             static const char *const qn[6] = {"DELETE SQ", "CREATE SQ", "?", "?", "DELETE CQ", "CREATE CQ"};
+-            printf("HV/win r4.13 NVME-EV t 0x%08x %s cid %u cdw10 0x%08x cdw11 0x%08x prp1 0x%lx\n", e->t,
++            printf("HV/win r4.14 NVME-EV t 0x%08x %s cid %u cdw10 0x%08x cdw11 0x%08x prp1 0x%lx\n", e->t,
+                    qn[e->opcode], e->cid, (u32)e->a, (u32)(e->a >> 32), (unsigned long)e->b);
+             qcid[nq++ & 7] = e->cid;
+             printed = true;
+@@ -205,7 +219,7 @@
+                     const struct s1dg_entry *x = &g->ring[k % S1DG_RING];
+                     if (x->type == S1DG_SQE && x->qid == e->qid && x->cid == e->cid) { sq = x; break; }
+                 }
+-                printf("HV/win r4.13 NVME-ERR #%lu t 0x%08x q%u cid %u status 0x%x", (unsigned long)err_logged, e->t,
++                printf("HV/win r4.14 NVME-ERR #%lu t 0x%08x q%u cid %u status 0x%x", (unsigned long)err_logged, e->t,
+                        e->qid, e->cid, e->status);
+                 if (sq)
+                     printf(" op 0x%02x slba %lu nlb %u prp1 0x%lx nsid %u", sq->opcode, (unsigned long)sq->a,
+@@ -219,6 +233,20 @@
+                     printf(" | admission (latest) %s ipa 0x%lx len 0x%lx detail 0x%lx",
+                            r->why < HV_SM_WHY_NR ? sm_why_name[r->why] : "?", (unsigned long)r->ipa,
+                            (unsigned long)r->length, (unsigned long)r->detail);
++                /* r4.14: the PRP planner rule that refused this command, if it was one */
++                if (sq && e->status == VNVME_SC_DATA_TRANSFER_ERROR) {
++                    const struct vnvme_ctrl *qc = &model()->queue;
++                    for (u32 k = 0; k < VNVME_PRP_LOG && k < qc->prp_refusal_total; k++) {
++                        const struct vnvme_prp_refusal *r =
++                            &qc->prp_log[(qc->prp_refusal_total - 1 - k) % VNVME_PRP_LOG];
++                        if (r->cid == e->cid && r->opcode == sq->opcode) {
++                            printf(" | prp rule %s seg %u addr 0x%lx len 0x%lx other 0x%lx", prp_rule(r->rule),
++                                   r->index, (unsigned long)r->addr, (unsigned long)r->len,
++                                   (unsigned long)r->other);
++                            break;
++                        }
++                    }
++                }
+                 printf("\n");
+                 printed = true;
+                 last_ref_seq = ~0ULL;
+@@ -227,13 +255,37 @@
+         if (e->type == S1DG_CQE && e->qid == 0) {
+             for (u32 k = 0; k < 8 && k < nq; k++) {
+                 if (qcid[k] == e->cid) {
+-                    printf("HV/win r4.13 NVME-EV t 0x%08x   -> queue command cid %u status 0x%x\n", e->t, e->cid,
++                    printf("HV/win r4.14 NVME-EV t 0x%08x   -> queue command cid %u status 0x%x\n", e->t, e->cid,
+                            e->status);
+                     qcid[k] = 0xffff;
+                     printed = true;
+                     break;
+                 }
+             }
++        }
++    }
++    /* r4.14: one line per PRP planner refusal (rule, segment, range), rate limited: the first 64,
++     * then every 256th; refusals that left the 16-entry log before this tick are counted. */
++    {
++        static u64 prp_seen;
++        const struct vnvme_ctrl *qc = &model()->queue;
++        u64 total = qc->prp_refusal_total;
++        if (total - prp_seen > VNVME_PRP_LOG) {
++            printf("HV/win r4.14 PRP-REFUSE: %lu refusals left the log unshown\n",
++                   (unsigned long)(total - prp_seen - VNVME_PRP_LOG));
++            prp_seen = total - VNVME_PRP_LOG;
++            printed = true;
++        }
++        for (; prp_seen < total; prp_seen++) {
++            const struct vnvme_prp_refusal *r = &qc->prp_log[prp_seen % VNVME_PRP_LOG];
++            if (r->ordinal > 64 && r->ordinal % 256)
++                continue;
++            printf("HV/win r4.14 PRP-REFUSE #%lu cmd %lu cid %u op 0x%02x %s rule %s seg %u addr 0x%lx len 0x%lx "
++                   "other 0x%lx\n",
++                   (unsigned long)r->ordinal, (unsigned long)r->command, r->cid, r->opcode,
++                   r->to_guest ? "to-guest" : "from-guest", prp_rule(r->rule), r->index, (unsigned long)r->addr,
++                   (unsigned long)r->len, (unsigned long)r->other);
++            printed = true;
+         }
+     }
+     return printed;
+diff -ruN -x build -x *.o -x *.dSYM -x test_intx -x test_sysreg -x test_pmu_rewrite -x test_vgic3 s1-resident-r4.13-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.c s1-resident-r4.14-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.c
+--- s1-resident-r4.13-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.c	2026-11-10 20:51:32
++++ s1-resident-r4.14-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.c	2026-11-10 21:35:24
+@@ -220,6 +220,7 @@
+     u64 addr[VNVME_MAX_XFER_BLOCKS + 1];
+     size_t len[VNVME_MAX_XFER_BLOCKS + 1];
+     size_t count;
++    bool dup_dest; /* r4.14: a destination segment repeats an earlier one (to_guest only) */
+ };
+ /* r4: data buffer for READ/WRITE: the backend's private transfer buffer when it has one
+  * (single copy), else the 128 KiB frontend bounce (fixture, r2.2 behaviour). */
+@@ -243,10 +244,21 @@
+ {
+     return plan_prps_dir(ctrl, cmd, total, plan, sizeof(ctrl->bounce), true);
+ }
+-static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
+-                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
++/* r4.14: the rule each check below enforces is noted just before it (PRP_AT), so a refusal can be
++ * reported by rule; plan_prps_dir records it. Static: single-threaded under bhl, like the plan. */
++static struct {
++    u8 rule;
++    u16 index;
++    u64 addr, len, other;
++} prp_at;
++#define PRP_AT(r, i, a, l, o)                                                                       \
++    (prp_at.rule = (r), prp_at.index = (u16)(i), prp_at.addr = (u64)(a), prp_at.len = (u64)(l),     \
++     prp_at.other = (u64)(o))
++static bool plan_prps_body(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
++                           size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
+ {
+     memset(plan, 0, sizeof(*plan));
++    PRP_AT(VNVME_PRP_SIZE, 0, cmd->prp1, total, capacity);
+     if (!total || total > capacity || !cmd->prp1)
+         return false;
+     size_t first = VNVME_PAGE_SIZE - (cmd->prp1 & (VNVME_PAGE_SIZE - 1));
+@@ -261,20 +273,24 @@
+     size_t frags = 0;
+     if (rest) {
+         size_t count = (rest + VNVME_PAGE_SIZE - 1) / VNVME_PAGE_SIZE; /* <= 256 */
++        PRP_AT(VNVME_PRP_PRP2, 1, cmd->prp2, count, 0);
+         if (!cmd->prp2 || count > VNVME_MAX_XFER_BLOCKS) return false;
+         if (count == 1) {
++            PRP_AT(VNVME_PRP_PRP2_ALIGN, 1, cmd->prp2, VNVME_PAGE_SIZE, 0);
+             if (cmd->prp2 & (VNVME_PAGE_SIZE - 1)) return false; /* data pointer */
+             entries[0] = cmd->prp2;
+         } else {
+             u64 list = cmd->prp2;
+             size_t got = 0;
+             while (got < count) {
++                PRP_AT(VNVME_PRP_LIST_PTR, frags, list, 0, frags);
+                 if (!list || (list & 7) || frags == VNVME_MAX_LIST_FRAGS) return false;
+                 if (frags && (list & (VNVME_PAGE_SIZE - 1))) return false; /* chained: page aligned */
+                 size_t in_page = (VNVME_PAGE_SIZE - (size_t)(list & (VNVME_PAGE_SIZE - 1))) / sizeof(u64);
+                 size_t need = count - got;
+                 bool last = need <= in_page;
+                 size_t n = last ? need : in_page;          /* 1..512 entries, <= 4096 bytes */
++                PRP_AT(VNVME_PRP_LIST_ADMIT, frags, list, n * sizeof(u64), 0);
+                 const u8 *src = guest_span(ctrl, list, n * sizeof(u64), false);
+                 if (!src) return false;
+                 frag_addr[frags] = list;
+@@ -294,21 +310,68 @@
+         size_t n = plan->count ? (remaining < VNVME_PAGE_SIZE ? remaining : VNVME_PAGE_SIZE) : first;
+         if (plan->count) {
+             addr = entries[plan->count - 1];
++            PRP_AT(VNVME_PRP_ENTRY_ALIGN, plan->count, addr, n, 0);
+             if (!addr || (addr & (VNVME_PAGE_SIZE - 1))) return false;
+         }
++        PRP_AT(VNVME_PRP_COUNT, plan->count, addr, n, 0);
+         if (plan->count >= VNVME_MAX_XFER_BLOCKS + 1) return false;
++        PRP_AT(VNVME_PRP_DATA_ADMIT, plan->count, addr, n, 0);
+         u8 *ptr = guest_span(ctrl, addr, n, to_guest);
++        if (ptr) PRP_AT(VNVME_PRP_DATA_QUEUE, plan->count, addr, n, 0);
+         if (!ptr || overlaps_queue(ctrl, addr, n)) return false;
++        PRP_AT(VNVME_PRP_DATA_LIST, plan->count, addr, n, frags ? frag_addr[0] : 0);
+         for (size_t i = 0; i < frags; i++)
+             if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;
++        /* r4.14: in the device-to-guest direction (READ, Identify, log pages) a data segment may be
++         * an exact repeat of an earlier whole, page-aligned segment. Windows' memory manager does this
++         * for clustered in-page reads: pages of the cluster that are already resident are pointed at
++         * one system-wide dummy page, so one PRP list names that page several times (and a later read
++         * can start on it). Every segment has been admitted (guest_span, write) on its own above and
++         * still may not touch a queue or a list fragment; a repeated destination only means the last
++         * copy wins, as on a real controller. r2.1-r4.13 refused this with 0x04 (31 READs in RUN B
++         * 20261110-211000, 248 in 20261110-212026). Any other overlap (partial, unaligned PRP1) and
++         * every overlap between WRITE source segments keep the r2.1 refusal. */
+         for (size_t i = 0; i < plan->count; i++)
+-            if (overlaps(addr, n, plan->addr[i], plan->len[i])) return false;
++            if (overlaps(addr, n, plan->addr[i], plan->len[i])) {
++                if (!to_guest || n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i]) {
++                    PRP_AT(VNVME_PRP_DATA_DATA, plan->count, addr, n, plan->addr[i]);
++                    return false;
++                }
++                plan->dup_dest = true;
++            }
+         plan->addr[plan->count] = addr;
+         plan->ptr[plan->count] = ptr;
+         plan->len[plan->count++] = n;
+         remaining -= n;
+     }
+     return true;
++}
++/* r4.14: plan_prps_body, recording which rule refused (count by rule, last VNVME_PRP_LOG refusals),
++ * and READs that repeat a destination page. Same result as plan_prps_body. */
++static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
++                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
++{
++    if (plan_prps_body(ctrl, cmd, total, plan, capacity, to_guest)) {
++        if (plan->dup_dest && cmd->opcode == VNVME_IO_READ) {
++            ctrl->prp_dup_dest_reads++;
++            ctrl->prp_dup_dest_last = cmd->prp1;
++        }
++        return true;
++    }
++    u8 rule = prp_at.rule < VNVME_PRP_RULES ? prp_at.rule : VNVME_PRP_NONE;
++    ctrl->prp_refusals[rule]++;
++    struct vnvme_prp_refusal *r = &ctrl->prp_log[ctrl->prp_refusal_total++ % VNVME_PRP_LOG];
++    r->ordinal = ctrl->prp_refusal_total;
++    r->command = ctrl->stats.commands;
++    r->addr = prp_at.addr;
++    r->len = prp_at.len;
++    r->other = prp_at.other;
++    r->cid = cmd->cid;
++    r->index = prp_at.index;
++    r->opcode = cmd->opcode;
++    r->rule = rule;
++    r->to_guest = to_guest;
++    return false;
+ }
+ static void copy_to_plan(const struct prp_plan *plan, const u8 *buffer)
+ {
+diff -ruN -x build -x *.o -x *.dSYM -x test_intx -x test_sysreg -x test_pmu_rewrite -x test_vgic3 s1-resident-r4.13-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.h s1-resident-r4.14-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.h
+--- s1-resident-r4.13-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.h	2026-11-10 20:51:32
++++ s1-resident-r4.14-native-rw-20261110/source/src/hv/win/s1/hv_nvme_queue.h	2026-11-10 21:35:24
+@@ -211,6 +211,37 @@
+     bool owner_kick_pending;
+ };
+ 
++/* r4.14: the PRP planner rule that refused a transfer (completed DATA TRANSFER ERROR, 0x04).
++ * Recorded per refusal (count by rule + a small log) so the firmware status lines can name it. */
++enum vnvme_prp_rule {
++    VNVME_PRP_NONE = 0,
++    VNVME_PRP_SIZE,         /* total 0, above the transfer buffer, or PRP1 zero */
++    VNVME_PRP_PRP2,         /* more than one page but PRP2 zero, or too many pages */
++    VNVME_PRP_PRP2_ALIGN,   /* two-page transfer: PRP2 (data pointer) not page aligned */
++    VNVME_PRP_LIST_PTR,     /* list pointer zero / not qword aligned / chained not page aligned / >2 fragments */
++    VNVME_PRP_LIST_ADMIT,   /* list fragment refused by guest-memory admission */
++    VNVME_PRP_ENTRY_ALIGN,  /* a list entry zero or not page aligned */
++    VNVME_PRP_COUNT,        /* more segments than the plan holds */
++    VNVME_PRP_DATA_ADMIT,   /* data segment refused by guest-memory admission */
++    VNVME_PRP_DATA_QUEUE,   /* data segment overlaps an active SQ/CQ */
++    VNVME_PRP_DATA_LIST,    /* data segment overlaps a consumed PRP list fragment */
++    VNVME_PRP_DATA_DATA,    /* data segment overlaps an earlier one (READ: other than an exact whole-page repeat) */
++    VNVME_PRP_RULES
++};
++#define VNVME_PRP_LOG 16
++struct vnvme_prp_refusal {
++    u64 ordinal;  /* 1-based refusal number (ctrl->prp_refusal_total after it) */
++    u64 command;  /* ctrl->stats.commands at the time (identifies the command) */
++    u64 addr;     /* the segment / list fragment / pointer that failed */
++    u64 len;
++    u64 other;    /* rule specific: capacity, the overlapped range base, the fragment count */
++    u16 cid;
++    u16 index;    /* data segment (0 = PRP1) or list fragment index */
++    u8 opcode;
++    u8 rule;
++    bool to_guest;
++};
++
+ struct vnvme_ctrl {
+     u64 namespace_blocks;
+     const struct vnvme_backend_ops *ops;
+@@ -241,6 +272,12 @@
+     bool wce;
+     u64 refused_reads; /* guest past-end READ: nonterminal, no backend I/O */
+     u64 backend_writes, backend_flushes, fua_flushes;
++    /* r4.14: PRP planner refusals by rule, the last VNVME_PRP_LOG of them, and READs whose
++     * destination segments repeat a guest page (allowed; see plan_prps_dir). */
++    u64 prp_refusals[VNVME_PRP_RULES];
++    u64 prp_refusal_total;
++    struct vnvme_prp_refusal prp_log[VNVME_PRP_LOG];
++    u64 prp_dup_dest_reads, prp_dup_dest_last;
+     u8 bounce[VNVME_MAX_BLOCKS * VNVME_LBA_SIZE] ALIGNED(VNVME_PAGE_SIZE);
+ };
+ 

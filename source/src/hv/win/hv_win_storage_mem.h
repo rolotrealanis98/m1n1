@@ -50,4 +50,19 @@ void hv_storage_mem_retire(struct hv_storage_mem *m);
  * No guest VA translation. Identity IPA == PA prevents distinct admitted IPAs
  * aliasing the same physical bytes. */
 void *hv_storage_guest_span(void *opaque, u64 ipa, size_t length, bool write);
+
+/* r4.13 diagnostics: why hv_storage_guest_span last refused (reason, address, length, the offending range
+ * or leaf) and per-reason counts. Pure bookkeeping, no behaviour change. */
+enum hv_sm_why {
+    HV_SM_WHY_NONE = 0, HV_SM_WHY_STATE, HV_SM_WHY_CONTEXT, HV_SM_WHY_ARGS, HV_SM_WHY_NOT_RAM,
+    HV_SM_WHY_RESIDENT, HV_SM_WHY_PROTECTED, HV_SM_WHY_LEAF_WALK, HV_SM_WHY_LEAF_ATTR, HV_SM_WHY_SCANNING,
+    HV_SM_WHY_NR,
+};
+struct hv_sm_refusal {
+    u64 why;
+    u64 ipa, length, detail; /* detail: protected range base, or the leaf descriptor */
+    u64 count[HV_SM_WHY_NR];
+};
+extern struct hv_sm_refusal hv_sm_last_refusal;
+
 #endif

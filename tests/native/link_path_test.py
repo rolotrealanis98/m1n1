@@ -8,7 +8,7 @@ raw=u[u.index('            case REQ_MEMREAD:'):u.index('            default:',u.
 gate=p[p.index('    if (!s1n_link_proxy'):p.index('    switch (request->opcode)',p.index('    if (!s1n_link_proxy'))]
 for needle in ['#include "hv/win/s1/native_link.h"','s1n_link_discard(request.mrequest.size, disable_data_csums, discard_read)']:
  assert needle in u
-assert raw.index('!s1n_link_raw()') < raw.index('data_checksum')
+assert raw.index('!s1n_link_mem_ok(') < raw.index('data_checksum')
 assert raw.index('s1n_link_discard') < raw.index('write8')
 assert 'uartproxy_guest_exception = false;' in u
 assert 'START_EXCEPTION_LOWER || start->reason == START_HV' in u
@@ -28,6 +28,7 @@ code=r'''
 #define GUARD_OFF 0
 #define DATA_END_SENTINEL 0xdecafbad
 static int exc_count,exc_guard, touched, sent, remaining, consumed;
+bool hv_win_storage_guest_ram_contains(u64 a,u64 n){(void)a;(void)n;return false;}
 static bool disable_data_csums, uartproxy_guest_exception;
 static u8 stream[1024];
 static ssize_t iodev_read(int device,void *b,size_t n) {

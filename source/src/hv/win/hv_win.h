@@ -176,6 +176,8 @@ void hv_vgic3_set_spi_level(u32 intid, bool level); /* emulated level-triggered 
 void hv_vgic3_inject_spi(u32 intid);                /* emulated edge: latch pending */
 void hv_vgic3_flush(void);
 void hv_vgic3_maintenance(void);
+void hv_vgic3_status_line(const char *prefix); /* r4.11 diagnostics */
+void hv_vgic3_tick(void); /* r4.12: hv_tick, ends the NVMe SPI re-presentation hold-off */
 
 /*
  * First thing in hv_exc_fiq(): on Apple cores the vGIC maintenance interrupt is a FIQ with no AIC

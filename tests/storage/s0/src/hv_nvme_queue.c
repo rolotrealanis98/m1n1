@@ -220,6 +220,7 @@ struct prp_plan {
     u64 addr[VNVME_MAX_XFER_BLOCKS + 1];
     size_t len[VNVME_MAX_XFER_BLOCKS + 1];
     size_t count;
+    bool dup_dest; /* r4.14: a destination segment repeats an earlier one (to_guest only) */
 };
 /* r4: data buffer for READ/WRITE: the backend's private transfer buffer when it has one
  * (single copy), else the 128 KiB frontend bounce (fixture, r2.2 behaviour). */
@@ -243,10 +244,21 @@ static bool plan_prps(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
 {
     return plan_prps_dir(ctrl, cmd, total, plan, sizeof(ctrl->bounce), true);
 }
-static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
-                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
+/* r4.14: the rule each check below enforces is noted just before it (PRP_AT), so a refusal can be
+ * reported by rule; plan_prps_dir records it. Static: single-threaded under bhl, like the plan. */
+static struct {
+    u8 rule;
+    u16 index;
+    u64 addr, len, other;
+} prp_at;
+#define PRP_AT(r, i, a, l, o)                                                                       \
+    (prp_at.rule = (r), prp_at.index = (u16)(i), prp_at.addr = (u64)(a), prp_at.len = (u64)(l),     \
+     prp_at.other = (u64)(o))
+static bool plan_prps_body(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
+                           size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
 {
     memset(plan, 0, sizeof(*plan));
+    PRP_AT(VNVME_PRP_SIZE, 0, cmd->prp1, total, capacity);
     if (!total || total > capacity || !cmd->prp1)
         return false;
     size_t first = VNVME_PAGE_SIZE - (cmd->prp1 & (VNVME_PAGE_SIZE - 1));
@@ -261,20 +273,24 @@ static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *c
     size_t frags = 0;
     if (rest) {
         size_t count = (rest + VNVME_PAGE_SIZE - 1) / VNVME_PAGE_SIZE; /* <= 256 */
+        PRP_AT(VNVME_PRP_PRP2, 1, cmd->prp2, count, 0);
         if (!cmd->prp2 || count > VNVME_MAX_XFER_BLOCKS) return false;
         if (count == 1) {
+            PRP_AT(VNVME_PRP_PRP2_ALIGN, 1, cmd->prp2, VNVME_PAGE_SIZE, 0);
             if (cmd->prp2 & (VNVME_PAGE_SIZE - 1)) return false; /* data pointer */
             entries[0] = cmd->prp2;
         } else {
             u64 list = cmd->prp2;
             size_t got = 0;
             while (got < count) {
+                PRP_AT(VNVME_PRP_LIST_PTR, frags, list, 0, frags);
                 if (!list || (list & 7) || frags == VNVME_MAX_LIST_FRAGS) return false;
                 if (frags && (list & (VNVME_PAGE_SIZE - 1))) return false; /* chained: page aligned */
                 size_t in_page = (VNVME_PAGE_SIZE - (size_t)(list & (VNVME_PAGE_SIZE - 1))) / sizeof(u64);
                 size_t need = count - got;
                 bool last = need <= in_page;
                 size_t n = last ? need : in_page;          /* 1..512 entries, <= 4096 bytes */
+                PRP_AT(VNVME_PRP_LIST_ADMIT, frags, list, n * sizeof(u64), 0);
                 const u8 *src = guest_span(ctrl, list, n * sizeof(u64), false);
                 if (!src) return false;
                 frag_addr[frags] = list;
@@ -294,21 +310,68 @@ static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *c
         size_t n = plan->count ? (remaining < VNVME_PAGE_SIZE ? remaining : VNVME_PAGE_SIZE) : first;
         if (plan->count) {
             addr = entries[plan->count - 1];
+            PRP_AT(VNVME_PRP_ENTRY_ALIGN, plan->count, addr, n, 0);
             if (!addr || (addr & (VNVME_PAGE_SIZE - 1))) return false;
         }
+        PRP_AT(VNVME_PRP_COUNT, plan->count, addr, n, 0);
         if (plan->count >= VNVME_MAX_XFER_BLOCKS + 1) return false;
+        PRP_AT(VNVME_PRP_DATA_ADMIT, plan->count, addr, n, 0);
         u8 *ptr = guest_span(ctrl, addr, n, to_guest);
+        if (ptr) PRP_AT(VNVME_PRP_DATA_QUEUE, plan->count, addr, n, 0);
         if (!ptr || overlaps_queue(ctrl, addr, n)) return false;
+        PRP_AT(VNVME_PRP_DATA_LIST, plan->count, addr, n, frags ? frag_addr[0] : 0);
         for (size_t i = 0; i < frags; i++)
             if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;
+        /* r4.14: in the device-to-guest direction (READ, Identify, log pages) a data segment may be
+         * an exact repeat of an earlier whole, page-aligned segment. Windows' memory manager does this
+         * for clustered in-page reads: pages of the cluster that are already resident are pointed at
+         * one system-wide dummy page, so one PRP list names that page several times (and a later read
+         * can start on it). Every segment has been admitted (guest_span, write) on its own above and
+         * still may not touch a queue or a list fragment; a repeated destination only means the last
+         * copy wins, as on a real controller. r2.1-r4.13 refused this with 0x04 (31 READs in RUN B
+         * 20261110-211000, 248 in 20261110-212026). Any other overlap (partial, unaligned PRP1) and
+         * every overlap between WRITE source segments keep the r2.1 refusal. */
         for (size_t i = 0; i < plan->count; i++)
-            if (overlaps(addr, n, plan->addr[i], plan->len[i])) return false;
+            if (overlaps(addr, n, plan->addr[i], plan->len[i])) {
+                if (!to_guest || n != VNVME_PAGE_SIZE || plan->len[i] != VNVME_PAGE_SIZE || addr != plan->addr[i]) {
+                    PRP_AT(VNVME_PRP_DATA_DATA, plan->count, addr, n, plan->addr[i]);
+                    return false;
+                }
+                plan->dup_dest = true;
+            }
         plan->addr[plan->count] = addr;
         plan->ptr[plan->count] = ptr;
         plan->len[plan->count++] = n;
         remaining -= n;
     }
     return true;
+}
+/* r4.14: plan_prps_body, recording which rule refused (count by rule, last VNVME_PRP_LOG refusals),
+ * and READs that repeat a destination page. Same result as plan_prps_body. */
+static bool plan_prps_dir(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd,
+                          size_t total, struct prp_plan *plan, size_t capacity, bool to_guest)
+{
+    if (plan_prps_body(ctrl, cmd, total, plan, capacity, to_guest)) {
+        if (plan->dup_dest && cmd->opcode == VNVME_IO_READ) {
+            ctrl->prp_dup_dest_reads++;
+            ctrl->prp_dup_dest_last = cmd->prp1;
+        }
+        return true;
+    }
+    u8 rule = prp_at.rule < VNVME_PRP_RULES ? prp_at.rule : VNVME_PRP_NONE;
+    ctrl->prp_refusals[rule]++;
+    struct vnvme_prp_refusal *r = &ctrl->prp_log[ctrl->prp_refusal_total++ % VNVME_PRP_LOG];
+    r->ordinal = ctrl->prp_refusal_total;
+    r->command = ctrl->stats.commands;
+    r->addr = prp_at.addr;
+    r->len = prp_at.len;
+    r->other = prp_at.other;
+    r->cid = cmd->cid;
+    r->index = prp_at.index;
+    r->opcode = cmd->opcode;
+    r->rule = rule;
+    r->to_guest = to_guest;
+    return false;
 }
 static void copy_to_plan(const struct prp_plan *plan, const u8 *buffer)
 {
@@ -690,7 +753,7 @@ static u16 process_io(struct vnvme_ctrl *ctrl, const struct vnvme_command *cmd)
     u64 lba = ((u64)cmd->cdw11 << 32) | cmd->cdw10;
     if (lba >= ctrl->namespace_blocks || blocks > ctrl->namespace_blocks - lba) {
         ctrl->refused_reads++;
-        return VNVME_SC_INVALID_FIELD;
+        return VNVME_SC_LBA_OUT_OF_RANGE; /* r4.13: was Invalid Field (0x02); NVMe 1.4 Fig. 129 */
     }
     if (blocks > ctrl->caps.max_blocks) {
         if (ctrl->ops->abort) ctrl->ops->abort(ctrl->opaque);

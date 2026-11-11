@@ -803,7 +803,7 @@ static void s_rw_random(void)
             CHECK(st == (fits ? 0 : VNVME_SC_INVALID_FIELD));
             if (fits) for (u32 i = 0; i < n; i++) *sh_find(lba + i, true) = g;
         } else if (k < 9) {
-            if (!fits) { CHECK(io_cmd(VNVME_IO_READ, lba, n, RDATA, 0) == VNVME_SC_INVALID_FIELD); continue; }
+            if (!fits) { CHECK(io_cmd(VNVME_IO_READ, lba, n, RDATA, 0) == VNVME_SC_LBA_OUT_OF_RANGE); continue; }
             CHECK(io_cmd(VNVME_IO_READ, lba, n, RDATA, 0) == 0);
             u8 b[4096];
             for (u32 i = 0; i < n; i++) {

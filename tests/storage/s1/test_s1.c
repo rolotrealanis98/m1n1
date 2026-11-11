@@ -194,7 +194,7 @@ static void test_admin_and_policy(void)
     c.opcode=VNVME_IO_READ;
     CHECK(m.backend_reads==before);CHECK(s0_fixture_guards_valid());
     c=command(VNVME_IO_READ,2,DATA);CHECK(submit(1,c,true)==VNVME_SC_INVALID_NAMESPACE);
-    c.nsid=1;c.cdw10=40;CHECK(submit(1,c,true)==VNVME_SC_INVALID_FIELD);
+    c.nsid=1;c.cdw10=40;CHECK(submit(1,c,true)==VNVME_SC_LBA_OUT_OF_RANGE); /* r4.13: was 0x02 */
     CHECK(wr(0x14,4,S1_CC_VALID|0x4000));CHECK(rd(0x1c,4)==9);
     CHECK(wr(0x1008,4,(m.queue.queues[1].sq_tail+1)%QSIZE));CHECK(m.backend_reads==before); /* r2: ignored */
     /* r2: after shutdown a reset is required (NVMe 1.3 7.6.2). */

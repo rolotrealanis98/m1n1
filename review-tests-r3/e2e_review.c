@@ -68,7 +68,7 @@ static void r_guest_fuzz(void)
             u16 s = guest_read(lba, n, DATA);
             bool in = lba < W_BLOCKS && n <= W_BLOCKS - lba;
             if (in) { CHECK(s == 0); check_blocks(lba, n, DATA); ok_reads++; CHECK(rv_n == before + n); }
-            else { CHECK(s == VNVME_SC_INVALID_FIELD); CHECK(rv_n == before); CHECK(ans_ro_state() == ANS_RO_LIVE); CHECK(guest_read(0, 1, DATA) == 0); _exit(0); }
+            else { CHECK(s == VNVME_SC_LBA_OUT_OF_RANGE); CHECK(rv_n == before); CHECK(ans_ro_state() == ANS_RO_LIVE); CHECK(guest_read(0, 1, DATA) == 0); _exit(0); }
         } else if (kind < 8) {
             /* secA: command generated in the parent (r4.4 rng order), tried in a child first. */
             struct vnvme_command c = {.opcode = (u8)rv_rnd(), .nsid = (u32[]){0, 1, 2, 3, 0xffffffffu}[rv_rnd() % 5],

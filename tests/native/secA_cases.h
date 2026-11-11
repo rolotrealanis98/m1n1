@@ -41,7 +41,8 @@ static void secA_ro_guest_read(int which, bool stage_cfg)
     static const u64 lba[] = {W_BLOCKS - 1, W_BLOCKS, UINT64_MAX, UINT64_MAX - 1, 0, W_BLOCKS - 31};
     static const u32 cnt[] = {2, 1, 1, 32, 33, 32};
     unsigned before = F.io_reads, n = F.nio, a = F.nadmin;
-    CHECK(guest_read(lba[which], cnt[which], DATA) == VNVME_SC_INVALID_FIELD);
+    /* r4.13: past-end READs complete LBA Out of Range (0x80); 33 blocks (> MDTS) stays Invalid Field */
+    CHECK(guest_read(lba[which], cnt[which], DATA) == (which == 4 ? VNVME_SC_INVALID_FIELD : VNVME_SC_LBA_OUT_OF_RANGE));
     CHECK(F.io_reads == before && F.nio == n && F.nadmin == a);  /* no ANS command */
     live_policy();
     secA_after_refusal_read(DATA);
@@ -90,7 +91,7 @@ static void secA_rw_read_max1(void)
 {
     rw_up(rw_cfg(), 0);
     unsigned n = F.nio;
-    CHECK(guest_read(UINT64_MAX, 1, RDATA) == VNVME_SC_INVALID_FIELD);
+    CHECK(guest_read(UINT64_MAX, 1, RDATA) == VNVME_SC_LBA_OUT_OF_RANGE); /* r4.13 */
     CHECK(F.nio == n);
     secA_after_refusal_read(RDATA);
 }
@@ -152,7 +153,7 @@ static void s_secA_rw_random(void)
                 pid_t c = fork();
                 if (c == 0) {
                     unsigned rr = F.io_reads, nn = F.nio;
-                    CHECK(io_cmd(VNVME_IO_READ, lba, n, RDATA, 0) == VNVME_SC_INVALID_FIELD);
+                    CHECK(io_cmd(VNVME_IO_READ, lba, n, RDATA, 0) == VNVME_SC_LBA_OUT_OF_RANGE); /* r4.13 */
                     CHECK(F.io_reads == rr && F.nio == nn);
                     outside_untouched();
                     CHECK(ans_ro_state() == ANS_RO_LIVE);
@@ -252,8 +253,47 @@ static void secA_raw_ro_op(u8 op)
     if (ans_ro_state() == ANS_RO_FROZEN) r45_frozen();
     else { CHECK(ans_ro_test_submit(false, 0x02) == 0); CHECK(F.nio == n + 1); }
 }
+/* r4.14: one PRP list naming the same guest page twice. A READ may (Windows points the already
+ * resident pages of a clustered in-page read at one dummy page): it succeeds, the last copy wins.
+ * A WRITE may not: its source segments must stay disjoint (0x04, rule recorded, nothing reaches ANS). */
+static void r414_dup_pages(void)
+{
+    rw_up(rw_cfg(), 0);
+    CHECK(guest_write(100, 4, 5, 0) == 0); expect_guest(100, 4, 5);
+    unsigned w = F.io_writes, r = F.io_reads;
+    struct vnvme_command c = {.opcode = VNVME_IO_READ, .nsid = 1, .prp1 = RDATA, .cdw10 = 100, .cdw12 = 3, .prp2 = PRPL};
+    u64 e[3] = {RDATA + 4096, RDATA, RDATA + 3 * 4096};   /* block 102 lands on PRP1's page again */
+    memcpy(G(PRPL), e, sizeof(e));
+    memset(G(RDATA), 0, 4 * 4096);
+    CHECK(submit(1, c) == 0);
+    u8 b[4096];
+    gen_block(101, 5, b); CHECK(!memcmp(G(RDATA) + 4096, b, 4096));
+    gen_block(102, 5, b); CHECK(!memcmp(G(RDATA), b, 4096));
+    gen_block(103, 5, b); CHECK(!memcmp(G(RDATA) + 3 * 4096, b, 4096));
+    for (unsigned i = 0; i < 4096; i++) CHECK(G(RDATA)[2 * 4096 + i] == 0);
+    CHECK(F.io_reads > r && F.io_writes == w);
+    CHECK(controller.queue.prp_dup_dest_reads == 1 && controller.queue.prp_dup_dest_last == RDATA);
+    CHECK(controller.queue.prp_refusal_total == 0);
+    unsigned n = F.nio;
+    for (u32 i = 0; i < 4; i++) gen_block(100 + i, 6, G(WDATA) + 4096ULL * i);
+    c.opcode = VNVME_IO_WRITE; c.prp1 = WDATA;
+    u64 f[3] = {WDATA + 4096, WDATA, WDATA + 3 * 4096};
+    memcpy(G(PRPL), f, sizeof(f));
+    CHECK(submit(1, c) == VNVME_SC_DATA_TRANSFER_ERROR);
+    CHECK(F.nio == n && F.io_writes == w);                 /* nothing reached ANS */
+    const struct vnvme_prp_refusal *x = &controller.queue.prp_log[0];
+    CHECK(controller.queue.prp_refusal_total == 1 && controller.queue.prp_refusals[VNVME_PRP_DATA_DATA] == 1);
+    CHECK(x->rule == VNVME_PRP_DATA_DATA && x->index == 2 && x->addr == WDATA && x->len == 4096 &&
+          x->other == WDATA && !x->to_guest && x->opcode == VNVME_IO_WRITE && x->ordinal == 1);
+    expect_guest(100, 4, 5);                                /* old data, session live */
+    CHECK(io_cmd(VNVME_IO_FLUSH, 0, 1, 0, 0) == 0);
+    expect_media(100, 4, 5);
+    outside_untouched();
+    live_policy();
+}
 static bool secA_dispatch(const char *s)
 {
+    if (!strcmp(s, "r414_dup_pages")) { r414_dup_pages(); return true; }
     if (!strncmp(s, "secA_raw_ro_op_", 15)) { secA_raw_ro_op((u8)atoi(s + 15)); return true; }
     if (!strncmp(s, "secA_ro_guest_read_", 19)) secA_ro_guest_read(atoi(s + 19), false);
     else if (!strncmp(s, "secA_stage_guest_read_", 22)) secA_ro_guest_read(atoi(s + 22), true);

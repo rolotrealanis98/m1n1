@@ -1,100 +1,101 @@
-# r4.7 = r4.6 + pmu-reads (2026-11-10)
+# r4.14 = r4.13 + READ may repeat a whole destination page; PRP refusals logged by rule (2026-11-10)
 
-Offline. No MacBook, SSH, USB or serial access. `source/AGENTS.md` is the owner override, byte-identical to r4.6's.
-The r4.6 documents that came with the copy (CHECK.md, NOTES.md, REVIEW-GUIDE.md, TEST-RESULTS.json, ...) are in
-`r4.6-inherited/`; they describe r4.6 and remain valid for everything except the five files below.
+Offline. No MacBook/SSH/USB. Lean copy of r4.13 (its notes: `BUILD-NOTES-r4.13.md`). Owner-override
+`source/AGENTS.md` unchanged, librust.a `4ed52ac9…c304` reused. Disk-window confinement, LBA checks, the WRITE
+path's checks, guest-memory admission (`hv_win_storage_mem.c`), pins, stage logic and the link lock are unchanged.
 
-## What changed (and nothing else)
+## The refused READs (r4.13 RUN B `20261110-211000`: 31 of ~51,000; `20261110-212026`: 248)
 
-Applied per `tooling/pmu-reads-20261110/NOTES.md` §7: `pmu-reads.patch` (`git apply --check` clean; BSD `patch` prints
-the known harmless "No such line 274" for `hv_win.h`, offsets −41/−1/−33) and `check-memory-r4.6.patch`. Full diff:
-`source-vs-r4.6.patch` (sha256 `8c38e0c0…6e62`), `check-memory-vs-r4.6.patch` (test + build.sh).
+Every one is an I/O READ (op 0x02, nlb 4..48) completed 0x4. In both sessions the model's refusal counter and the
+admission counters stay **0** (`STORAGE EVENT ... refusals 0`, NV `admission refusals` empty, `refused 0`), and the
+backend reports `rerr 0`. Every guest-memory admission call from the planner goes through `hv_nvme.c:114`, which
+counts a refusal, so **admission did not refuse these**. 0x4 for a READ has one source,
+`hv_nvme_queue.c:765` (r4.13 `:702`): `plan_prps_dir` returned false on one of its non-admission rules: PRP2
+zero, PRP2/list/entry alignment, more than 2 list fragments, a data page over a queue, over the PRP list, or
+**over an earlier data page of the same command** (r4.13 `hv_nvme_queue.c:304-305`).
 
-| file (r4.7 line) | change |
+**Root cause (inferred, not proven from captured PRP lists):** the last rule. Windows' memory manager builds
+clustered in-page reads with the pages of the cluster that are already resident pointed at **one system-wide
+dummy page**, so one PRP list names that page several times. r2.1 required disjoint destinations and refused it.
+Evidence: (1) all are multi-page reads with odd cluster lengths (12, 14, 21, 25, 30 blocks), reissued once with
+the same SLBA (Windows retry); (2) one PRP1 recurs across *different* commands: `0x10b599b0000` for #33 (slba
+696061) and #35 (slba 1522707), and `0x1001f600000` for **20 of the 50** logged errors in `212026`. That fits a
+read that starts on the dummy page and names it again later. The other rules would need stornvme to build broken
+PRPs, or point data at its own queue or list, while ~51,000 similar reads succeed. This explains all 31 (and the
+248) only as an inference. The PRP lists were not captured. The next run's `PRP-REFUSE` lines and the
+`dup-dest reads` counter will confirm it or name the rule that fires.
+
+## Fix (`source-vs-r4.13.patch`, 4 files +168/−16, sha256 `0d1d325b…`)
+
+| file:line | change |
 |---|---|
-| `src/hv/win/hv_win_storage_mem.c:118-120,154,158,161,165` | admission: a tracked leaf is treated as RW (`g = d \| S2AP_W`) unless it is SCANNING (`XN && !S2AP_W` → refused) |
-| `src/hv/win/hv_win_storage_mem.c:171-176` | `if (write) hv_win_pmu_dma_write(ipa, length);` after every check, before the pointer is returned (before EL2's copy) |
-| `src/hv/win/hv_win_pmu.c:397-426` | new `hv_win_pmu_dma_write`: no-op unless armed; CODE/PINNED → DIRTY via `hv_xt_set` (flips kept), one broadcast `hv_xt_tlbi(true)` if anything changed, stat `HV_WIN_PMU_DMA_RESETS`; `:461` report prints "device refills N" at guest exit |
-| `src/hv/win/hv_win.h:237,255` | stat appended last (indices unchanged), prototype |
-| `src/hv/win/hv_win_storage_mem.h:44-51` | header contract text |
-| `proxyclient/tools/run_windows.py:111,766` | `dma_resets` in the PMU stats tuple / RUN.txt line |
-| `tests/win-pmu-rewrite/test_pmu_rewrite.c` (+146), `check-memory.py` | new tests (PMU refill cases; provider CODE/PINNED admitted, SCANNING/foreign/RO refused, reset called only for write admissions) |
-| `build.sh` | tag/filenames r4.6 → r4.7 only |
+| `src/hv/win/s1/hv_nvme_queue.c:325-343` | in the device-to-guest direction (READ, Identify, logs) a data segment may be an **exact repeat of an earlier whole, page-aligned segment** (same address, both 4096 bytes). The last copy wins. Each segment is still admitted on its own (`guest_span`, write: resident, protected, holes, MMIO, s2 attributes, PMU re-arm). It still may not overlap a queue or a PRP list fragment. Partial overlaps (unaligned PRP1) and **every overlap between WRITE source segments** keep the 0x4 refusal. |
+| `hv_nvme_queue.c:247-322`, `:349-375` | `PRP_AT` notes the rule before each planner check (no existing check line changed). `plan_prps_dir` (now a wrapper around `plan_prps_body`) counts refusals by rule. It also keeps the last 16 in `ctrl->prp_log` (rule, segment, address, length, conflicting base, cid, opcode, direction) and counts READs with repeated destinations (`prp_dup_dest_reads`, last PRP1). |
+| `hv_nvme_queue.h:214-243, 275-280` | `enum vnvme_prp_rule`, `struct vnvme_prp_refusal`, the counters. `_end` unchanged at 0x7d0000. |
+| `src/hv/win/hv_win_status.c` | the `NVME-ERR` line appends `prp rule <name> seg addr len other`. A new line, `HV/win r4.14 PRP-REFUSE #n cmd cid op dir rule seg addr len other`, is printed for the first 64 refusals and then every 256th; refusals that wrap out of the log are counted. The NV line appends `prp refusals <rule>:<n>` and `dup-dest reads N (last prp1)`. |
+| `hv_exc.c`, `hv_win_status.c` | the console tag is now `HV/win r4.14`. |
 
-`src/hv/win/s1/` (window, ANS driver, NVMe queue, native link) is byte-identical to r4.6 (`diff -rq`: no output).
-`src/mcc.c`, `src/mcc.h`, `src/exception.c` are byte-identical to smp2h: **the carveout-unmapping fix for the
-intermittent early EL2 SError is present** (r4.6 ported it; `r46_mcc.py` passes).
+## Tests (`tests-vs-r4.13.patch`, sha256 `a78e5b61…`)
+- **Full tier (`fbtest.py full`): 28/28 PASS** (`full-tier.out`). It includes S0 5,719,797 checks, S1 9,346, handoff
+  63,306, review 15.2 M, confirm 3.5 M, r2 + mutants, native stage 0-3, r46-run and uefi-e2e.
+- **Mutants tier: 11/11 PASS** (`mutants-tier.out`): native 231 scenarios, 32.1 M checks, mutants **96/96** (r4.13: 94 + the 2 new), twin-proof and stage-proof pass, b3 5/5, oracle 4/4, gap 16.
+- **New tests.**
+  - r2 `test_r2.c`: the refusal log records rule, address, segment and order for 4 existing refusals.
+  - r2 `test_r2.c`: a repeated destination page succeeds (last copy wins, the skipped page is untouched), including
+    PRP1 repeated in the list.
+  - r2 `test_r2.c`: a repeated page outside RAM is still refused (data-admission), and a partial overlap is still
+    refused (data-overlap).
+  - native `r414_dup_pages` (stage 3, rw backend): the READ with a repeated page succeeds. A WRITE with a repeated
+    source page gets 0x4 with rule data-overlap, nothing reaches ANS, and media and the outside of the window are
+    unchanged.
+  - 4 new mutants (r2: dup refused, rule not recorded; native: WRITE overlap allowed, READ dup refused).
+- **Changed oracles (2, not deleted).** Both asserted that an exact repeat of a READ destination page is refused:
+  - S0 `test_s0.c:300` (entries `{DATA+PAGE, DATA+PAGE}`);
+  - handoff `handoff-tests.c:106` (PRP1 repeated in the list).
 
-## Review of the admission change (`hv_storage_guest_span`, r4.7 `hv_win_storage_mem.c:115-178`)
+  Both now assert success with the data placement checked. The handoff case also adds the unaligned/partial
+  variant, which is still refused. The neighbouring partial-overlap case (S0 `:302`) and every list, queue and
+  admission refusal are unchanged. Reviewers should know this is a deliberate policy change: duplicate READ
+  destinations are now accepted.
 
-Can a READ or WRITE now touch anything but guest RAM? **No.** Everything that decides *where* still runs first and is untouched:
-- lease state + dispatch context (`:121-126`), non-zero length ≤ `HV_SM_MAX_SPAN`, no wrap (`:127`);
-- the whole span inside one registered guest RAM range (`:129-136`); no overlap with the resident interval or any of the
-  launcher's protected ranges (resident/heaps, ADT, boot args, FD + RAM disk, Mu handoff, holes, MMIO below RAM, synthetic
-  frames, framebuffer, FB shadow) (`:137-142`);
-- per 16 KiB leaf: must resolve in stage 2, identity IPA == PA, 16 KiB or 32 MiB leaf, Normal WB inner-shareable with AF,
-  no unknown bits (`:161-164`); a tracked bit is only allowed on 16 KiB leaves, flips only on tracked leaves (`:165-166`).
-
-What changed is only *which PMU states of an already-owned RAM page* pass:
-- untracked leaves: `g == d`, the old "exactly RW" test is unchanged (untracked RO / none / WO still refused);
-- tracked leaves: S2AP RO(01) or RW(11) pass the RW test after `| BIT(7)`; S2AP none(00)/WO(10) become 10 and are refused;
-- DIRTY (RW+XN), CODE (RO+X), PINNED (RW+X) admitted; **SCANNING (RO+XN, the in-transition state) refused** (`:165`);
-- the call runs under the big HV lock, the same lock as the fault handlers and the rescan, so no page changes state
-  between this check and the copy; `hv_win_pmu_dma_write` only edits permission bits of tracked leaves inside the
-  admitted span (same output address), then a broadcast TLBI completes before EL2's store.
-
-Window checks are untouched (no file under `s1/` changed): guest WRITE range/MDTS checks in `hv_nvme_queue.c`,
-`s1n_write`/`range_ok`/`transfer` pins in `native_window.c`, `xfer_owned` and the locked slot re-read in `ans_ro.c`.
-
-## Tests (logs: `check-20261110/logs/`)
-
-| suite | r4.7 |
+## Build (`S1N_STAGE=3 ./build.sh`, same container/make/tag scheme as r4.13; two builds bit-identical)
+| file | sha256 |
 |---|---|
-| `source/tests/win-pmu-rewrite` (incl. new refill tests) | **862,883 checks, 0 failed** |
-| `check-memory.py` (patched) | **449 + 33,226 PASS** |
-| `run-all-tests.sh` (SKIP_NATIVE=1; native run separately below) | **rc 0**: controller 9,746; S0 5,719,795; S1 9,346; handoff + 5 mutants; r2 300,414 + 36 mutants; review 15,177,307 + oracle 4/4; confirm + B3 5/5; gap mutants 16 (same 3 survivors as r4.4–r4.6); UEFI e2e 212/178/62; review-r3 pass; s1wc 5/5 |
-| native stage 0 / 1 / 2 | **49/49, 55/55, 55/55** scenarios (11,903 / 2,105,637 / 67,006,245 checks) |
-| native stage 3 | **230/230**, 32,076,622 checks, **mutants 94/94** |
-| `r45_mutants.py` / `r46_run.py` / `r46_mutant_followup.py` / overlay mutants | pass / pass / 9/9 / 7/7 |
-| `r46_context_path.py`, `r46_mcc.py`, `stage_inspection.py`, `r46_stage_inspection.py`, `link_path_test.py` | pass |
-| twin-v2 `twin_proof.py`, `stage_proof.py` | PASS (broken variants FAIL as required) |
-| `review-tests-r4/run.py` | rc 1, identical to r4.6 (`AssertionError ('b_frontend_bound_off', 0)`: superseded harness, r4.6 CHECK §1 row 17) |
+| `artifacts/m1n1-win-s1-r4.14-stage3.bin` | **`80450014e74230c0f1f804d0b03362e36d1f08a25ca1b6fefff66653fb779df3`** |
+| `artifacts/m1n1-raw.elf` | `6f45d63e5d4e69809106842e3fc24e555e43c2685e58a593a58cdb129338b4a0` |
+| `artifacts/m1n1.elf` | `5063f2882ffb363757f952876feee3a0b0afc8aaa86061faf9cc15504b1e45e8` |
+| `artifacts/build_tag.h` | `3c734e9b9e338d375257aa97b85b74ec9ed234f35a3a1c0c7b7a001a98ad15ff` |
 
-Runner: `check-20261110/run-suites.sh` → `logs/run-suites.out`.
+Tag `v2.0.0-169-g868807f9-dirty-s1r4.14-stage3`. Run B layout: check_len 0xd53d0, 249 relocs.
 
-## Binaries (pinned container `m5pro-windows/mu-build:f43`, image 66ebcb6da215; librust.a `4ed52ac9…c304` copied with the tree)
+## Run-B rebind (`runB-rebind/`: `before/` = r4.13 files + `BEFORE-SHA256`, `after/`, `rebind.patch`)
+- `bin/m1n1-win-s1-r4.14-stage3.bin` was added. `bin/image-layout.json` was regenerated with
+  `launcher/mk_image_layout_b.py`; r4.13's copy is kept as `bin/image-layout-r4.13.json`.
+- `run_b.py`:
+  - PIN bin/sha/version now point at r4.14 (were r4.13 `bd448da4…0c34`, `…s1r4.13-stage3`);
+  - proxyclient and the doc string point at the r4.14 directory;
+  - `STATUS_ST`/`STATUS_TAGS` now match `HV/win r4.14`.
+- `launcher/run_windows_b.py:100` `SOURCE_ROOT` and the `:1415` record string now say r4.14.
+- `tests/test_run_b.py`, `tests/fake_launcher.py`: the r4.14 strings and prefix.
+- `SHA256SUMS` was updated (all OK) and a note was added to `RUNB-READY.md`. `run-b.sh` is unchanged (`2d18f8ed`),
+  so the command is the same.
+- `test_run_b` 19 OK, `test_storage_contract_b` 16 OK, `test_os_memory_b` 4 OK, `test_resilient_upload` 9 OK.
+- **Revert:** copy `runB-rebind/before/*` back to their runB paths (`image-layout.json` → `bin/`;
+  `run_windows_b.py`, `storage_contract.py` → `launcher/`; `test_*.py`, `fake_launcher.py` → `tests/`).
 
-`check-20261110/build-all.sh`: `S1N_STAGE=n bash build.sh check-20261110/build/stage<n>-build<k>`, k = 1, 2, each from clean
-(build.sh deletes every object). **Build 1 = build 2, bit-identical** (.bin, both ELFs, build_tag.h) for both stages.
-Copies in `artifacts/` (+ `SHA256SUMS`).
+## The 0x1A bugcheck in `20261110-212026` (lead, not established)
+`MEMORY_MANAGEMENT (0x404, 0xFFFFF03FFE092370, 0x00200100D2800003, …)` at t+67 s came after 248 refused READs (40
+in the last minute). A user-mode heap corruption (`c0000374`) appeared at t+38 s. The same session shows the same
+signature: model/admission refusals 0, and PRP1 `0x1001f600000` repeated 20 times. So the refusals there have the
+same cause as above.
 
-| stage | m1n1-win-s1-r4.7-stageN.bin sha256 | m1n1-raw.elf | m1n1.elf | size |
-|---|---|---|---|---|
-| **3** | **`8d8ba1608a76892e95fcaf95a8d14bd28b3d1857f6c90f13222c6253e6802d7f`** | `9778585ee0b7f8fb284abcab3878630faf22907457bf54ac203756c94a1cf1a7` | `ab33293fa4365ff8812f341f795c6ddcd5ac8d4ff5bbc4d44a8b75a9c2f5f4fb` | 8,192,000 |
-| 0 | `ef7c86dca70b21e588f07e2a5943e0864b119c9e5dcb308516664844aa6eb2aa` | `debf29aa199350f4ffa8b909e94c2e426a54620a1aff623c932044d80d12f661` | `951b6a8a0188c599a74af9a12127021ea38c7b20076eed165cec5bf748520406` | 7,143,424 |
+**Lead:** the 0x1A is a consequence of in-page I/O failures on the memory manager's paging path (failed clustered
+reads, retries and error paths), not the resident altering guest memory. A refused command copies nothing. The
+resident writes guest memory only through admitted plan segments and CQEs. PA 0x100D2800000 appears in no logged
+command. The exact meaning of subcode 0x404 is unverified. Rerun r4.14: if the refusals vanish and 0x1A does not
+recur, the lead holds.
 
-`build_tag.h` = `v2.0.0-169-g868807f9-dirty-s1r4.7-stageN` (stage 3 `370ca6a6…`, stage 0 `050c3940…`); the inherited
-policy marker `M5W-S1N-R4.5-STAGE-N` occurs once with the right N.
-
-### What the launcher needs (from `nm` of the stage-3 ELF; `check-20261110/build/nm-*.txt`)
-
-| symbol | stage 3 | stage 0 | r4.6 stage 3 |
-|---|---|---|---|
-| `_end` (resident size) | **0x7d0000** | 0x6d0000 | 0x7d0000 (unchanged) |
-| `_bss_start` / `_bss_end` | 0x160000 / 0x791bd0 | 0x160000 / 0x691bd0 | same |
-| `controller` (S1DG = +0x21088) | 0x426000 | 0x426000 | same |
-| `hv_win_storage_prepare` | 0x59600 | 0x59600 | 0x595c0 (+0x40) |
-| `hv_storage_guest_span` | 0x59100 | 0x59100 | same |
-| `hv_win_pmu_dma_write` | 0x63fa0 | 0x63a20 | absent |
-| `.rela.dyn` start (live-image check length) | 0xd44b0 | 0xd44b0 | |
-
-The pmu-reads change adds no data, so the resident size is the r4.6 value: PREP's `resident_size` (launcher:
-`heap_top + 32 MiB − universe base`) must cover `_base.._end` = 0x7d0000 bytes, which PREP itself checks
-(`hv_win_storage.c:119`). Binary check: `hv_storage_guest_span` calls `hv_win_pmu_dma_write` (`bl 63fa0` at 0x59308,
-`check-20261110/build/disasm-guest-span-stage3.txt`).
-
-## Unverified until hardware
-The refill path on real page-ins (RUN.txt / console "device refills N" > 0 and no DATA_TRANSFER_ERROR completions),
-broadcast-TLBI cost under page-in load, and everything r4.6 CHECK §6/§7 lists (ANS at Windows' write rate, FLUSH latency).
-Note: after native select the r4.x proxy lock refuses `P_HV_WIN_PMU_STATS`; the counter is only visible in the console
-line the resident prints at guest exit (`hv_win_pmu_report`, on SYSTEM_OFF/RESET).
+## Unverified
+- The dummy-page root cause is inferred (no captured PRP lists).
+- Not run on hardware. Not independently reviewed: the change touches only the READ/guest-destination direction;
+  the WRITE checks are unchanged and covered by the new test and mutant.

@@ -36,6 +36,8 @@ mutants = [
  ('cq_ack_blocked_after_cfs', N, 'if (!cq && (m->regs.csts&CSTS_CFS)) why|=S1DG_DB_CFS;', 'if (m->regs.csts&CSTS_CFS) why|=S1DG_DB_CFS;'),
  ('prp_list_offset_rejected', Q, 'if (!list || (list & 7) || frags == VNVME_MAX_LIST_FRAGS) return false;', 'if (!list || (list & (VNVME_PAGE_SIZE - 1)) || frags == VNVME_MAX_LIST_FRAGS) return false;'),
  ('prp_chain_offset_accepted', Q, '                if (frags && (list & (VNVME_PAGE_SIZE - 1))) return false; /* chained: page aligned */\n', ''),
+ ('r414_read_dup_dest_refused', Q, 'if (!to_guest || n != VNVME_PAGE_SIZE ||', 'if (true ||'),
+ ('r414_rule_not_recorded', Q, '    ctrl->prp_refusals[rule]++;', '    ctrl->prp_refusals[rule]++; rule = 0;'),
  ('prp_fragment_overlap_unchecked', Q, '        for (size_t i = 0; i < frags; i++)\n            if (overlaps(addr, n, frag_addr[i], frag_len[i])) return false;\n', ''),
  ('intms_not_reset', N, 'm->regs.csts=0;m->regs.cc=value;m->regs.intms=0;', 'm->regs.csts=0;m->regs.cc=value;'),
  ('iosqes_strict_at_enable', N, 'return (sq==0||sq==6) && (cq==0||cq==4);', 'return sq==6 && cq==4;'),

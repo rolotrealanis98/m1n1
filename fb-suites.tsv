@@ -36,3 +36,7 @@ M	r46-overlay	*	python3 -I tests/native/r46_overlay_mutants.py > $FB_OUT/overlay
 M	oracle-mutants	*	python3 -I review-tests/oracle_mutants.py | tail -1; test ${PIPESTATUS[0]} = 0
 M	b3-mutants	*	python3 -I confirm-tests/b3_mutants.py | tail -1; test ${PIPESTATUS[0]} = 0
 M	gap-mutants	*	python3 -I review-tests/gap_mutants.py > $FB_OUT/gap.out 2>&1; grep -c '=> KILLED' $FB_OUT/gap.out | sed 's/^/gap mutants killed: /'
+QF	sysreg-r49	source/src/hv/hv_exc.c source/src/hv/hv_sysreg_logic.h source/tests/sysreg-r49/*	make -s -C source/tests/sysreg-r49 clean >/dev/null 2>&1; make -s -C source/tests/sysreg-r49 check 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+QF	hv-sysreg-1cpu	source/src/hv/hv_sysreg_logic.h source/proxyclient/m1n1/hv/* source/tests/win-launcher-smp2/*	/Users/rolo/Work/m1n1/.venv/bin/python source/tests/win-launcher-smp2/test_hv_sysreg_1cpu.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+QF	reflect-r410	source/src/hv/hv_sysreg_logic.h source/proxyclient/m1n1/hv/* source/tests/reflect-r410/*	/Users/rolo/Work/m1n1/.venv/bin/python source/tests/reflect-r410/test_reflect_vs_python.py 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+QF	nvme-intx-r412	source/src/hv/win/s1/hv_nvme_queue.* source/tests/nvme-intx-r412/*	make -s -C source/tests/nvme-intx-r412 clean >/dev/null 2>&1; make -s -C source/tests/nvme-intx-r412 check 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0

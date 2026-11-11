@@ -144,9 +144,9 @@ static void tests_reads(void)
         CHECK(submit(1,cmd(VNVME_IO_READ,1,lba,1,DATA,0))==0);pattern(DATA,lba,1);
     }
     read_reject(cmd(VNVME_IO_READ,2,0,1,DATA,0),VNVME_SC_INVALID_NAMESPACE);
-    read_reject(cmd(VNVME_IO_READ,1,40,1,DATA,0),VNVME_SC_INVALID_FIELD);
-    read_reject(cmd(VNVME_IO_READ,1,39,2,DATA,DATA+PAGE),VNVME_SC_INVALID_FIELD);
-    read_reject(cmd(VNVME_IO_READ,1,UINT64_MAX,2,DATA,DATA+PAGE),VNVME_SC_INVALID_FIELD);
+    read_reject(cmd(VNVME_IO_READ,1,40,1,DATA,0),VNVME_SC_LBA_OUT_OF_RANGE); /* r4.13: was 0x02 */
+    read_reject(cmd(VNVME_IO_READ,1,39,2,DATA,DATA+PAGE),VNVME_SC_LBA_OUT_OF_RANGE);
+    read_reject(cmd(VNVME_IO_READ,1,UINT64_MAX,2,DATA,DATA+PAGE),VNVME_SC_LBA_OUT_OF_RANGE);
     read_reject(cmd(VNVME_IO_READ,1,0,33,DATA,LIST),VNVME_SC_INVALID_FIELD);
 }
 static void tests_prps(void)
@@ -301,7 +301,12 @@ static void tests_alias_policy(void)
     memcpy(mem(LIST),entries,2*sizeof(u64));
     read_reject(cmd(VNVME_IO_READ,1,0,3,DATA,LIST),VNVME_SC_DATA_TRANSFER_ERROR);
     entries[1]=DATA+PAGE;memcpy(mem(LIST),entries,2*sizeof(u64));
-    read_reject(cmd(VNVME_IO_READ,1,0,3,DATA,LIST),VNVME_SC_DATA_TRANSFER_ERROR);
+    /* r4.14: an exact whole-page repeat of a READ destination is accepted (Windows points the
+     * resident pages of a clustered in-page read at one dummy page); r2.1-r4.13 completed it 0x04.
+     * The last copy wins, the third page is untouched; the partial overlap below is still refused. */
+    {memset(mem(DATA),0x5c,32*PAGE);unsigned b4=reads;
+     CHECK(submit(1,cmd(VNVME_IO_READ,1,0,3,DATA,LIST))==0);CHECK(reads>b4);
+     pattern(DATA,0,1);pattern(DATA+PAGE,2,1);unchanged(DATA+2*PAGE,30*PAGE,0x5c);}
     entries[0]=DATA;entries[1]=DATA+PAGE;memcpy(mem(LIST),entries,2*sizeof(u64));
     read_reject(cmd(VNVME_IO_READ,1,0,2,DATA+19,LIST),VNVME_SC_DATA_TRANSFER_ERROR);
     /* Writable metadata: alias rejection must not depend on a read-only list. */

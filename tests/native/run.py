@@ -67,7 +67,7 @@ SCENARIOS += (SECA_BACKUP + [f"secA_gpt_frozen_{i}" for i in range(1, 16)] + [f"
 if os.environ.get("S1N_STAGE", "3") == "3":
     # CHECK.md: split differential (flat reference, scattered guest pages), mid-request failure, FUA order
     SCENARIOS += ["chk_split_diff", "chk_split_fua"] + [f"chk_split_error_{i}" for i in (1, 2, 5, 8)]
-    SCENARIOS += [f"secA_rw_write_{i}" for i in range(6)] + ["secA_rw_read_max1", "secA_rw_random", "secA_stray_slots"]
+    SCENARIOS += [f"secA_rw_write_{i}" for i in range(6)] + ["secA_rw_read_max1", "secA_rw_random", "secA_stray_slots", "r414_dup_pages"]
 else:
     SCENARIOS += [f"secA_stage_guest_read_{i}" for i in range(6)]
 
@@ -146,7 +146,7 @@ MUTANTS = [
   [('s1/hv_nvme_queue.c', 'if (!ctrl->ops->read_blocks(ctrl->opaque, lba + done, n, buffer))',
     'if (!ctrl->ops->read_blocks(ctrl->opaque, lba + done + (done ? 1 : 0), n, buffer))')]),
  ('chk_read_refusal_reaches_backend',
-  [('s1/hv_nvme_queue.c', '        ctrl->refused_reads++;\n        return VNVME_SC_INVALID_FIELD;\n    }',
+  [('s1/hv_nvme_queue.c', '        ctrl->refused_reads++;\n        return VNVME_SC_LBA_OUT_OF_RANGE; /* r4.13: was Invalid Field (0x02); NVMe 1.4 Fig. 129 */\n    }',
     '        ctrl->refused_reads++;\n    }')]),
 
  ('t1_backup_hdr_fields_skipped', [('s1/native_window.c', '        return fail(S1N_E_BACKUP);\n    memcpy(tmp, header, bsize);', '        (void)0;\n    memcpy(tmp, header, bsize);')]),
@@ -399,6 +399,10 @@ MUTANTS = [
     '            dma.prp_list[i - 1] = (u64)buf + (u64)(i + 1) * ANS_RO_BLOCK;')]),
  ('r4_canary_missing',
   [('s1/ans_ro.c', '        if (first < st.w_abs_min_first) st.w_abs_min_first = first;\n', '')]),
+ ('r414_write_src_overlap_allowed',
+  [('s1/hv_nvme_queue.c', 'if (!to_guest || n != VNVME_PAGE_SIZE ||', 'if (n != VNVME_PAGE_SIZE ||')]),
+ ('r414_read_dup_dest_refused',
+  [('s1/hv_nvme_queue.c', 'if (!to_guest || n != VNVME_PAGE_SIZE ||', 'if (true ||')]),
  ('r4_vwc_dishonest', [('s1/hv_nvme_queue.c', '    data[525] = ctrl->caps.vwc ? 1 : 0;', '    data[525] = 0;')]),
  ('r4_nsattr_wp_in_rw',
   [('s1/hv_nvme_queue.c', '    data[99] = ctrl->caps.writable ? 0 : 1;', '    data[99] = 1;')]),

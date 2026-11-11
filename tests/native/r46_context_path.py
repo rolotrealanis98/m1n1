@@ -12,8 +12,11 @@ code='''#include <assert.h>
 #include "native_link.h"
 #include "proxy.h"
 int cpu,boot_cpu_idx;u32 uartproxy_storage_exceptions;
+bool hv_win_storage_guest_ram_contains(u64 a,u64 n){(void)a;(void)n;return false;}
 enum {START_BOOT,START_EXCEPTION,START_EXCEPTION_LOWER,START_HV};
-struct uartproxy_msg_start {u32 reason;};
+struct exc_info {u64 regs[46];};
+/* r4.9: r4.8 uartproxy.c brackets the session with start->info (s1n_link_exc_ctx); stub carries it */
+struct uartproxy_msg_start {u32 reason; u32 code; struct exc_info *info;};
 '''+wrapper+'''
 static int depth,code;
 static int uartproxy_run_inner(struct uartproxy_msg_start *s) {
@@ -29,7 +32,7 @@ int main(void){
  s1n_link_lock();assert(s1n_storage_context());
  cpu=1;assert(!s1n_storage_context());assert(!s1n_link_proxy(P_HV_WIN_STORAGE_PREP,false));cpu=0;
  for(unsigned reason=0;reason<4;reason++)for(code=-1;code<3;code++){
-  struct uartproxy_msg_start s={reason};assert(uartproxy_run(&s)==code);assert(!uartproxy_storage_exceptions);assert(s1n_storage_context());
+  struct uartproxy_msg_start s={reason,0,0};assert(uartproxy_run(&s)==code);assert(!uartproxy_storage_exceptions);assert(s1n_storage_context());
  }
  assert(uartproxy_run(NULL)==code);assert(!uartproxy_storage_exceptions);
  return 0;

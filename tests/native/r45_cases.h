@@ -20,7 +20,7 @@ static void r45_boundary(int which, bool write, bool direct)
         if (write) CHECK(!s1n_write(lbas[which], counts[which], data));
         else CHECK(!s1n_read(lbas[which], counts[which], data));
     } else if (write) CHECK(guest_write(lbas[which], counts[which], 7, 0) == VNVME_SC_INVALID_FIELD);
-    else CHECK(guest_read(lbas[which], counts[which], DATA) == VNVME_SC_INVALID_FIELD);
+    else CHECK(guest_read(lbas[which], counts[which], DATA) == VNVME_SC_LBA_OUT_OF_RANGE); /* r4.13: was 0x02 */
     CHECK(F.nio == n);
     if (!write && !direct) {
         CHECK(ans_ro_state() == ANS_RO_LIVE);

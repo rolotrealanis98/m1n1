@@ -158,14 +158,14 @@ static void r46_read_probe(void)
     const u32 n[] = {2, 1, 1, 256};
     for (unsigned i=0;i<4;i++) {
         unsigned before=F.nio;
-        CHECK(guest_read(l[i],n[i],DATA)==VNVME_SC_INVALID_FIELD);
+        CHECK(guest_read(l[i],n[i],DATA)==VNVME_SC_LBA_OUT_OF_RANGE); /* r4.13 */
         CHECK(F.nio==before && ans_ro_state()==ANS_RO_LIVE);
         CHECK(controller.queue.refused_reads==i+1);
         CHECK(guest_write(0,1,i+1,0)==0);
         expect_guest(0,1,i+1);
     }
     unsigned before=F.nio;
-    CHECK(io_cmd(VNVME_IO_READ,UINT64_MAX,1,DATA,65535)==VNVME_SC_INVALID_FIELD);
+    CHECK(io_cmd(VNVME_IO_READ,UINT64_MAX,1,DATA,65535)==VNVME_SC_LBA_OUT_OF_RANGE); /* r4.13 */
     CHECK(F.nio==before && ans_ro_state()==ANS_RO_LIVE && controller.queue.refused_reads==5);
     CHECK(hv_win_storage_stat(12)==5);
 

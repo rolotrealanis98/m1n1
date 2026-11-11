@@ -94,6 +94,7 @@ struct vgic_irq {
     bool active : 1;
     bool edge : 1;
     bool aic_masked : 1;
+    bool holdoff : 1; /* r4.12: declined while its line stayed high; re-presented on the next tick */
 };
 
 struct vgic_vcpu {
@@ -131,6 +132,12 @@ static struct {
     u32 unrouted_seen[VGIC_AIC_LINES / 32];
     u32 pl011_intid; /* SPI of the emulated PL011 (hv_win_pl011.c), 0 = none */
     u64 nr_sgi, nr_aic, nr_maint, nr_overflow;
+    /* r4.11 diagnostics: per watched INTID slot, LR loads with PENDING (injections) and deactivations
+     * observed when folding an LR back (neither pending nor active any more) */
+    u64 inj[8], deact[8];
+    /* r4.12: level re-presentation hold-off for the S1 NVMe SPI (see vgic_fold_lr) */
+    u64 holdoffs, holdoff_releases;
+    bool holdoff_any;
 } vgic;
 
 static spinlock_t vgic_lock = SPINLOCK_INIT;
@@ -171,7 +178,8 @@ static bool vgic_latched(const struct vgic_irq *irq)
 
 static bool vgic_pending(const struct vgic_irq *irq)
 {
-    return irq->pending_latch || (!vgic_latched(irq) && irq->line_level);
+    /* r4.12: a held-off level interrupt is not pending until the next hypervisor tick */
+    return irq->pending_latch || (!vgic_latched(irq) && irq->line_level && !irq->holdoff);
 }
 
 /* The vCPU that must list this IRQ: where it is active, else its target when it can be signalled */
@@ -265,6 +273,8 @@ static void vgic_set_level(struct vgic_irq *irq, bool level)
     if (irq->line_level == level)
         return;
     irq->line_level = level;
+    if (!level)
+        irq->holdoff = false; /* r4.12: a later rising edge is presented at once */
     if (irq->edge && level)
         irq->pending_latch = true;
     vgic_update(irq);
@@ -344,6 +354,20 @@ static void vgic_clear_aprs(int nr)
     }
 }
 
+
+/* r4.11: watched INTIDs for the status line: 0 SGI, 1 CNTV(27), 2 CNTP(30), 3 PL011, 4 NVMe SPI 66,
+ * 5 other PPI, 6 other SPI */
+#define VGIC_DIAG_NVME 66
+static unsigned vgic_diag_slot(u32 intid)
+{
+    if (intid < 16) return 0;
+    if (intid == GIC_PPI_CNTV) return 1;
+    if (intid == GIC_PPI_CNTP) return 2;
+    if (intid >= GIC_NR_PRIVATE && intid == vgic.pl011_intid) return 3;
+    if (intid == VGIC_DIAG_NVME) return 4;
+    return intid < GIC_NR_PRIVATE ? 5 : 6;
+}
+
 static u64 vgic_make_lr(struct vgic_irq *irq)
 {
     u64 lr = FIELD_PREP(ICH_LR_VINTID, irq->intid) | ICH_LR_GROUP1 |
@@ -365,6 +389,7 @@ static u64 vgic_make_lr(struct vgic_irq *irq)
 
     if (allow_pend && vgic_pending(irq)) {
         lr |= ICH_LR_PENDING_BIT;
+        vgic.inj[vgic_diag_slot(irq->intid)]++;
         if (vgic_latched(irq))
             irq->pending_latch = false; /* the LR holds the pending state now */
     }
@@ -379,6 +404,8 @@ static void vgic_fold_lr(struct vgic_irq *irq, u64 lr, u8 me)
     bool lr_act =
         ((lr & ICH_LR_ACTIVE_BIT) && !(irq->req & REQ_CLR_ACT)) || (irq->req & REQ_SET_ACT);
 
+    if (!lr_act && !lr_pend && (lr & (ICH_LR_PENDING_BIT | ICH_LR_ACTIVE_BIT)) == 0)
+        vgic.deact[vgic_diag_slot(irq->intid)]++;
     irq->active = lr_act;
     if (lr_act)
         irq->act_vcpu = me;
@@ -391,6 +418,21 @@ static void vgic_fold_lr(struct vgic_irq *irq, u64 lr, u8 me)
         irq->pending_latch = false;
         if (irq->intid >= GIC_NR_PRIVATE && irq->intid == vgic.pl011_intid)
             irq->line_level = hv_win_pl011_irq_level();
+        /*
+         * r4.12: the guest deactivated the emulated NVMe line while it is still high, i.e. its
+         * handler declined it. Windows' stornvme INTx ISR declines while its completion DPC is
+         * in flight (the DPC acks the CQ and then unmasks with INTMC, which re-raises the line
+         * if a completion is still pending); re-presenting at once starves that DPC on one vCPU
+         * (hardware run 20261110-200708: ~440k deliveries/s, the CQE never acked). Hold the
+         * re-presentation until the next hypervisor tick (<= 1 ms), which is what the twin's
+         * deferred INTx re-pulse did; a claimed interrupt (INTMS before EOI) drops the line and
+         * is unaffected. Interrupt latency is not architecturally bounded, so this is legal.
+         */
+        if (irq->intid == VGIC_DIAG_NVME && irq->line_level) {
+            irq->holdoff = true;
+            vgic.holdoffs++;
+            vgic.holdoff_any = true;
+        }
     }
 
     irq->req = 0;
@@ -1273,6 +1315,22 @@ void hv_vgic3_maintenance(void)
     }
 }
 
+/* r4.12: hypervisor tick (1 kHz, hv_tick): end the hold-off, re-presenting a still-high line */
+void hv_vgic3_tick(void)
+{
+    if (!vgic.ready || !__atomic_load_n(&vgic.holdoff_any, __ATOMIC_ACQUIRE))
+        return;
+    spin_lock(&vgic_lock);
+    vgic.holdoff_any = false;
+    struct vgic_irq *irq = vgic_get_irq(VGIC_NONE, VGIC_DIAG_NVME);
+    if (irq && irq->holdoff) {
+        irq->holdoff = false;
+        vgic.holdoff_releases++;
+        vgic_update(irq);
+    }
+    vgic_unlock();
+}
+
 /* Read-only pre-start ownership check for the isolated S1 synthetic SPI. */
 bool hv_vgic3_spi_unassigned(u32 intid)
 {
@@ -1281,4 +1339,49 @@ bool hv_vgic3_spi_unassigned(u32 intid)
     struct vgic_irq *irq = vgic_get_irq(VGIC_NONE, intid);
     return irq->aic_line == VGIC_NO_LINE && !irq->enabled && !irq->active &&
            !irq->pending_latch && !irq->line_level && intid != vgic.pl011_intid;
+}
+
+/*
+ * r4.11 diagnostics: one console line with the virtual GIC state, for the periodic status report
+ * (hv_exc.c). Lock-free reads of counters/flags (a torn value is harmless here). Watched INTIDs:
+ * en/pend/act/level flags, injections (LR loads with PENDING) and deactivations since boot.
+ */
+static void vgic_diag_irq(const char *name, struct vgic_irq *irq, unsigned slot)
+{
+    if (!irq) return;
+    printf(" %s[%c%c%c%c inj %lu deact %lu]", name, irq->enabled ? 'E' : '-',
+           vgic_pending(irq) ? 'P' : '-', irq->active ? 'A' : '-', irq->line_level ? 'L' : '-',
+           (unsigned long)vgic.inj[slot], (unsigned long)vgic.deact[slot]);
+}
+
+void hv_vgic3_status_line(const char *prefix)
+{
+    if (!vgic.ready) {
+        printf("%s vgic: not ready\n", prefix);
+        return;
+    }
+    u8 me = vgic_cur_vcpu();
+    printf("%s vgic: grp1 %d pmr 0x%x sgi %lu aic %lu maint %lu ovf %lu", prefix, vgic.grp1, vgic.pri_mask,
+           (unsigned long)vgic.nr_sgi, (unsigned long)vgic.nr_aic, (unsigned long)vgic.nr_maint,
+           (unsigned long)vgic.nr_overflow);
+    if (me != VGIC_NONE) {
+        vgic_diag_irq("CNTV27", vgic_get_irq(me, GIC_PPI_CNTV), 1);
+        vgic_diag_irq("CNTP30", vgic_get_irq(me, GIC_PPI_CNTP), 2);
+    }
+    vgic_diag_irq("NVMe66", vgic_get_irq(VGIC_NONE, VGIC_DIAG_NVME), 4);
+    if (vgic.pl011_intid)
+        vgic_diag_irq("PL011", vgic_get_irq(VGIC_NONE, vgic.pl011_intid), 3);
+    printf(" sgi inj %lu ppi* %lu spi* %lu | holdoff %lu rel %lu", (unsigned long)vgic.inj[0],
+           (unsigned long)vgic.inj[5], (unsigned long)vgic.inj[6], (unsigned long)vgic.holdoffs,
+           (unsigned long)vgic.holdoff_releases);
+    if (me != VGIC_NONE) {
+        struct vgic_vcpu *vc = &vgic.vcpu[me];
+        printf(" | ICH_HCR 0x%lx MISR 0x%lx VMCR 0x%lx ELRSR 0x%lx ready %d lr_used 0x%x", mrs(SYS_ICH_HCR_EL2),
+               mrs(SYS_ICH_MISR_EL2), mrs(SYS_ICH_VMCR_EL2), mrs(SYS_ICH_ELRSR_EL2), vc->ready, vc->lr_used);
+        for (u32 used = vc->lr_used; used; used &= used - 1) {
+            int i = __builtin_ctz(used);
+            printf(" LR%d=%u:%lx", i, vc->lr_intid[i], (unsigned long)(vgic_read_lr(i) >> 62));
+        }
+    }
+    printf("\n");
 }
