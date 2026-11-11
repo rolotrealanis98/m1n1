@@ -284,13 +284,12 @@ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz)
 
 bool rtkit_alloc_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr, size_t sz)
 {
+    sz = ALIGN_UP(sz, 16384); /* dcpw-live-1: round first, so the mapping covers only our buffer */
     bfr->bfr = memalign(SZ_16K, sz);
     if (!bfr->bfr) {
         rtkit_printf("unable to allocate %zu buffer\n", sz);
         return false;
     }
-
-    sz = ALIGN_UP(sz, 16384);
 
     bfr->sz = sz;
     if (!rtkit_map(rtk, bfr->bfr, sz, &bfr->dva))
@@ -634,7 +633,10 @@ static bool rtkit_boot_inner(rtkit_dev_t *rtk)
     struct asc_message msg;
 
     /* boot the IOP if it isn't already */
-    if (!rtk->mtp) asc_cpu_start(rtk->asc);
+    /* dcpw-live-1: adopting a running IOP through the hooks writes nothing to CPU_CONTROL
+     * (Linux skips the RUN write on adopt, REF/dcp.c:4920-4925) */
+    if (!rtk->mtp && !(rtk->map_hook && asc_cpu_running(rtk->asc)))
+        asc_cpu_start(rtk->asc);
     /* can be sent unconditionally to wake up a possibly sleeping IOP */
     msg.msg0 = FIELD_PREP(MGMT_TYPE, MGMT_MSG_IOP_PWR_STATE) |
                FIELD_PREP(MGMT_PWR_STATE, RTKIT_POWER_INIT);

@@ -28,8 +28,10 @@
 #define DCP_ASC_BASE     0x48ae00000ull
 #define DART_DCP_BASE    0x48a340000ull
 #define DART_DISP0_BASE  0x48a300000ull
-#define DCPW_VM_BASE     0x10000000000ull
-#define DCPW_VM_SIZE     (3ull << 40)
+/* our DVA window: root slots 16..31, claimed top-down: Linux's DCP shmem DVA on this machine is
+ * 0x1ffffe00000 (slot 31; stage-c-dcp-journal-excerpt.txt:7-12). Firmware holds slot 16. */
+#define DCPW_WIN_BASE    0x10000000000ull
+#define DCPW_WIN_SIZE    (1ull << 40)
 
 static void *phys(u64 pa) { return (void *)(uintptr_t)pa; }
 
@@ -53,7 +55,7 @@ static uint64_t d_alloc(void *c)
 	dc_civac_range(p, SZ_16K);
 	return (u64)(uintptr_t)p;
 }
-static void d_barrier(void *c) { (void)c; dma_wmb(); }
+static void d_barrier(void *c) { (void)c; sysop("dsb sy"); }   /* review item 10 */
 static const struct dart4_io dio = { 0, d_rd64, d_wr64, d_mrd, d_mwr, d_alloc, d_barrier };
 
 /* ---- live io over m1n1 rtkit ---- */
@@ -155,6 +157,11 @@ int dcpw_live_run(u64 stage, u64 nflips, u64 report_pa, u64 flags)
 		rep->magic = DCPW_LIVE_REPORT_MAGIC;
 		rep->stage = (u32)stage;
 	}
+	static int ran;
+	if (ran++) {
+		printf("dcpw: one live run per boot (the DCP keeps DVAs into our heap); cold reboot first\n");
+		return -15;
+	}
 	if (stage < LIVE_ATTACH || stage > LIVE_FULL) {
 		printf("dcpw: stage %lu refused\n", stage);
 		return -1;
@@ -177,15 +184,15 @@ int dcpw_live_run(u64 stage, u64 nflips, u64 report_pa, u64 flags)
 		return -4;
 	}
 	STEP(2);
-	if (dart4_init(&g_ddcp, &dio, DART_DCP_BASE, 23, 0x0202, root23, DCPW_VM_BASE, DCPW_VM_SIZE, 2) ||
-	    dart4_init(&g_dpio, &dio, DART_DISP0_BASE, 16, 0x0202, root16, DCPW_VM_BASE, DCPW_VM_SIZE, 1) ||
-	    dart4_init(&g_ddisp, &dio, DART_DISP0_BASE, 0, 0x0202, root0, DCPW_VM_BASE, DCPW_VM_SIZE, 1)) {
+	if (dart4_init(&g_ddcp, &dio, DART_DCP_BASE, 23, root23, DCPW_WIN_BASE, DCPW_WIN_SIZE, 2) ||
+	    dart4_init(&g_dpio, &dio, DART_DISP0_BASE, 16, root16, DCPW_WIN_BASE, DCPW_WIN_SIZE, 1) ||
+	    dart4_init(&g_ddisp, &dio, DART_DISP0_BASE, 0, root0, DCPW_WIN_BASE, DCPW_WIN_SIZE, 1)) {
 		printf("dcpw: dart4 init refused (dcp %d pio %d disp %d); nothing written\n", g_ddcp.failed,
 		       g_dpio.failed, g_ddisp.failed);
 		return -5;
 	}
-	printf("dcpw: dart-dcp L1 slots %u/%u, piodma %u, scanout %u\n", g_ddcp.slot[0], g_ddcp.slot[1], g_dpio.slot[0],
-	       g_ddisp.slot[0]);
+	printf("dcpw: root slots dart-dcp %u/%u (DART v%x), piodma %u, scanout %u (v%x)\n", g_ddcp.slot[0], g_ddcp.slot[1],
+	       g_ddcp.version, g_dpio.slot[0], g_ddisp.slot[0], g_ddisp.version);
 	STEP(3);
 	asc_dev_t *asc = asc_init("/arm-io/dcp");
 	if (!asc)
@@ -212,7 +219,13 @@ int dcpw_live_run(u64 stage, u64 nflips, u64 report_pa, u64 flags)
 	g_live.timeout_polls = 400000;                        /* about 20 s with the 50 us idle delay */
 	{
 		u64 base, size;
-		for (int i = 0; i < LIVE_MAX_REGS && !adt_reg("/arm-io/disp0", i, &base, &size); i++) {
+		/* disp-0..4 in ADT order (Linux DT reg-names); reg[4] must be the PMC window */
+		if (adt_reg("/arm-io/disp0", 4, &base, &size) || base != 0x286700000ull) {
+			printf("dcpw: disp0 reg[4] is not the PMC window\n");
+			ret = -16;
+			goto out;
+		}
+		for (int i = 0; i < 5 && !adt_reg("/arm-io/disp0", i, &base, &size); i++) {
 			g_live.disp_regs[i] = base;
 			g_live.disp_reg_len[i] = size;
 			g_live.ndisp_regs = i + 1;
