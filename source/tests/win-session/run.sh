@@ -8,4 +8,3 @@ mkdir -p "$OUT"
 clang -std=gnu11 -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fsanitize=address,undefined \
     -fno-sanitize-recover=undefined -o "$OUT/test" "$OUT/test.c"
 "$OUT/test"
-echo
