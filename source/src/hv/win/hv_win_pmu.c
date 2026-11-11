@@ -55,6 +55,7 @@
 #define PMU_STUCK_LIMIT                                                                            \
     256 /* unproductive faults in a row at one PC before the stock path gets it */
 #define PMU_HEAP_MARGIN (16UL << 20)
+#define PMU_SKIP_PRINT_MAX 64 /* data-guard skips reported on the console (all are counted) */
 
 extern u64 hv_cpus_in_guest;
 
@@ -76,6 +77,7 @@ static struct {
     u32 nr_pinned;
     u32 ticks;
     u64 printed;
+    u64 skips_printed;
     struct pmu_log_entry log[HV_WIN_PMU_LOG_SIZE];
 } pmu;
 
@@ -226,6 +228,16 @@ static void pmu_record(void *arg, u32 index, u32 old_insn, u32 new_insn)
     }
 }
 
+static void pmu_skip(void *arg, u32 index, u32 old_insn, u32 next_word)
+{
+    struct pmu_scan *sc = arg;
+
+    if (pmu.skips_printed++ < PMU_SKIP_PRINT_MAX)
+        printf("HV/win: PMU rewrite: data guard kept IPA 0x%lx: 0x%08x (next word 0x%08x, fetch at "
+               "PC 0x%lx)\n",
+               sc->ipa + 4UL * index, old_insn, next_word, sc->elr);
+}
+
 static bool pmu_exec_fault(struct exc_info *ctx, u64 ipa)
 {
     u64 page = ipa & ~(PMU_PAGE - 1), pa;
@@ -256,7 +268,8 @@ static bool pmu_exec_fault(struct exc_info *ctx, u64 ipa)
 
     struct pmu_scan sc = {.ipa = page, .elr = ctx->elr};
     u64 kinds[PMU_RW_NR_KINDS] = {0};
-    u32 n = pmu_rw_rewrite_words((u32 *)pa, PMU_PAGE_WORDS, pmu_record, &sc, kinds);
+    u32 n = pmu_rw_rewrite_words_ex((u32 *)pa, PMU_PAGE_WORDS, pmu_record, pmu_skip, &sc, kinds);
+    pmu.stats[HV_WIN_PMU_DATA_SKIPS] += kinds[PMU_RW_SKIP_DATA];
 
     if (n) {
         /* to PoC (an MMU-off fetch reads memory), then every CPU's I-cache: lines of an older
@@ -452,13 +465,13 @@ void hv_win_pmu_report(void)
         "HV/win: PMU rewrite: %lu pages tracked, %lu scans, %lu pages rewritten, %lu words "
         "(PMCCNTR %lu, other mrs %lu, msr %lu); flips: write %lu, walker %lu; pinned %lu (list "
         "full %lu), sweeps %lu, unpinned %lu; spurious %lu, AT failures %lu, not ours %lu, stuck "
-        "%lu, device refills %lu\n",
+        "%lu, device refills %lu, data-guard skips %lu\n",
         s[HV_WIN_PMU_PAGES], s[HV_WIN_PMU_SCANS], s[HV_WIN_PMU_PAGES_REWRITTEN],
         s[HV_WIN_PMU_INSNS], s[HV_WIN_PMU_INSNS_PMCCNTR], s[HV_WIN_PMU_INSNS_MRS],
         s[HV_WIN_PMU_INSNS_MSR], s[HV_WIN_PMU_WRITE_FLIPS], s[HV_WIN_PMU_WALK_FLIPS],
         s[HV_WIN_PMU_PINS], s[HV_WIN_PMU_PIN_FULL], s[HV_WIN_PMU_SWEEPS], s[HV_WIN_PMU_UNPINS],
         s[HV_WIN_PMU_SPURIOUS], s[HV_WIN_PMU_IPA_FAIL], s[HV_WIN_PMU_NOT_OURS],
-        s[HV_WIN_PMU_STUCK], s[HV_WIN_PMU_DMA_RESETS]);
+        s[HV_WIN_PMU_STUCK], s[HV_WIN_PMU_DMA_RESETS], s[HV_WIN_PMU_DATA_SKIPS]);
 }
 
 #ifdef PMU_REWRITE_HOST_TEST

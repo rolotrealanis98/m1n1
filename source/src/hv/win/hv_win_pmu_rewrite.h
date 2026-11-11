@@ -34,6 +34,7 @@ enum pmu_rw_kind {
     PMU_RW_READ_PMCCNTR, /* mrs Xt, PMCCNTR_EL0 */
     PMU_RW_READ_OTHER,   /* mrs Xt, any other PMUv3 register */
     PMU_RW_WRITE,        /* msr <PMUv3 register>, Xt */
+    PMU_RW_SKIP_DATA,    /* PMU-looking word left alone: the next word cannot execute (data) */
     PMU_RW_NR_KINDS,
 };
 
@@ -57,15 +58,38 @@ static inline bool pmu_rw_is_pmu_reg(u32 op1, u32 crn, u32 crm)
 
 enum pmu_rw_kind pmu_rw_classify(u32 insn);
 
+/*
+ * True when <next> cannot be the instruction executed after a PMU access on this CPU, so the
+ * PMU-looking word before it is data, not code. Top five bits clear = op0 0000..0011 with bit 31
+ * clear: UDF/reserved (0000), unallocated (0001, 0011) and SVE (0010), which the T6050 does not
+ * implement outside streaming mode. An mrs/msr does not branch, so real code always executes the
+ * next word.
+ *
+ * Why (bugcheck 0x1A/0x404, 2026-11-10/11): stage 2 tracks 16 KiB, Windows allocates 4 KiB frames,
+ * so a first-execute scan also covers up to three sibling frames that may hold data. A page-table
+ * page there holds stage-1 descriptors whose low word, for an output address with PA[31:12] =
+ * 0xd53be (nG, AF, SH = 3, AttrIndx 0), decodes as mrs X3, PMEVTYPER<n>_EL0. The rewrite turned the
+ * user PTE 0x00200100_d53beXc3 into 0x00200100_d2800003 (movz x3, #0). The high word of every
+ * descriptor (bits 63:59 clear) is in this class, so the guard keeps every such low word intact.
+ */
+static inline bool pmu_rw_next_is_data(u32 next)
+{
+    return (next & 0xf8000000U) == 0;
+}
+
 /* The replacement word for a PMUv3 access, or <insn> itself when it is not one */
 u32 pmu_rw_replacement(u32 insn);
 
 /*
  * Rewrite every PMUv3 access in words[0..n) in place, each with one aligned 32-bit store. <rec>
  * (may be NULL) is called once per rewritten word with its index, the old and the new word.
+ * A PMU access whose next word (inside words[]) satisfies pmu_rw_next_is_data() is not rewritten:
+ * counts[PMU_RW_SKIP_DATA] is incremented and <skip> (may be NULL) is called with its index.
  * Returns the number of words rewritten; counts[kind] (may be NULL) is incremented per kind.
  */
 typedef void pmu_rw_record_fn(void *arg, u32 index, u32 old_insn, u32 new_insn);
 u32 pmu_rw_rewrite_words(u32 *words, u32 n, pmu_rw_record_fn *rec, void *arg, u64 *counts);
+u32 pmu_rw_rewrite_words_ex(u32 *words, u32 n, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
+                            void *arg, u64 *counts);
 
 #endif

@@ -43,6 +43,12 @@ u32 pmu_rw_replacement(u32 insn)
 
 u32 pmu_rw_rewrite_words(u32 *words, u32 n, pmu_rw_record_fn *rec, void *arg, u64 *counts)
 {
+    return pmu_rw_rewrite_words_ex(words, n, rec, NULL, arg, counts);
+}
+
+u32 pmu_rw_rewrite_words_ex(u32 *words, u32 n, pmu_rw_record_fn *rec, pmu_rw_record_fn *skip,
+                            void *arg, u64 *counts)
+{
     u32 done = 0;
 
     for (u32 i = 0; i < n; i++) {
@@ -55,6 +61,15 @@ u32 pmu_rw_rewrite_words(u32 *words, u32 n, pmu_rw_record_fn *rec, void *arg, u6
         enum pmu_rw_kind kind = pmu_rw_classify(old);
         if (kind == PMU_RW_NONE)
             continue;
+
+        /* data, not code (a stage-1 descriptor's low word, ...): see pmu_rw_next_is_data() */
+        if (i + 1 < n && pmu_rw_next_is_data(words[i + 1])) {
+            if (counts)
+                counts[PMU_RW_SKIP_DATA]++;
+            if (skip)
+                skip(arg, i, old, words[i + 1]);
+            continue;
+        }
 
         u32 new = pmu_rw_replacement(old);
         *(volatile u32 *)&words[i] = new; /* one aligned, single-copy atomic 32-bit store */

@@ -307,10 +307,18 @@ static void test_page(void)
             bool pmu = (round == 0 && (i == 0 || i == 4095)) || xorshift32() % 97 == 0;
             page[i] = pmu ? random_pmu_insn() : random_other_insn();
             pmu_at[i] = pmu;
-            if (pmu) {
-                want++;
-                want_counts[pmu_rw_classify(page[i])]++;
+        }
+        /* data guard: a PMU word followed by a word that cannot execute stays (counted as a skip) */
+        for (u32 i = 0; i < 4096; i++) {
+            if (!pmu_at[i])
+                continue;
+            if (i + 1 < 4096 && pmu_rw_next_is_data(page[i + 1])) {
+                pmu_at[i] = false;
+                want_counts[PMU_RW_SKIP_DATA]++;
+                continue;
             }
+            want++;
+            want_counts[pmu_rw_classify(page[i])]++;
         }
         memcpy(orig, page, sizeof(page));
         log.n = 0;
@@ -568,6 +576,58 @@ static void reset_world(void)
     m_fault_ok = true;
     m_hpfar_ipa = 0;
     host_cpu = 0;
+}
+
+/*
+ * Bugcheck 0x1A/0x404 (r4.13 and r4.14 runs, 2026-11-10/11): a stage-1 page-table page shared a
+ * 16 KiB stage-2 page with executed code. The user PTE 0x00200100_d53befc3 (PA 0x100d53be000, PXN,
+ * nG, AF, SH 3, AP 3, AttrIndx 0) has the low word mrs x3, PMEVTYPER30_EL0 and became
+ * 0x00200100_d2800003, the exact PTE contents in both bugchecks. The data guard keeps it.
+ */
+static void test_data_guard(void)
+{
+    static u32 page[4096], orig[4096];
+    static struct rec_log log;
+    u64 counts[PMU_RW_NR_KINDS] = {0};
+
+    CHECK(pmu_rw_classify(0xd53befc3U) == PMU_RW_READ_OTHER, "PTE low word is a PMU mrs");
+    CHECK(pmu_rw_replacement(0xd53befc3U) == 0xd2800003U, "replacement is the bugcheck's word");
+
+    /* a page-table page: PTEs (low, high) mapping consecutive frames around the hazardous one */
+    for (u32 e = 0; e < 2048; e++) {
+        u64 pa = 0x100d5300000ULL + ((u64)e << 12);
+        u64 pte = (e % 3 == 2) ? 0 : (0x0020000000000000ULL | pa | 0xfc3);
+        page[2 * e] = (u32)pte;
+        page[2 * e + 1] = (u32)(pte >> 32);
+    }
+    memcpy(orig, page, sizeof(page));
+    log.n = 0;
+    u32 n = pmu_rw_rewrite_words(page, 4096, rec_fn, &log, counts);
+    CHECK(n == 0 && log.n == 0, "page table: %u words rewritten", n);
+    CHECK(!memcmp(page, orig, sizeof(page)), "page table changed");
+    CHECK(counts[PMU_RW_SKIP_DATA] >= 1, "page table: no skip counted (%lu)",
+          counts[PMU_RW_SKIP_DATA]);
+
+    /* code: the same word followed by an instruction is still rewritten; skip callback reports */
+    u32 code[4] = {0xd53befc3U, 0xd65f03c0U /* ret */, 0xd53b9d08U, 0x00000000U /* udf #0 */};
+    memset(counts, 0, sizeof(counts));
+    log.n = 0;
+    n = pmu_rw_rewrite_words(code, 4, rec_fn, &log, counts);
+    CHECK(n == 1 && code[0] == 0xd2800003U, "code: mrs before ret rewritten (0x%08x)", code[0]);
+    CHECK(code[2] == 0xd53b9d08U && counts[PMU_RW_SKIP_DATA] == 1, "code: mrs before udf kept");
+
+    /* the last word has no successor in the buffer: rewritten as before */
+    u32 last[2] = {0x00200100U, 0xd53b9d08U};
+    CHECK(pmu_rw_rewrite_words(last, 2, NULL, NULL, NULL) == 1 && last[1] == 0xd53be048U,
+          "last word rewritten");
+
+    /* class boundaries: top five bits clear only */
+    CHECK(pmu_rw_next_is_data(0x00000000U) && pmu_rw_next_is_data(0x07ffffffU) &&
+              pmu_rw_next_is_data(0x04a00000U /* SVE */),
+          "data class");
+    CHECK(!pmu_rw_next_is_data(0x08000000U) && !pmu_rw_next_is_data(0xd503201fU) &&
+              !pmu_rw_next_is_data(0x80000000U /* SME space */),
+          "code class");
 }
 
 static void test_arm(void)
@@ -1252,6 +1312,7 @@ int main(int argc, char **argv)
     test_registers();
     test_exhaustive();
     test_page();
+    test_data_guard();
     test_arm();
     test_exec_and_write();
     test_walker();

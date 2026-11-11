@@ -282,6 +282,7 @@ enum hv_win_pmu_stat {
     HV_WIN_PMU_NOT_OURS,        /* permission faults on untracked IPAs, left to the stock path */
     HV_WIN_PMU_STUCK,           /* faults handed to the stock path after too many retries */
     HV_WIN_PMU_DMA_RESETS,      /* CODE/PINNED -> DIRTY because EL2 filled the page (device DMA) */
+    HV_WIN_PMU_DATA_SKIPS,      /* PMU-looking words left alone: next word not executable (data) */
     HV_WIN_PMU_NR_STATS,
 };
 #define HV_WIN_PMU_MAGIC        0x504d5552UL /* "PMUR" */

@@ -1867,7 +1867,8 @@ static void hv_status_report(struct exc_info *ctx, u64 now, u64 freq)
         {HV_WIN_PMU_SCANS, "scan"}, {HV_WIN_PMU_PAGES_REWRITTEN, "rewr"}, {HV_WIN_PMU_WRITE_FLIPS, "wflip"},
         {HV_WIN_PMU_WALK_FLIPS, "walk"}, {HV_WIN_PMU_PINS, "pin"}, {HV_WIN_PMU_SWEEPS, "sweep"},
         {HV_WIN_PMU_SPURIOUS, "spur"}, {HV_WIN_PMU_IPA_FAIL, "ipafail"}, {HV_WIN_PMU_NOT_OURS, "notours"},
-        {HV_WIN_PMU_STUCK, "stuck"}, {HV_WIN_PMU_DMA_RESETS, "dma"}};
+        {HV_WIN_PMU_STUCK, "stuck"}, {HV_WIN_PMU_DMA_RESETS, "dma"},
+        {HV_WIN_PMU_DATA_SKIPS, "dskip"}};
     for (unsigned i = 0; i < sizeof(pk) / sizeof(pk[0]); i++) {
         u64 v = hv_win_pmu_stat(pk[i].idx);
         printf(" %s %lu(+%lu)", pk[i].name, (unsigned long)v, (unsigned long)(v - st_prev_pmu[pk[i].idx]));
