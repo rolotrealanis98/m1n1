@@ -311,6 +311,8 @@ def window_frames(args):
         frames += [("GICD", args.gicd, GICD_FRAME), ("GICR", args.gicr, args.cpus * GICR_STRIDE)]
     if args.pl011:
         frames.append(("PL011", args.pl011, PL011_FRAME))
+    if getattr(args, "builtin_keyboard", False):
+        frames.append(("HIDM", 0xF38100000, 0x8000))
     return frames
 
 
@@ -627,6 +629,8 @@ def parse_args():
     parser.add_argument("--no-wfi-trap", action="store_true",
                         help="smp2d: do NOT trap/emulate the guest WFI at EL2 (reproduce native-WFI behaviour as a "
                              "control; default: trapping ON when >1 vCPU). 1-vCPU never traps WFI regardless.")
+    parser.add_argument("--builtin-keyboard", action="store_true",
+                        help="enable resident MTP keyboard / HIDM (requires HIDM firmware)")
     parser.add_argument("--synthetic-window", type=hexint, default=SYNTH_WINDOW_BASE)
     parser.add_argument("--synthetic-size", type=hexint, default=SYNTH_WINDOW_SIZE)
     parser.add_argument("--gicd", type=hexint, default=GICD_DEFAULT)
@@ -755,6 +759,12 @@ def parse_args():
     if args.usb_host is None and args.mu_profile in USB_PROFILES:
         print(f"note: profile {args.mu_profile} without --usb-host: no /chosen/m5w,xhci, Mu runs without USB",
               file=sys.stderr)
+    if args.builtin_keyboard:
+        if args.route != "gic" or args.raw_guest:
+            parser.error("--builtin-keyboard needs a firmware guest and --route gic")
+        if args.pl011_gsiv == 68 or args.usb_gsiv == 68 or any(g == 68 for _, g in args.irq_pairs):
+            parser.error("GSIV 68 is reserved for HIDM")
+
     if args.pl011_gsiv is not None:
         if args.route != "gic":
             parser.error("--pl011-gsiv needs --route gic (there is no GIC to deliver it otherwise)")
@@ -931,6 +941,9 @@ def main():
     usb_idx = hv.iodev - IODEV.USB0
     exact = {"ans", "sart-ans", "dart-ans", "iop-ans-nub", "sep", "dart-sep",
              f"usb-drd{usb_idx}", f"dart-usb{usb_idx}", f"atc-phy{usb_idx}"}
+
+    if args.builtin_keyboard:
+        exact.update({"mtp", "dart-mtp", "dockchannel-mtp", "iop-mtp-nub"})
 
     def doomed(name):
         n = name.lower()
@@ -1164,6 +1177,26 @@ def main():
                f"{'64-bit DMA' if info & 4 else 'NO 64-BIT DMA (guest RAM is above 4 GiB: will fail)'}, "
                f"ports with a device {[i + 1 for i in range(8) if (info >> 48) & (1 << i)] or 'none seen'} "
                f"(info {info:#x})")
+    if args.builtin_keyboard:
+        # MTP bring-up runs inside this one proxy call (bounded ~50 s, silent gaps up to 20 s):
+        # the default 3 s UART read timeout would abort the launch mid-call.
+        old_timeout = iface.dev.timeout
+        iface.dev.timeout = 90
+        try:
+            rc = p.hv_win_hidm_configure()
+        finally:
+            iface.dev.timeout = old_timeout
+        if rc != 0:
+            # Clean failure: no /chosen/m5w,hidm, so the firmware publishes no M5WH0001 node
+            # and Windows boots without the built-in keyboard.
+            print(f"WARNING: HIDM configure refused ({rc}); continuing without the built-in keyboard",
+                  file=sys.stderr)
+            record(f"HIDM configure refused ({rc}); no m5w,hidm handoff")
+            args.builtin_keyboard = False
+        else:
+            hv.add_tracer(irange(0xF38100000, 0x8000), "WIN-HIDM", TraceMode.RESERVED)
+            record("HIDM configured; backend failure is reported as zero interfaces")
+
     text = format_plan(plan)
     for name, base, size in window_frames(args):
         text += f"\n{name} frame {base:#x}..{base + size:#x} (synthetic window, EL2 hook)"
@@ -1223,6 +1256,9 @@ def main():
     def put(name, value):
         hv.adt["chosen"]._properties[name] = value
 
+    hv.adt["chosen"]._properties.pop("m5w,hidm", None)
+    if args.builtin_keyboard:
+        put("m5w,hidm", struct.pack("<QQQQI", 0xF38100000, 0x1000, 0xF38104000, 0x1000, 68))
     put("m5w,memory", memory_prop)
     put("m5w,fd-base", struct.pack("<Q", hv.guest_base))
     put("m5w,fd-size", struct.pack("<Q", len(image)))

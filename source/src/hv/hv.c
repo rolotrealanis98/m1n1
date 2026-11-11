@@ -17,6 +17,7 @@
 
 #include "win/hv_win.h"
 #include "win/hv_win_storage.h"
+#include "hv_win_hidm.h"
 
 #define HV_TICK_RATE      1000
 #define HV_SLOW_TICK_RATE 1
@@ -144,6 +145,7 @@ void hv_sptm_set_mode(enum hv_sptm_mode mode)
 
 void hv_init(void)
 {
+    hv_win_hidm_retire();
     hv_win_storage_retire();
     pcie_shutdown();
     // Make sure we wake up DCP if we put it to sleep, just quiesce it to match ADT
@@ -339,6 +341,7 @@ void hv_start(void *entry, u64 regs[4])
         }
     }
 
+    hv_win_hidm_retire();
     hv_win_storage_retire();
     printf("HV: All CPUs exited\n");
     spin_unlock(&bhl);
@@ -702,6 +705,7 @@ void hv_tick(struct exc_info *ctx)
     hv_win_tick();
     /* r3: native read-only storage keeps the ANS mailbox drained; no-op otherwise */
     hv_win_storage_tick();
+    hv_win_hidm_tick();
 }
 
 bool hv_is_nested(void)

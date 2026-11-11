@@ -129,3 +129,14 @@ bool asc_send(asc_dev_t *asc, const struct asc_message *msg)
     // printf("sent msg: %lx %x\n", msg->msg0, msg->msg1);
     return true;
 }
+
+/* One readiness check, then the existing ordered mailbox writes. */
+bool asc_try_send(asc_dev_t *asc, const struct asc_message *msg)
+{
+    if (!asc_can_send(asc))
+        return false;
+    dma_wmb();
+    write64(asc->base + ASC_MBOX_A2I_SEND0, msg->msg0);
+    write64(asc->base + ASC_MBOX_A2I_SEND1, msg->msg1);
+    return true;
+}

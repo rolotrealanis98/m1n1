@@ -25,6 +25,7 @@
  */
 
 #include "hv_win.h"
+#include "hv_win_hidm.h"
 #include "hv_win_storage.h"
 #include "iodev.h"
 #include "utils.h"
@@ -351,6 +352,7 @@ static bool pl011_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int
 
 int hv_win_pl011_configure(u64 base, u64 gsiv)
 {
+    if (hv_win_hidm_claims_spi(gsiv)) return -1;
     if (gsiv <= UINT32_MAX && hv_win_storage_claims_spi((u32)gsiv))
         return -1;
     if (!base) {
