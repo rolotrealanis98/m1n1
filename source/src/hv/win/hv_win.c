@@ -672,6 +672,31 @@ void hv_win_pmu_catch_cpu(bool reset)
     hv_win_pmu_catch_note(ok, v);
 }
 
+/*
+ * nightly-8: the PMU UNDEF catcher's ESR_EL1/FAR_EL1 read traps in the perf fast path (hv_exc_sync_fast, no
+ * hv_get_context, no barriers, no FIQ resync: a read of these registers changes no guest, timer or vGIC state).
+ * iss/esr_el2: the trap's ESR_EL2. Returns -1 when it is not such a read or when the ESR is EC 0 (Unknown: the
+ * slow path and, under the big HV lock, the catcher decide); else answers it, as hv_win_handle_msr() would, and
+ * returns the EC of the guest's ESR_EL1 (for the PE line; FAR reads return 64).
+ */
+int hv_win_el1_read_fast(u64 esr_el2, u64 *regs)
+{
+    u64 iss = FIELD_GET(ESR_ISS, esr_el2);
+    if (FIELD_GET(ESR_EC, esr_el2) != ESR_EC_MSR || !(iss & ESR_ISS_MSR_DIR))
+        return -1;
+    u64 reg = iss & (ESR_ISS_MSR_OP0 | ESR_ISS_MSR_OP2 | ESR_ISS_MSR_OP1 | ESR_ISS_MSR_CRn | ESR_ISS_MSR_CRm);
+    bool far = reg == SYSREG_ISS(SYS_FAR_EL1);
+    if ((!far && reg != SYSREG_ISS(SYS_ESR_EL1)) || !hv_win_enabled())
+        return -1;
+    u64 esr1 = mrs(SYS_ESR_EL12);
+    if (hv_win_pmu_catch_wanted(esr1))
+        return -1;
+    u64 rt = FIELD_GET(ESR_ISS_MSR_Rt, iss);
+    if (rt != 31)
+        regs[rt] = far ? mrs(SYS_FAR_EL12) : esr1;
+    return far ? 64 : (int)FIELD_GET(ESR_EC, esr1);
+}
+
 /* hv_exc.c locked MSR path: the EC 0 ESR_EL1/FAR_EL1 reads hv_win_handle_msr() passed on */
 bool hv_win_handle_msr_locked(struct exc_info *ctx, u64 iss)
 {
