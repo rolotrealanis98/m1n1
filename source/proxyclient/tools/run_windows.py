@@ -380,6 +380,32 @@ def epoch_with_counter(t0, t1, counter, cntfrq):
     return seconds, max(0, counter - round((t - seconds) * cntfrq))
 
 
+def uniform_cluster_types(adt):
+    """sched1: give every /cpus/* node the boot CPU's cluster-type, so Mu (J716sCpuEfficiencyClasses, the only
+    reader of the guest ADT's cluster-type) publishes one efficiency class (0) in the MADT GICC entries.
+
+    Why: with the ADT classes (M = 0 for CPUs 0-11, P = 1 for CPUs 12-17) Windows applies its heterogeneous
+    core-parking policy, where an efficiency-class-1 core is unparked only when class-0 *performance* crosses
+    HeteroIncreaseThreshold. The firmware publishes no performance control (_CPC/_PSS), and on hardware
+    (runs/20261110-213116-smpN c18a4) CPUs 12-17 stayed parked with 18 busy loops while CPUs 0-11 ran them.
+    The hypervisor and Windows never read this property; the host ADT is unchanged.
+    Returns [(node name, old, new)] for the nodes changed."""
+    cpus = list(adt["/cpus"])
+    if not cpus:
+        return []
+    boot = next((c for c in cpus if c._properties.get("state") == "running"), cpus[0])
+    want = boot._properties.get("cluster-type")
+    if not isinstance(want, str) or not want:
+        return []
+    changed = []
+    for c in cpus:
+        old = c._properties.get("cluster-type")
+        if old is not None and old != want:
+            c._properties["cluster-type"] = want
+            changed.append((c.name, old, want))
+    return changed
+
+
 def parse_carveouts(adt):
     """/chosen/carveout-memory-map -> [(start, end, 'region-id-N')]."""
     try:
@@ -627,6 +653,10 @@ def parse_args():
     parser.add_argument("--no-wfi-trap", action="store_true",
                         help="smp2d: do NOT trap/emulate the guest WFI at EL2 (reproduce native-WFI behaviour as a "
                              "control; default: trapping ON when >1 vCPU). 1-vCPU never traps WFI regardless.")
+    parser.add_argument("--cpu-classes", choices=("uniform", "adt"), default="uniform",
+                        help="sched1: efficiency classes Mu publishes. uniform (default): the guest ADT gets the boot "
+                             "CPU's cluster-type on every CPU, so the MADT has one class and Windows does not park the "
+                             "P cores; adt: the ADT's M/P types (classes 0/1, the smpN behaviour)")
     parser.add_argument("--synthetic-window", type=hexint, default=SYNTH_WINDOW_BASE)
     parser.add_argument("--synthetic-size", type=hexint, default=SYNTH_WINDOW_SIZE)
     parser.add_argument("--gicd", type=hexint, default=GICD_DEFAULT)
@@ -1250,6 +1280,13 @@ def main():
     # the same bytes EL2 got as P_HV_WIN_CONFIGURE's sixth argument
     put("m5w,cpus", cpus_prop)
     record(f"m5w,cpus: {', '.join(hex(c[2]) for c in vcpus)}")
+    if not args.raw_guest:
+        if args.cpu_classes == "uniform":
+            changed = uniform_cluster_types(hv.adt)
+            record(f"cpu classes: uniform (guest ADT cluster-type rewritten on {len(changed)} CPU node(s): "
+                   f"{', '.join(f'{n} {o}->{w}' for n, o, w in changed) or 'none'}); Mu publishes one efficiency class")
+        else:
+            record("cpu classes: adt (guest ADT cluster-type unchanged; Mu publishes M = 0, P = 1)")
 
     if args.raw_guest:
         vuart = orig_adt["/arm-io/uart0"].get_reg(0)[0]

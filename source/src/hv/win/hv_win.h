@@ -185,6 +185,9 @@ bool hv_win_wfi(struct exc_info *ctx);  /* emulate one trapped guest WFI on this
 bool hv_win_wfi_trapping(void);         /* true if EL2 is emulating guest WFI */
 void hv_win_wfi_report(void);           /* per-CPU WFI/debug/integrity counters, on guest exit */
 void hv_win_wfi_snap(int where, const struct exc_info *ctx, int wake); /* smp2g: + x30/SP, wake */
+/* sched1 (hv_exc.c): the vGIC is about to IPI <cpu> for its vCPU. Timestamps the first unconsumed kick so
+ * the target's emulated WFI can report kick-to-wake latency. Lock-free, callable from any CPU. */
+void hv_win_kick_note(int cpu);
 void hv_win_pl011_kd_dump(void); /* smp2g: KD break/continue log, boot CPU */
 void hv_win_diag_dump_all(void);       /* smp2f: every CPU's exit ring, non-freezing, boot CPU */
 

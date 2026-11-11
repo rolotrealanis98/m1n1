@@ -72,6 +72,9 @@ struct hv_pcpu_data {
     u64 wfi_bg_passed;    /* deadline already passed with ISTATUS clear at the first read */
     u32 wfi_early[WFI_WSRC_N];      /* physical WFIs that ended before the guest deadline, by source */
     struct wfi_lat wfi_lat[2][WFI_WSRC_N]; /* ... at/after it: lateness by source; [1] = probe waits */
+    /* sched1: vGIC kick (another CPU's IPI for this vCPU) to the end of the emulated WFI it ended */
+    struct wfi_lat kick_lat;  /* the kick arrived while this CPU was in a physical WFI */
+    u64 kick_immediate;       /* ... arrived before the physical WFI (the wait completed at once) */
     /* smp2d async-exit GPR integrity snapshot (suspect A: a callee-saved reg lost across an exit) */
     bool integ_async;
     u8 integ_reason;
@@ -106,6 +109,24 @@ static struct hv_smp_snap hv_snap[MAX_CPUS][2];
 static u8 hv_wfi_fp[MAX_CPUS][32 * 16] ALIGNED(16);
 
 void hv_wfi_idle(void); /* hv_asm.S: save-around-WFI, Apple M4+ register-safe idle */
+
+/*
+ * sched1: CNTPCT of the first vGIC kick (vgic_unlock -> smp_send_ipi) for each CPU not yet consumed by
+ * that CPU's emulated WFI; 0 = none. Written by the sender (first writer wins), cleared by the owner at
+ * WFI entry and consumed at WFI exit, so only kicks sent during a wait are measured.
+ */
+static u64 hv_kick_t[MAX_CPUS];
+
+void hv_win_kick_note(int cpu)
+{
+    if (cpu < 0 || cpu >= MAX_CPUS)
+        return;
+    u64 zero = 0, now = mrs(CNTPCT_EL0);
+    if (!now)
+        now = 1;
+    __atomic_compare_exchange_n(&hv_kick_t[cpu], &zero, now, false, __ATOMIC_RELAXED,
+                                __ATOMIC_RELAXED);
+}
 
 /*
  * Some SoCs (T6050) lock SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2: it reads back with both
@@ -706,9 +727,21 @@ bool hv_win_wfi(struct exc_info *ctx)
         .post_idle = hv_wfi_op_post_idle, /* smp2f */
     };
 
+    /* sched1: only kicks sent from here on count as waking this wait */
+    __atomic_store_n(&hv_kick_t[cpu], 0, __ATOMIC_RELAXED);
+
     u64 start = mrs(CNTPCT_EL0);
     int idles = 0;
     enum wfi_wake wake = wfi_wait(&ops, HV_WFI_MAX_SPINS, &idles);
+
+    u64 kick_t = __atomic_exchange_n(&hv_kick_t[cpu], 0, __ATOMIC_RELAXED);
+    if (kick_t && wake == WFI_WAKE_VIRQ) {
+        u64 t_end = mrs(CNTPCT_EL0);
+        if (idles)
+            wfi_lat_note(&PERCPU(kick_lat), t_end > kick_t ? t_end - kick_t : 0);
+        else
+            PERCPU(kick_immediate)++;
+    }
 
     switch (wake) {
         case WFI_WAKE_EXIT:
@@ -848,6 +881,12 @@ void hv_win_wfi_report(void)
                            "late min %u max %u last %u tk\n",
                            cpu, k ? "1 ms probe" : "50 us", src[i], p->wfi_lat[k][i].n,
                            p->wfi_lat[k][i].min, p->wfi_lat[k][i].max, p->wfi_lat[k][i].last);
+        /* sched1: vGIC kick (IPI sent by another CPU for this vCPU) to the end of the emulated WFI */
+        if (p->kick_lat.n || p->kick_immediate)
+            printf("HV/win sched1: CPU %d kick-to-wake: during a physical WFI n %u, min %u max %u last %u "
+                   "tk; before it (no sleep) %lu\n",
+                   cpu, p->kick_lat.n, p->kick_lat.min, p->kick_lat.max, p->kick_lat.last,
+                   p->kick_immediate);
     }
 }
 
