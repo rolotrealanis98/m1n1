@@ -34,6 +34,7 @@ u32 read32(u64 a)
     if (a == DART_MTP + T8110_ERROR) return err;
     if (a == DART_MTP + T8110_PROTECT) return prot;
     if (a == DART_MTP + T8110_ENABLE_STREAMS) return en;
+    if (a == DART_MTP + T8110_PARAMS3) return 0x24240202;
     if (a == DART_MTP + T8110_TLB_CMD) { if (busy) { busy--; return T8110_TLB_BUSY; } return 0; }
     CHECK(!"unexpected read"); return 0;
 }
@@ -52,10 +53,17 @@ int main(void)
     /* bypass: no write, DVA = PA */
     reset(); tcr = 6; CHECK(mtp_dma_init() == MTP_DMA_BYPASS && nw == 0);
     CHECK(mtp_dma_alloc(0x5000, &cpu, &iova) && iova == TP_PA(cpu) && !(iova & 0x3fff) && nw == 0);
-    /* stream off, unlocked: Linux attach - TTBR0, ENABLE_STREAMS |= 1, TCR0 = translate, FLUSH_ALL */
+    /* real J716s state (tp2-a2): TCR=0x1 TTBR=0 ERROR=0 PROTECT=0x1a ENABLE=0 -> Linux reset + attach:
+     * TCR0=0, TTBR0, ENABLE_STREAMS |= 1, TCR0 = translate, FLUSH_ALL */
+    reset(); tcr = 1; ttbr = 0; prot = 0x1a; en = 0; CHECK(mtp_dma_init() == MTP_DMA_OWN_TABLES);
+    CHECK(nw == 5 && wa[0] == DART_MTP + T8110_TCR0 && wv[0] == 0 && wa[1] == DART_MTP + T8110_TTBR0 && (wv[1] & 1) &&
+          wa[2] == DART_MTP + T8110_ENABLE_STREAMS && wv[2] == 1 && wa[3] == DART_MTP + T8110_TCR0 && wv[3] == 1 &&
+          wa[4] == DART_MTP + T8110_TLB_CMD && wv[4] == 0);
+    { u64 *rt = TP_PTR((u64)((wv[1] >> 2) & 0xfffffff) << 14); CHECK((rt[1] & 1) && slot_base == (1ull << 25)); }
+    /* stream off with TCR 0 and another stream enabled: same, enable bit OR-ed in */
     reset(); en = 0x10; CHECK(mtp_dma_init() == MTP_DMA_OWN_TABLES);
-    CHECK(nw == 4 && wa[0] == DART_MTP + T8110_TTBR0 && (wv[0] & 1) && wa[1] == DART_MTP + T8110_ENABLE_STREAMS && wv[1] == 0x11 &&
-          wa[2] == DART_MTP + T8110_TCR0 && wv[2] == 1 && wa[3] == DART_MTP + T8110_TLB_CMD && wv[3] == 0);
+    CHECK(nw == 5 && wa[0] == DART_MTP + T8110_TCR0 && wv[0] == 0 && wa[2] == DART_MTP + T8110_ENABLE_STREAMS && wv[2] == 0x11);
+    nw = 4; wv[0] = wv[1]; /* keep the indices the checks below expect: wv[0] = TTBR */
     u64 *root = TP_PTR((u64)((wv[0] >> 2) & 0xfffffff) << 14);
     CHECK((root[1] & 1) && !root[0] && !root[2] && slot_base == (1ull << 25) && window == 0x10000000000ull);
     CHECK(mtp_dma_alloc(0x5000, &cpu, &iova) && iova == 0x10002000000ull && nw == 5 && wv[4] == 0);
@@ -70,12 +78,12 @@ int main(void)
     CHECK(mtp_dma_init() == MTP_DMA_IBOOT_TABLES && nw == 1 && wa[0] == DART_MTP + T8110_TLB_CMD && (ib[2] & 1) && ib[1] == e1 && slot_base == (2ull << 25));
     /* refused states: locked, error, four-level, translate without TTBR, geometry */
     reset(); prot = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0 && !mtp_dma_alloc(16, &cpu, &iova));
+    reset(); prot = 0x1b; tcr = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);   /* real bits + lock */
     reset(); err = 4; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
     reset(); tcr = 9; ttbr = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
-    reset(); tcr = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
     reset(); geobad = 1; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);
     /* TLB never idle: own tables were written, then off (no allocation possible) */
-    reset(); busy = 100000; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 3 && !mtp_dma_alloc(16, &cpu, &iova));
+    reset(); busy = 100000; CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 4 && !mtp_dma_alloc(16, &cpu, &iova));
     /* iBoot slots 1..127 all taken -> off, nothing written */
     reset(); ib = memalign(16384, 16384); for (int k = 0; k < 128; k++) ib[k] = 1; tcr = 1; ttbr = (u32)(((TP_PA(ib) >> 14) << 2) | 1);
     CHECK(mtp_dma_init() == MTP_DMA_OFF && nw == 0);

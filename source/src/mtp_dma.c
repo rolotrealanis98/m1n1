@@ -14,8 +14,9 @@
  * State decision (dart-mtp stream 0 as iBoot left it):
  *   BYPASS_DART            -> DVA = PA, no write
  *   TRANSLATE + TTBR valid -> add one L2 table under a free root slot (iBoot tables)
- *   off (TCR 0, no TTBR), unlocked -> Linux attach: own root table, TTBR0, enable
- *                             stream 0, TCR0 = TRANSLATE, flush
+ *   no TTBR (TCR 0 or 1, as on J716s: TCR=1 TTBR=0 ENABLE=0), unlocked -> Linux reset +
+ *                             attach: TCR0=0, own root table in TTBR0, enable stream 0,
+ *                             TCR0 = TRANSLATE, flush
  *   anything else          -> refuse (the coprocessor's host-buffer requests fail)
  * Every write is listed in input/trackpad-20261111/WRITES.md (T3).
  */
@@ -34,6 +35,7 @@
 
 #define DART_MTP 0x294800000ull
 #define T8110_ERROR 0x100
+#define T8110_PARAMS3 0x08    /* VA/PA width, version (Linux A:126-130; m1n1 dart.c:67-69) */
 #define T8110_TLB_CMD 0x80
 #define T8110_TLB_BUSY BIT(31)
 #define T8110_PROTECT 0x200
@@ -156,9 +158,9 @@ enum mtp_dma_mode mtp_dma_init(void)
     if (!geometry(&vm_base)) { printf("MTP-DMA: dart-mtp ADT geometry unexpected -> off\n"); return mode; }
     u32 tcr = read32(DART_MTP + T8110_TCR0), ttbr = read32(DART_MTP + T8110_TTBR0);
     u32 err = read32(DART_MTP + T8110_ERROR), prot = read32(DART_MTP + T8110_PROTECT);
-    u32 en = read32(DART_MTP + T8110_ENABLE_STREAMS);
-    printf("MTP-DMA: dart-mtp sid0 TCR=%#x TTBR=%#x ERROR=%#x PROTECT=%#x ENABLE=%#x vm-base=%#lx\n",
-           tcr, ttbr, err, prot, en, vm_base);
+    u32 en = read32(DART_MTP + T8110_ENABLE_STREAMS), params3 = read32(DART_MTP + T8110_PARAMS3);
+    printf("MTP-DMA: dart-mtp sid0 TCR=%#x TTBR=%#x ERROR=%#x PROTECT=%#x ENABLE=%#x PARAMS3=%#x vm-base=%#lx\n",
+           tcr, ttbr, err, prot, en, params3, vm_base);
     window = vm_base & ~LOW36;
     if (tcr & TCR_BYPASS_DART) {
         mode = MTP_DMA_BYPASS;
@@ -178,7 +180,11 @@ enum mtp_dma_mode mtp_dma_init(void)
         }
         root = TP_PTR(root_pa);
         mode = MTP_DMA_IBOOT_TABLES;
-    } else if (!tcr && !(ttbr & TTBR_VALID) && !(prot & 1)) {
+    } else if ((tcr == 0 || tcr == TCR_TRANSLATE) && !(ttbr & TTBR_VALID) && !(prot & 1)) {
+        /* tp2-a2 on J716s: TCR=0x1 TTBR=0 ERROR=0 PROTECT=0x1a ENABLE=0 - translation on with
+         * no table and no stream enabled, not locked (PROTECT bit 0 = TTBR/TCR lock clear).
+         * Linux (not locked) resets and attaches: apple_dart_hw_reset disables DMA (TCR 0),
+         * clears TTBRs, enables the streams; attach sets TTBR then TCR translate. */
         root = memalign(SZ_16K, SZ_16K);
         if (!root || !mtp_dma_resident(TP_PA(root), SZ_16K)) return mode;
         memset(root, 0, SZ_16K);
@@ -200,8 +206,9 @@ enum mtp_dma_mode mtp_dma_init(void)
     root[idx] = FIELD_PREP(PTE_OFFSET, TP_PA(l2) >> 14) | PTE_VALID;
     slot_base = (u64)idx << 25;
     if (mode == MTP_DMA_OWN_TABLES) {
-        /* Linux attach order: TTBR, stream enable, TCR translate; then flush. */
+        /* Linux order: disable DMA (TCR 0), TTBR, stream enable, TCR translate; then flush. */
         dma_wmb();
+        write32(DART_MTP + T8110_TCR0, 0);
         write32(DART_MTP + T8110_TTBR0, TTBR_VALID | (u32)((TP_PA(root) >> 14) << 2));
         write32(DART_MTP + T8110_ENABLE_STREAMS, en | BIT(0));
         write32(DART_MTP + T8110_TCR0, TCR_TRANSLATE);
