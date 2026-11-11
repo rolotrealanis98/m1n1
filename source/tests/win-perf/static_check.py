@@ -75,8 +75,15 @@ check('hv_exc.c: slow-path MDSCR case unchanged (PERCPU(mdscr) shadow)',
       fn(oe, 'static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)\n{') == fn(ne, 'static bool hv_handle_msr_unlocked(struct exc_info *ctx, u64 iss)\n{'))
 fast = fn(ne, 'u64 hv_exc_sync_fast(struct exc_info *ctx)\n{')
 check('hv_exc.c: fast path emulates on the slow path shadow', 'hv_perf_mdscr_emulate(esr, ctx->regs, &PERCPU(mdscr))' in fast)
+# nightly-8: the fast path first tries the catcher's ESR/FAR read (advances ELR only when it answered), then MDSCR
+el1r, md = fast.split('    if (!hv_perf_mdscr_emulate(', 1)
 check('hv_exc.c: fast path advances ELR_EL2 by 4 only when handled',
-      fast.index('return 0;') < fast.index('msr(ELR_EL2, mrs(ELR_EL2) + 4);'))
+      md.index('return 0;') < md.index('msr(ELR_EL2, mrs(ELR_EL2) + 4);') and
+      el1r.index('if (ec1 >= 0) {') < el1r.index('msr(ELR_EL2, mrs(ELR_EL2) + 4);') and el1r.count('return 1;') == 1)
+hwf = fn(new('src/hv/win/hv_win.c'), 'int hv_win_el1_read_fast(u64 esr_el2, u64 *regs)\n{')
+check('hv_win.c: fast ESR/FAR read leaves EC 0 (catcher) and other registers to the slow path',
+      hwf.index('if (hv_win_pmu_catch_wanted(esr1))\n        return -1;') < hwf.index('regs[rt] =') and
+      "(!far && reg != SYSREG_ISS(SYS_ESR_EL1))" in hwf and '!(iss & ESR_ISS_MSR_DIR)' in hwf)
 w = fn(ne, 'bool hv_exc_sync(struct exc_info *ctx)\n{')
 check('hv_exc.c: hv_exc_sync wrapper calls the body once and only adds stats', w.count('hv_exc_sync_body(ctx)') == 1 and 'hv_perf_t0()' in w)
 check('hv_exc.c: PF line only with an option set', 'if (hv_perf_flags)\n        hv_perf_report(P, now, freq);' in ne)

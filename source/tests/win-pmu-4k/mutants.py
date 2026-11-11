@@ -115,6 +115,15 @@ M = [
      '        (void)0;'),
     ('catch_stays_scanning', 'hv_win_pmu.c', '        /* 3. Executable and read-only again, as after a proven fetch fault */\n        hv_xt_set(block, HV_XT_CODE, flips);',
      '        /* 3. Executable and read-only again, as after a proven fetch fault */\n        hv_xt_set(block, HV_XT_SCANNING, flips);'),
+    # nightly-8: no timed re-protect while the catcher covers
+    ('covers_ignores_unavailable', 'hv_win_pmu.c',
+     'if (!pmu.stats[HV_WIN_PMU_CATCH_CPUS] || pmu.stats[HV_WIN_PMU_CATCH_UNAVAIL])',
+     'if (!pmu.stats[HV_WIN_PMU_CATCH_CPUS])'),
+    ('covers_without_catcher', 'hv_win_pmu.c',
+     'if (!pmu.stats[HV_WIN_PMU_CATCH_CPUS] || pmu.stats[HV_WIN_PMU_CATCH_UNAVAIL])',
+     'if (pmu.stats[HV_WIN_PMU_CATCH_UNAVAIL])'),
+    ('covers_before_os', 'hv_win_pmu.c', '    return !(tcr & BIT(23));', '    return true || tcr;'),
+    ('covers_never', 'hv_win_pmu.c', '    if (pmu_catch_covers()) {', '    if (false && pmu_catch_covers()) {'),
     ('catch_ec_any', 'hv_win_pmu.c', 'return pmu.armed && !pmu.mode16k && !((esr_el1 >> 26) & 0x3f);', 'return pmu.armed && !pmu.mode16k;'),
 ]
 
