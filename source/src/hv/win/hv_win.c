@@ -610,12 +610,19 @@ void hv_win_pmu_catch_cpu(bool reset)
         hv_win_pmu_catch_note(false, 0);
         return;
     }
-    u64 v = mrs(SYS_HFGRTR_EL2);
+    u64 v = mrs(SYS_HFGRTR_EL2); /* readable on the T6050 (hv_win_cpu_state_log prints it) */
     if (hv_win_catch_state[cpu] > 0 && (v & HFGRTR_CATCH) == HFGRTR_CATCH)
         return;
+    /* the first write on a CPU is guarded (a fault leaves the read-back without both bits) */
+    bool first = !hv_win_catch_state[cpu];
+    if (first)
+        exc_guard = GUARD_MARK | GUARD_SILENT;
     msr(SYS_HFGRTR_EL2, v | HFGRTR_CATCH);
     sysop("isb");
     v = mrs(SYS_HFGRTR_EL2);
+    sysop("isb");
+    if (first)
+        exc_guard = GUARD_OFF;
     bool ok = (v & HFGRTR_CATCH) == HFGRTR_CATCH;
     hv_win_catch_state[cpu] = ok ? 1 : -1;
     hv_win_pmu_catch_note(ok, v);
