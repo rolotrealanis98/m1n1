@@ -4,7 +4,7 @@ set -eu
 cd "$(dirname "$0")"
 O=${FB_OUT:-$PWD/out}; mkdir -p "$O"
 S=../../src
-TP="$S/hidm/tp/mtp_tp.c $S/hidm/tp/ptp.c $S/hidm/tp/apple_mt.c $S/hidm/tp/hid_filter.c"
+TP="$S/hidm/tp/mtp_tp.c $S/hidm/tp/ptp.c $S/hidm/tp/apple_mt.c $S/hidm/tp/hid_filter.c $S/hidm/tp/fnrow.c $S/hidm/tp/kbl.c"
 CFLAGS='-std=c11 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer'
 clang $CFLAGS -I$S test_backend.c $S/mtp_kbd.c $S/hidm/service/hidm_service.c $TP -o $O/test_backend
 $O/test_backend
@@ -31,5 +31,7 @@ $O/test_mtp_dma
 cp $S/mtp_tp_resident.c $S/mtp_tp_resident.h $O/
 clang $CFLAGS -Wno-format -I$O -Istubs-tp -Istubs -I$S test_tp_resident.c $S/mtp_kbd.c $S/hidm/service/hidm_service.c $TP -o $O/test_tp_resident
 $O/test_tp_resident
+clang $CFLAGS -I$S test_fnrow.c $S/hidm/tp/fnrow.c $S/hidm/tp/kbl.c $S/hidm/tp/hid_filter.c v11/driver/hidm_core.c -o $O/test_fnrow
+$O/test_fnrow
 PYTHONDONTWRITEBYTECODE=1 python3 -I test_launcher.py
 echo "kbd-hidm: all groups PASS"

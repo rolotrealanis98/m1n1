@@ -3,6 +3,7 @@
 #define MTP_KBD_H
 #include "hidm/service/hidm_service.h"
 #include "hidm/tp/hid_filter.h"
+#include "hidm/tp/fnrow.h"
 struct mtp_tp; /* trackpad layer (hidm/tp/mtp_tp.h); NULL = keyboard only, unchanged */
 #define MTP_FIFO_SIZE 2048u
 #define MTP_FRAME_MAX (HM_MAX_DESC + 512u)
@@ -48,7 +49,12 @@ struct mtp_kbd {
     struct hid_filter_result kbd_filter;
     int kbd_filtered;
     hm_u32 kbd_dropped;
+    /* fnrow (2026-11-11): Apple Fn layer / top row -> standard usages (hidm/tp/fnrow.h).
+     * Counters are read by the resident tick (keyboard backlight, display brightness). */
+    struct fnrow fn;
+    hm_u32 kbl_up, kbl_down, disp_up, disp_down, fnlock_toggles, input_seen, fn_logged;
 };
+#define MTP_FN_LOG 64u /* console lines for top-row / Fn-layer presses */
 #define MTP_STM_ANNOUNCE_US 1000000u /* wait for stm INIT after keyboard INIT */
 #define MTP_STM_READY_US 2000000u    /* wait for stm ACK + READY */
 #define MTP_LOG_REPORTS 32u          /* hex-dump only the first N input reports */

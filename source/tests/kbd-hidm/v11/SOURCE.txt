@@ -1,0 +1,4 @@
+432230ec537a19bed1cea0779c6c3d90a1444101b1ff86530f98cb2b314da4cb  v11/abi/hidm_abi.h
+2829834a86beb5f76d7f58f046be19532055353dcb5a5895ec04c07e066a5413  v11/driver/hidm_core.c
+4864127dcb735a384e24f932bcabfcdf7b63e98b22952f2f0bef620815c0ed9c  v11/driver/hidm_core.h
+copied from input/trackpad-20261111 (HIDM v1.1 driver core, the hidm5w 1.1.0.0 parser) for test_fnrow

@@ -159,11 +159,27 @@ int main(void)
       msg[n++] = 2; msg[n++] = 0; msg[n++] = 0; msg[n++] = 0;
       feed(f, frame(f, 0x12, 0, 0, 0, msg, n, 0)); }
     pump(1100); pump(50);
-    CHECK(k.phase == MTP_LIVE && k.kbd_filtered && k.desc_len == 156 && k.keyboard.info.descriptor_length == 156 && !memcmp(k.descriptor, KBD_HW, 156));
+    /* fnrow (2026-11-11): the filtered 156 bytes are unchanged and the 35-byte Consumer Control
+     * TLC (report 0x53) follows them: 156 + 35 = 191 */
+    CHECK(k.phase == MTP_LIVE && k.kbd_filtered && k.fn.enabled && k.desc_len == 156 + FNROW_DESC_APPEND &&
+          k.keyboard.info.descriptor_length == 156 + FNROW_DESC_APPEND && !memcmp(k.descriptor, KBD_HW, 156) &&
+          k.descriptor[156] == 0x05 && k.descriptor[157] == 0x0c && k.descriptor[163] == FNROW_CC_RID &&
+          k.descriptor[156 + FNROW_DESC_APPEND - 1] == 0xc0);
     CHECK(hm_service_init(&s, &k.keyboard, 1, mtp_kbd_report_all, &k) == HM_OK);
     s.ready = s.enabled = s.active = 1;
     { hm_u8 r1[10] = {1, 0, 0, 4}, r3f[65] = {0x3f}; feed(f, frame(f, 0x12, 1, 2, 0, r3f, 65, 0)); feed(f, frame(f, 0x12, 2, 2, 0, r1, 10, 0)); pump(2);
       CHECK(k.kbd_dropped == 1 && s.head == 1 && k.reports == 1); }
+    /* fnrow end to end: F10 (media mode) -> report 1 without it + consumer report 0x53 bit 5 (mute);
+     * Ctrl+F2 -> backlight counter, nothing for Windows but report 1 with Ctrl; release clears 0x53 */
+    { hm_u8 f10[10] = {1, 0, 0, 0x43}, none[10] = {1}, cf2[10] = {1, 0x01, 0, 0x3b};
+      feed(f, frame(f, 0x12, 3, 2, 0, f10, 10, 0)); pump(2);
+      CHECK(s.head == 3 && k.reports == 2 && k.fn.cc_sent == 0x20 && k.input_seen == 2);
+      feed(f, frame(f, 0x12, 4, 2, 0, none, 10, 0)); pump(2);
+      CHECK(s.head == 5 && k.fn.cc_sent == 0);
+      feed(f, frame(f, 0x12, 5, 2, 0, cf2, 10, 0)); pump(2);
+      CHECK(s.head == 6 && k.kbl_up == 1 && k.kbl_down == 0 && k.fn.kbl_held == 1);
+      feed(f, frame(f, 0x12, 6, 2, 0, none, 10, 0)); pump(2);
+      CHECK(s.head == 7 && k.kbl_up == 1 && k.fn.kbl_held == 0 && k.fn_logged == 2); }
     printf("kbd+tp: %u groups, %u checks PASS\n", groups, checks);
     return 0;
 }

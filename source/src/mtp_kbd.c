@@ -174,6 +174,18 @@ static void init_event(struct mtp_kbd *k, const hm_u8 *m, unsigned n)
             k->desc_len = k->kbd_filter.len;
             k->kbd_filtered = 1;
         }
+        /* fnrow: append the synthesized Consumer Control TLC (report 0x53) when report 1 has the
+         * J716s layout; otherwise the keyboard is published exactly as before. */
+        fnrow_init(&k->fn);
+        {
+            hm_u32 before = k->desc_len;
+            if (!fnrow_patch_descriptor(&k->fn, k->descriptor, &k->desc_len, HM_MAX_DESC))
+                LOG(k, "MTP: fnrow: top row translated (media keys default, Fn-lock Fn+Esc), consumer "
+                       "TLC 0x%02x appended, %u -> %u bytes\n", FNROW_CC_RID, (unsigned)before,
+                    (unsigned)k->desc_len);
+            else
+                LOG(k, "MTP: fnrow: report 1 layout not J716s -> top row passes through as F1-F12\n");
+        }
         k->keyboard.info.id = id; k->keyboard.info.flags = HM_PRESENT;
         k->keyboard.info.vendor = 0x05ac; k->keyboard.info.product = 0x035a;
         k->keyboard.info.version = 0x0510;
@@ -237,6 +249,7 @@ static void receive_frame(struct mtp_kbd *k)
         }
     } else if (k->tp && f[5] != k->iface &&
                mtp_tp_on_report(k->tp, f[5], m, len, k->service, k->io.now_us(k->io.ctx))) {
+        k->input_seen++;
         if (k->io.input_changed) k->io.input_changed(k->io.ctx);
     } else if (k->phase == MTP_LIVE && f[5] == k->iface) {
         if (!len || len > HM_PAYLOAD) { mtp_kbd_fail(k, MTP_E_FRAME); return; }
@@ -244,7 +257,29 @@ static void receive_frame(struct mtp_kbd *k)
             k->kbd_dropped++; /* report of a removed vendor TLC: Windows has no layout for it */
             return;
         }
-        hm_service_push(k->service, k->iface, m, len, k->io.now_us(k->io.ctx) * 1000);
+        {
+            hm_u8 out[HM_PAYLOAD], cc[FNROW_CC_LEN];
+            hm_u32 olen = 0, ev;
+            int pcc = 0;
+            hm_u64 stamp = k->io.now_us(k->io.ctx) * 1000;
+            ev = fnrow_input(&k->fn, m, len, out, &olen, cc, &pcc);
+            hm_service_push(k->service, k->iface, out, olen, stamp);
+            if (pcc) hm_service_push(k->service, k->iface, cc, FNROW_CC_LEN, stamp);
+            k->input_seen++;
+            if (ev & FNROW_EV_KBL_UP) k->kbl_up++;
+            if (ev & FNROW_EV_KBL_DOWN) k->kbl_down++;
+            if (ev & FNROW_EV_DISP_UP) k->disp_up++;
+            if (ev & FNROW_EV_DISP_DOWN) k->disp_down++;
+            if (ev & FNROW_EV_FNLOCK) k->fnlock_toggles++;
+            if ((ev & FNROW_EV_TOPROW) && k->fn_logged < MTP_FN_LOG) {
+                k->fn_logged++;
+                hexline(k, "fnrow in", (unsigned)k->fn_logged, len, m, len);
+                hexline(k, "fnrow out", ev, olen, out, olen);
+                if (pcc) hexline(k, "fnrow cc", ev, FNROW_CC_LEN, cc, FNROW_CC_LEN);
+                if (ev & FNROW_EV_FNLOCK)
+                    LOG(k, "MTP: fnrow: Fn-lock -> %s\n", k->fn.media ? "media keys" : "F-keys");
+            }
+        }
         if (k->io.input_changed) k->io.input_changed(k->io.ctx);
         k->reports++;
         if (k->reports <= MTP_LOG_REPORTS)
