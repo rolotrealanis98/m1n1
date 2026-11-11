@@ -1384,6 +1384,8 @@ u8 usb_dwc3_getbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
     return c;
 }
 
+#define USB_DWC3_STALL_US 3000000 /* nightly-9: longest a write/flush waits for a host that does not read */
+
 void usb_dwc3_putbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, u8 byte)
 {
     ringbuffer_t *device2host = dev->pipe[pipe].device2host;
@@ -1392,7 +1394,10 @@ void usb_dwc3_putbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, u8 byte)
 
     u8 ep = dev->pipe[pipe].ep_in;
 
+    u64 deadline = timeout_calculate(USB_DWC3_STALL_US); /* nightly-9: bounded like usb_dwc3_queue */
     while (ringbuffer_write(&byte, 1, device2host) < 1) {
+        if (!dev->pipe[pipe].ready || timeout_expired(deadline))
+            return;
         usb_dwc3_handle_events(dev);
         usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
     }
@@ -1411,15 +1416,25 @@ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf, 
         return 0;
 
     u8 ep = dev->pipe[pipe].ep_in;
+    /* nightly-9 (m1n1 audit): a host that stops reading (link event, dead launcher) must not wedge the resident
+     * here with the console or the big lock held: stop when the pipe goes not-ready, and give up after 3 s */
+    u64 deadline = 0;
 
-    while (count) {
+    while (count && dev->pipe[pipe].ready) {
         wrote = ringbuffer_write(p, count, device2host);
         count -= wrote;
         p += wrote;
         sent += wrote;
         if (count) {
+            if (wrote)
+                deadline = 0;
+            else if (!deadline)
+                deadline = timeout_calculate(USB_DWC3_STALL_US);
+            else if (timeout_expired(deadline))
+                break;
             usb_dwc3_handle_events(dev);
-            usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
+            if (dev->pipe[pipe].ready)
+                usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
         }
     }
 
@@ -1453,13 +1468,16 @@ size_t usb_dwc3_read(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, void *buf, size_t 
 
     u8 ep = dev->pipe[pipe].ep_out;
 
-    while (count) {
+    /* nightly-9 (m1n1 audit): stop if the pipe goes not-ready (link reset) instead of spinning on an empty ring.
+     * No time bound: an idle proxy legitimately waits here for the host's next request. */
+    while (count && dev->pipe[pipe].ready) {
         read = ringbuffer_read(p, count, host2device);
         count -= read;
         p += read;
         recvd += read;
         usb_dwc3_handle_events(dev);
-        usb_dwc3_cdc_start_bulk_out_xfer(dev, ep);
+        if (dev->pipe[pipe].ready)
+            usb_dwc3_cdc_start_bulk_out_xfer(dev, ep);
     }
 
     return recvd;
@@ -1498,9 +1516,11 @@ void usb_dwc3_flush(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
         return;
 
     u8 ep = dev->pipe[pipe].ep_in;
+    u64 deadline = timeout_calculate(USB_DWC3_STALL_US); /* nightly-9: a flush gives up after 3 s */
 
     while (dev->pipe[pipe].ready &&
-           (ringbuffer_get_used(device2host) != 0 || dev->endpoints[ep].xfer_in_progress)) {
+           (ringbuffer_get_used(device2host) != 0 || dev->endpoints[ep].xfer_in_progress) &&
+           !timeout_expired(deadline)) {
         usb_dwc3_handle_events(dev);
         if (dev->pipe[pipe].ready)
             usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);

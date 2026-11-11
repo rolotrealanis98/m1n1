@@ -110,6 +110,18 @@ int main(void)
         }
     }
     CHECK(wdt_kicks <= 1 + 10 + 1 && hang_reports >= 2 && hang_cpu == 12);
+    /* m1n1 audit: a CPU Windows switched off (PSCI CPU_OFF: the core leaves the guest and hv.c clears its
+     * hv_started_cpus flag) is not counted as stuck; petting resumes */
+    hv_started_cpus[12] = false;
+    int k0 = wdt_kicks, r0 = hang_reports;
+    for (int s = 0; s < 5; s++) {
+        for (int ms = 0; ms < 1000; ms++) {
+            now_ticks += freq / 1000;
+            hv_cpu_rec[0].heartbeat++;
+            hv_win_progress_wdt_tick();
+        }
+    }
+    CHECK(wdt_kicks >= k0 + 4 && hang_reports == r0);
     reset_world(); wdt_old = 0;                                     /* no watchdog left armed by stage 1 */
     CHECK(hv_win_progress_wdt_arm(20) == 0 && !hv_win_progress_wdt_tick() && !pw.on);
 
