@@ -268,8 +268,10 @@ static void cppc_periodic(u64 now)
     int n = snprintf(buf, sizeof(buf), "HV/win cpuperf-P +%lds |", (long)((now - gov_t0) / 1000000000UL));
     for (u32 i = 0; i < dvfs.nclusters && n < 560; i++) {
         struct dvfs_cluster *c = &dvfs.c[i];
-        n += snprintf(buf + n, sizeof(buf) - n, " cl%d p%d st p%d w%ld f%d", i, c->expected, dl_on ? dl_cur[i] : 0,
-                      (long)c->writes, c->fail);
+        /* n9bcpu: STATUS current p-state read here in every mode (it printed 0 without Stage C: fixed/governor) */
+        u32 st = DVFS_STATUS_CUR(read32(c->cfg.base + DVFS_STATUS)); /* read only, as Linux get() */
+        n += snprintf(buf + n, sizeof(buf) - n, " cl%d p%d st p%d w%ld f%d", i, c->expected, st, (long)c->writes,
+                      c->fail);
         if (dl_on) {
             u64 t = mrs(CNTPCT_EL0), d = cppc_dl_value(&dl[i], t);
             u64 dt = t - periodic_t[i], dd = d - periodic_d[i];
