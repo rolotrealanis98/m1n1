@@ -45,6 +45,28 @@ static void dvfs_wr64(void *ctx, u64 addr, u64 val)
 
 static const struct dvfs_io dvfs_hw = {dvfs_rd64, dvfs_rd32, dvfs_wr64, NULL};
 
+/* cpuperf-G inputs */
+extern u64 hv_win_wfi_idle_tk[MAX_CPUS];
+extern u64 hv_win_wfi_since_tk[MAX_CPUS];
+extern bool hv_started_cpus[MAX_CPUS];
+
+/*
+ * CPU temperature in milli-degC for the governor's thermal guard, DVFS_TEMP_UNKNOWN when this build has
+ * no SMC temperature reads. A build that runs the SMC power reads (--smc-power) provides the strong
+ * definition (TCMb, the key Linux's macsmc_soc_die and its draft thermal zone use); see perf/GOVERNOR.md.
+ */
+int __attribute__((weak)) hv_win_cpu_temp_mc(void)
+{
+    return DVFS_TEMP_UNKNOWN;
+}
+
+/* timeline of governor-driven p-state changes (bounded) and residency per cluster/p-state */
+#define GOV_LOG_MAX 300
+static u32 gov_logged;
+static u32 gov_prev_expected[DVFS_MAX_CLUSTERS];
+static u64 gov_res_ns[DVFS_MAX_CLUSTERS][DVFS_PSTATES];
+static u64 gov_res_last, gov_t0;
+
 static bool cppc_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width)
 {
     UNUSED(ctx);
@@ -90,13 +112,20 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
         printf("HV/win cpuperf-B: chip 0x%x is not T6050, refused\n", chip_id);
         return -1;
     }
-    if (len != sizeof(dvfs_cfg_copy) || !cfg_addr) {
-        printf("HV/win cpuperf-B: config length %ld != %ld\n", len, (long)sizeof(dvfs_cfg_copy));
+    if ((len != sizeof(dvfs_cfg_copy) && len != DVFS_CFG_V1_SIZE) || !cfg_addr) {
+        printf("HV/win cpuperf-B: config length %ld is neither %ld (v2) nor %d (v1)\n", len,
+               (long)sizeof(dvfs_cfg_copy), DVFS_CFG_V1_SIZE);
         return -1;
     }
-    memcpy(&dvfs_cfg_copy, (void *)cfg_addr, sizeof(dvfs_cfg_copy));
-    /* Without the CPPC page (no _CPC: --cpu-dvfs fixed with uniform/adt classes) only fixed clusters make sense */
-    if (!cppc.configured) {
+    memset(&dvfs_cfg_copy, 0, sizeof(dvfs_cfg_copy));
+    memcpy(&dvfs_cfg_copy, (void *)cfg_addr, len);
+    if (len == DVFS_CFG_V1_SIZE && dvfs_cfg_copy.version != 1) {
+        printf("HV/win cpuperf-B: a %d-byte config must be version 1\n", DVFS_CFG_V1_SIZE);
+        return -1;
+    }
+    /* Without the CPPC page (no _CPC: --cpu-dvfs fixed/governor with uniform/adt classes) only fixed or
+     * governed clusters make sense */
+    if (!cppc.configured && !dvfs_cfg_copy.gov.enabled) {
         for (u32 i = 0; i < dvfs_cfg_copy.nclusters && i < DVFS_MAX_CLUSTERS; i++) {
             if (dvfs_cfg_copy.c[i].pmin != dvfs_cfg_copy.c[i].pmax) {
                 printf("HV/win cpuperf-B: cluster %d follows Desired but there is no CPPC page\n", i);
@@ -129,6 +158,18 @@ int hv_win_cppc_dvfs(u64 cfg_addr, u64 len)
     printf("HV/win cpuperf-B: ON, rate limit %ld ns per cluster, timeout %ld ns, %d of %d cluster(s) fixed, "
            "CPPC page %s\n",
            dvfs.min_interval_ns, (long)DVFS_TIMEOUT_NS, nfixed, dvfs.nclusters, cppc.configured ? "yes" : "no");
+    if (dvfs.gov.enabled) {
+        int t = hv_win_cpu_temp_mc();
+        printf("HV/win cpuperf-G: governor period %d us up %d%%x%d mid x%d down <%d%%x%d; temperature %s; "
+               "hot %d crit %d release %d mC\n",
+               dvfs.gov.period_us, dvfs.gov.up_pct, dvfs.gov.up_periods, dvfs.gov.mid_periods,
+               dvfs.gov.down_pct, dvfs.gov.down_periods,
+               t == DVFS_TEMP_UNKNOWN ? "none (ceiling capped at safe_ceiling)" : "SMC", dvfs.gov.temp_hot_mc,
+               dvfs.gov.temp_crit_mc, dvfs.gov.temp_release_mc);
+        for (u32 i = 0; i < dvfs.nclusters; i++)
+            printf("HV/win cpuperf-G: cluster %d floor p%d mid p%d ceiling p%d safe ceiling p%d\n", i,
+                   dvfs.c[i].cfg.pmin, dvfs.gov.mid[i], dvfs.c[i].cfg.pmax, dvfs.gov.safe_ceiling[i]);
+    }
     return 0;
 }
 
@@ -138,13 +179,58 @@ void hv_win_cppc_tick(void)
     static u32 desired[DVFS_MAX_CPUS];
     static bool seen[DVFS_MAX_CPUS];
 
+    static u64 idle_ns[DVFS_MAX_CPUS];
+    static bool online[DVFS_MAX_CPUS];
+
     if (!dvfs.enabled)
         return;
+    u64 tk = mrs(CNTPCT_EL0), frq = mrs(CNTFRQ_EL0);
+    u64 now = tk / frq * 1000000000UL + (tk % frq) * 1000000000UL / frq;
     for (u32 i = 0; i < dvfs.ncpus; i++) {
         desired[i] = cppc.configured ? cppc.slot[i].desired : 0;
         seen[i] = cppc.configured && cppc.slot[i].desired_writes != 0;
     }
-    dvfs_service(&dvfs, &dvfs_hw, desired, seen, mrs(CNTPCT_EL0) * 1000000000UL / mrs(CNTFRQ_EL0));
+    if (dvfs.gov.enabled) {
+        for (u32 i = 0; i < dvfs.ncpus; i++) {
+            int cpu = hv_win.vcpu_cpu[i];
+            if (cpu < 0 || cpu >= MAX_CPUS) {
+                online[i] = false;
+                idle_ns[i] = 0;
+                continue;
+            }
+            u64 since = __atomic_load_n(&hv_win_wfi_since_tk[cpu], __ATOMIC_ACQUIRE);
+            u64 idle = __atomic_load_n(&hv_win_wfi_idle_tk[cpu], __ATOMIC_RELAXED);
+            if (since && tk > since)
+                idle += tk - since; /* a WFI in progress counts up to now */
+            idle_ns[i] = idle / frq * 1000000000UL + (idle % frq) * 1000000000UL / frq;
+            online[i] = i == 0 || hv_started_cpus[cpu];
+        }
+        dvfs_governor(&dvfs, idle_ns, online, hv_win_cpu_temp_mc(), now);
+    }
+    dvfs_service(&dvfs, &dvfs_hw, desired, seen, now);
+
+    /* residency (by the state we last wrote / inherited) and a bounded change timeline */
+    if (!gov_res_last) {
+        gov_res_last = gov_t0 = now;
+        for (u32 i = 0; i < dvfs.nclusters; i++)
+            gov_prev_expected[i] = dvfs.c[i].expected;
+        return;
+    }
+    for (u32 i = 0; i < dvfs.nclusters; i++) {
+        struct dvfs_cluster *c = &dvfs.c[i];
+        if (gov_prev_expected[i] < DVFS_PSTATES)
+            gov_res_ns[i][gov_prev_expected[i]] += now - gov_res_last;
+        if (c->expected != gov_prev_expected[i]) {
+            if (gov_logged < GOV_LOG_MAX) {
+                gov_logged++;
+                printf("HV/win cpuperf-G: +%ld ms cluster %d p%d -> p%d util %d%% temp %d mC\n",
+                       (long)((now - gov_t0) / 1000000), i, gov_prev_expected[i], c->expected, c->util,
+                       dvfs.last_temp == DVFS_TEMP_UNKNOWN ? -1 : dvfs.last_temp);
+            }
+            gov_prev_expected[i] = c->expected;
+        }
+    }
+    gov_res_last = now;
 }
 
 /* Printed from the SMP dump and on P_HV_WIN_CPPC_STAT: one line per CPU that saw any access. */
@@ -172,6 +258,20 @@ int hv_win_cppc_dump(void)
                i, st, DVFS_STATUS_CUR(st), st & 0x1f, c->expected, c->target, c->writes,
                c->writes ? c->min_written : 0, c->max_written, c->busy_ticks, c->rate_limited, c->fail,
                c->fail_cmd);
+        if (dvfs.gov.enabled) {
+            char buf[256];
+            int n = 0;
+            for (u32 p = 0; p < DVFS_PSTATES && n < 230; p++)
+                if (gov_res_ns[i][p] >= 1000000)
+                    n += snprintf(buf + n, sizeof(buf) - n, " p%d:%ldms", p, (long)(gov_res_ns[i][p] / 1000000));
+            buf[n] = 0;
+            printf("HV/win cpuperf-G: cluster %d level %d util %d%% changes %ld evals %ld thermal %s%s temp %d mC;"
+                   " residency%s\n",
+                   i, c->level, c->util, c->gov_changes, dvfs.gov_evals,
+                   dvfs.thermal_crit ? "CRIT" : dvfs.thermal_hot ? "HOT" : "ok",
+                   dvfs.last_temp == DVFS_TEMP_UNKNOWN ? " (no source: safe ceiling)" : "",
+                   dvfs.last_temp == DVFS_TEMP_UNKNOWN ? -1 : dvfs.last_temp, buf);
+        }
     }
     return 0;
 }

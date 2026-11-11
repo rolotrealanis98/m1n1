@@ -20,7 +20,7 @@ check: test_dvfs
 	./test_dvfs
 
 clean:
-	rm -rf test_dvfs test_dvfs.dSYM cross_cfg cross_cfg.dSYM cfg.bin
+	rm -rf test_dvfs test_dvfs.dSYM cross_cfg cross_cfg.dSYM cfg.bin cfg.bin.gov
 
 .PHONY: check clean
 

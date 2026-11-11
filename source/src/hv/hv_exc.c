@@ -758,6 +758,13 @@ void hv_win_wfi_snap(int where, const struct exc_info *ctx, int wake)
     __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
 }
 
+/*
+ * cpuperf-G: accumulated trapped-WFI time per m1n1 CPU (CNTPCT ticks) and the start of a WFI in
+ * progress (0 = none). Single writer (the CPU itself), read by the boot CPU's governor tick.
+ */
+u64 hv_win_wfi_idle_tk[MAX_CPUS];
+u64 hv_win_wfi_since_tk[MAX_CPUS];
+
 bool hv_win_wfi(struct exc_info *ctx)
 {
     int cpu = smp_id();
@@ -795,7 +802,13 @@ bool hv_win_wfi(struct exc_info *ctx)
 
     u64 start = mrs(CNTPCT_EL0);
     int idles = 0;
+    __atomic_store_n(&hv_win_wfi_since_tk[cpu], start, __ATOMIC_RELAXED);
     enum wfi_wake wake = wfi_wait(&ops, HV_WFI_MAX_SPINS, &idles);
+    {
+        u64 end = mrs(CNTPCT_EL0);
+        __atomic_store_n(&hv_win_wfi_idle_tk[cpu], hv_win_wfi_idle_tk[cpu] + (end - start), __ATOMIC_RELAXED);
+        __atomic_store_n(&hv_win_wfi_since_tk[cpu], 0, __ATOMIC_RELEASE);
+    }
 
     u64 kick_t = __atomic_exchange_n(&hv_kick_t[cpu], 0, __ATOMIC_RELAXED);
     if (kick_t && wake == WFI_WAKE_VIRQ) {

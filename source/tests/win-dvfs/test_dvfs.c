@@ -17,6 +17,7 @@
 typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
+typedef int32_t s32;
 
 #include "hv_win_dvfs_core.h"
 
@@ -193,10 +194,232 @@ static void request(int cpu, u32 v)
     seen[cpu] = true;
 }
 
+/* ---- cpuperf-G governor: synthetic load traces on the mock ---------------------------------- */
+static u64 g_idle[DVFS_MAX_CPUS];
+static bool g_online[DVFS_MAX_CPUS];
+static s32 g_temp = DVFS_TEMP_UNKNOWN;
+static u64 g_writes_per_cluster[3];
+static u64 g_last_write_t[3];
+static bool g_bad_spacing, g_bad_value, g_out_of_clamp;
+
+static struct dvfs_cfg gov_cfg(void)
+{
+    struct dvfs_cfg c = base_cfg();
+    for (int k = 0; k < 3; k++) {
+        c.c[k].pmin = 2;
+        c.c[k].pmax = k < 2 ? 15 : 17;
+    }
+    c.gov.enabled = 1;
+    c.gov.period_us = 10000;
+    c.gov.up_pct = 60;
+    c.gov.down_pct = 25;
+    c.gov.up_periods = 2;
+    c.gov.mid_periods = 5;
+    c.gov.down_periods = 20;
+    c.gov.mid[0] = c.gov.mid[1] = c.gov.mid[2] = 6;
+    c.gov.safe_ceiling[0] = c.gov.safe_ceiling[1] = 12;
+    c.gov.safe_ceiling[2] = 14;
+    c.gov.temp_hot_mc = 95000;
+    c.gov.temp_crit_mc = 100000;
+    c.gov.temp_release_mc = 90000;
+    return c;
+}
+
+static void gov_start(void)
+{
+    struct dvfs_cfg c = gov_cfg();
+    CHECK(dvfs_check_cfg(&c, 18) == 0);
+    mock_boot();
+    memset(desired, 0, sizeof(desired));
+    memset(seen, 0, sizeof(seen));
+    memset(g_idle, 0, sizeof(g_idle));
+    memset(g_writes_per_cluster, 0, sizeof(g_writes_per_cluster));
+    memset(g_last_write_t, 0, sizeof(g_last_write_t));
+    for (int i = 0; i < 18; i++)
+        g_online[i] = true;
+    g_temp = DVFS_TEMP_UNKNOWN;
+    g_bad_spacing = g_bad_value = g_out_of_clamp = false;
+    now = 1000000000UL;
+    CHECK(dvfs_probe(&st, &c, &io) == 0);
+}
+
+/* busy(cpu, ms) -> 0..100 % busy during that millisecond */
+typedef int (*load_fn)(int cpu, u64 ms);
+
+static void gov_run(load_fn busy, u64 ms0, u64 ms1)
+{
+    for (u64 ms = ms0; ms < ms1; ms++) {
+        for (int i = 0; i < 18; i++)
+            g_idle[i] += (u64)(100 - busy(i, ms)) * 10000; /* ns of WFI in this 1 ms */
+        now += 1000000;
+        m_tick();
+        u64 w0 = n_wr64;
+        dvfs_governor(&st, g_idle, g_online, g_temp, now);
+        dvfs_service(&st, &io, desired, seen, now);
+        if (n_wr64 != w0) {
+            u64 off;
+            struct mock_cluster *mcl = find(last_wr_addr, &off);
+            int k = (int)(mcl - mc);
+            u32 p = (u32)(last_wr_val & 0x1f);
+            g_writes_per_cluster[k]++;
+            if (g_last_write_t[k] && now - g_last_write_t[k] < DVFS_MIN_INTERVAL_NS)
+                g_bad_spacing = true;
+            g_last_write_t[k] = now;
+            if ((last_wr_val & 0xffffffffffbffee0UL & ~DVFS_CMD_SET) != 0)
+                g_bad_value = true;
+            u32 ceil = g_temp == DVFS_TEMP_UNKNOWN ? st.gov.safe_ceiling[k] : st.c[k].cfg.pmax;
+            if (p < st.c[k].cfg.pmin || p > ceil)
+                g_out_of_clamp = true;
+        }
+    }
+}
+
+static int l_idle(int cpu, u64 ms) { (void)cpu; (void)ms; return 0; }
+static int l_one13(int cpu, u64 ms) { return (cpu == 13 && ms < 1000) ? 100 : 0; }
+static int l_all(int cpu, u64 ms) { (void)cpu; (void)ms; return 100; }
+static int l_burst0(int cpu, u64 ms) { return (cpu == 0 && ms % 100 < 30) ? 100 : 0; }
+static int l_flip0(int cpu, u64 ms) { return (cpu == 0 && (ms / 10) % 2 == 0) ? 100 : 0; }
+static int l_slow0(int cpu, u64 ms) { return (cpu == 0 && (ms / 300) % 2 == 0) ? 100 : 0; }
+static int l_half(int cpu, u64 ms) { (void)ms; return cpu == 7 ? 40 : 0; }
+
+static void governor_tests(void)
+{
+    struct dvfs_cfg b;
+    /* config refusals */
+#define GBAD(stmt)                                                                                 \
+    do {                                                                                           \
+        b = gov_cfg();                                                                             \
+        stmt;                                                                                      \
+        CHECK(dvfs_check_cfg(&b, 18) < 0);                                                         \
+    } while (0)
+    b = gov_cfg();
+    CHECK(dvfs_check_cfg(&b, 18) == 0);
+    GBAD(b.gov.enabled = 2);
+    GBAD(b.gov.period_us = 999);
+    GBAD(b.gov.down_pct = 60);
+    GBAD(b.gov.up_pct = 101);
+    GBAD(b.gov.up_periods = 0);
+    GBAD(b.gov.down_periods = 1001);
+    GBAD(b.gov.mid[2] = 1);
+    GBAD(b.gov.mid[0] = 16);
+    GBAD(b.gov.safe_ceiling[0] = 5);
+    GBAD(b.gov.safe_ceiling[2] = 18);
+    GBAD(b.c[1].pmin = b.c[1].pmax = 6);  /* a governed cluster needs a range */
+    GBAD(b.gov.temp_release_mc = 95000);
+    GBAD(b.gov.temp_crit_mc = 120000);
+
+    /* 1. idle: only mc0 comes down from its inherited p6, once, after ~200 ms; nothing goes up */
+    gov_start();
+    gov_run(l_idle, 0, 3000);
+    CHECK(g_writes_per_cluster[0] == 1 && g_writes_per_cluster[1] == 0 && g_writes_per_cluster[2] == 0);
+    CHECK(mc[0].cur == 2 && mc[1].cur == 2 && mc[2].cur == 2);
+    CHECK(g_last_write_t[0] - 1000000000UL >= 190000000UL && g_last_write_t[0] - 1000000000UL <= 260000000UL);
+
+    /* 2. one busy core in pc: up fast (<= 40 ms), the other clusters untouched; then down slowly */
+    gov_start();
+    gov_run(l_one13, 0, 40);
+    CHECK(mc[2].cur == 14);                       /* safe ceiling without a temperature source */
+    CHECK(g_writes_per_cluster[1] == 0);
+    gov_run(l_one13, 40, 1000);
+    CHECK(g_writes_per_cluster[2] == 1 && mc[2].cur == 14);   /* stays while busy: no oscillation */
+    gov_run(l_one13, 1000, 1150);
+    CHECK(mc[2].cur == 14);                       /* not yet down after 150 ms */
+    gov_run(l_one13, 1150, 1300);
+    CHECK(mc[2].cur == 6);                        /* ceiling -> mid after ~200 ms */
+    gov_run(l_one13, 1300, 1700);
+    CHECK(mc[2].cur == 2 && g_writes_per_cluster[2] == 3);   /* mid -> floor after another ~200 ms */
+    CHECK(!g_bad_spacing && !g_bad_value && !g_out_of_clamp && !wrote_while_busy && bad_access == 0);
+
+    /* 3. all busy: every cluster at its ceiling within 40 ms, then no further writes for 3 s */
+    gov_start();
+    gov_run(l_all, 0, 40);
+    CHECK(mc[0].cur == 12 && mc[1].cur == 12 && mc[2].cur == 14);
+    u64 w = n_wr64;
+    gov_run(l_all, 40, 3040);
+    CHECK(n_wr64 == w);
+
+    /* 4. bursty 30 ms every 100 ms on CPU 0: up once, never down (idle gaps < 200 ms) */
+    gov_start();
+    gov_run(l_burst0, 0, 5000);
+    CHECK(mc[0].cur == 12 && g_writes_per_cluster[0] == 1);
+
+    /* 5. 10 ms on / 10 ms off: neither up (needs 2 busy periods in a row) nor down: hold, no write */
+    gov_start();
+    gov_run(l_flip0, 0, 3000);
+    CHECK(g_writes_per_cluster[0] == 0 && mc[0].cur == 6);
+
+    /* 6. 300 ms on / 300 ms off: bounded writes (<= 2 per 600 ms cycle), never more than 4/s */
+    gov_start();
+    gov_run(l_slow0, 0, 6000);
+    CHECK(g_writes_per_cluster[0] >= 10 && g_writes_per_cluster[0] <= 21);
+    CHECK(!g_bad_spacing && !g_out_of_clamp);
+
+    /* 7. moderate 40 % on CPU 7: floor -> mid after the mid count, never ceiling */
+    gov_start();
+    gov_run(l_idle, 0, 600);                      /* mc1 at floor (p2) */
+    gov_run(l_half, 600, 1200);
+    CHECK(mc[1].cur == 6 && g_writes_per_cluster[1] == 1);
+
+    /* 8. thermal guard with a temperature: hot -> mid at once, crit -> floor, release -> ceiling */
+    gov_start();
+    g_temp = 60000;
+    gov_run(l_all, 0, 50);
+    CHECK(mc[0].cur == 15 && mc[2].cur == 17);   /* with a temperature the full clamp is allowed */
+    g_temp = 96000;
+    gov_run(l_all, 50, 70);
+    CHECK(mc[0].cur == 6 && mc[2].cur == 6 && st.thermal_hot);
+    g_temp = 101000;
+    gov_run(l_all, 70, 90);
+    CHECK(mc[0].cur == 2 && mc[2].cur == 2 && st.thermal_crit);
+    g_temp = 93000;                               /* between release and hot: stays capped */
+    gov_run(l_all, 90, 200);
+    CHECK(mc[0].cur == 2);
+    g_temp = 85000;
+    gov_run(l_all, 200, 240);
+    CHECK(mc[0].cur == 15 && mc[2].cur == 17 && !st.thermal_hot);
+    CHECK(!g_bad_spacing && !g_out_of_clamp);
+
+    /* 9. latch: another owner moves pc while governed -> no further pc writes */
+    gov_start();
+    gov_run(l_all, 0, 40);
+    mc[2].cmd = (mc[2].cmd & ~0x1fUL) | 9;
+    u64 wpc = g_writes_per_cluster[2];
+    gov_run(l_idle, 40, 1000);
+    CHECK(st.c[2].fail == DVFS_FAIL_FOREIGN && g_writes_per_cluster[2] == wpc);
+    CHECK(mc[0].cur == 2);                        /* the M clusters keep being governed */
+
+    /* 10. offline vCPUs count as idle; online CPU 1 busy drives mc0 */
+    gov_start();
+    for (int i = 0; i < 18; i++)
+        g_online[i] = i < 2;
+    gov_run(l_all, 0, 40);
+    CHECK(mc[0].cur == 12 && mc[1].cur == 2 && mc[2].cur == 2);
+
+    /* 11. an idle delta larger than the period (a WFI in progress counted up to "now", then the counter
+     * catching up) is clamped: it reads as fully idle, never as busy */
+    gov_start();
+    gov_run(l_idle, 0, 50);
+    for (int i = 0; i < 18; i++)
+        g_idle[i] += 50000000; /* 50 ms extra idle reported inside one 10 ms period */
+    {
+        u64 e0 = st.gov_evals, ms = 50;
+        while (st.gov_evals == e0 && ms < 80) { /* up to the first evaluation that sees the jump */
+            gov_run(l_idle, ms, ms + 1);
+            ms++;
+        }
+        CHECK(st.gov_evals == e0 + 1);
+        CHECK(st.c[0].util == 0 && st.c[1].util == 0 && st.c[2].util == 0);
+        gov_run(l_idle, ms, 600);
+    }
+    CHECK(g_writes_per_cluster[1] == 0 && g_writes_per_cluster[2] == 0 && mc[0].cur == 2);
+}
+
 int main(void)
 {
     /* layout the launcher packs (run_windows.DVFS_CFG_FMT) */
-    CHECK(sizeof(struct dvfs_cfg) == 632);
+    CHECK(sizeof(struct dvfs_cfg) == 712); /* cpuperf-G: + struct dvfs_gov_cfg (76 bytes, padded to 8) */
+    CHECK(offsetof(struct dvfs_cfg, gov) == 632);
+    CHECK(sizeof(struct dvfs_gov_cfg) == 76);
     CHECK(offsetof(struct dvfs_cfg, min_interval_ns) == 16);
     CHECK(offsetof(struct dvfs_cfg, cluster_of) == 24);
     CHECK(offsetof(struct dvfs_cfg, c) == 56);
@@ -213,7 +436,12 @@ int main(void)
         CHECK(dvfs_check_cfg(&b, 18) < 0);                                                         \
     } while (0)
     BAD(b.magic ^= 1);
-    BAD(b.version = 2);
+    BAD(b.version = 3);
+    BAD(b.version = 1; b.gov.enabled = 1);
+    b = base_cfg();
+    b.version = 1; /* the 632-byte cpuperf-B layout (gov block zero-filled by the glue) stays accepted */
+    CHECK(dvfs_check_cfg(&b, 18) == 0);
+    CHECK(DVFS_CFG_V1_SIZE == offsetof(struct dvfs_cfg, gov));
     BAD(b.nclusters = 0);
     BAD(b.nclusters = 5);
     BAD(b.ncpus = 0);
@@ -408,6 +636,8 @@ int main(void)
         CHECK(st.c[0].writes == 0 && st.c[1].writes == 0);
     }
     fresh();
+
+    governor_tests();
 
     /* ---- random soak with invariants ---- */
     fresh();
