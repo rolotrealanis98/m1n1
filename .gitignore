@@ -23,3 +23,5 @@ source/tests/*/test_*
 !source/tests/*/test_*.[chS]
 !source/tests/*/test_*.py
 *.dSYM/
+source/tests/win-dvfs/cross_cfg
+source/tests/win-dvfs/cfg.bin
