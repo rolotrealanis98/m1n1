@@ -81,6 +81,10 @@ if [ "$what" = test ] || [ "$what" = all ]; then
   expect pass "nightly-6 refresh"            "$B/sim_new_san" refresh
   expect fail "mutant no-refresh refresh"    "$B/sim_mut_norefresh_san" refresh
   expect fail "mutant no-fix-count refresh"  "$B/sim_mut_nofixcount_san" refresh
+  # nightly-7: the same scenarios with 6 and 18 vCPUs (the parent refused more than one)
+  expect pass "nightly-7 6 vCPUs refresh"      env SIM_VCPUS=6 "$B/sim_new_san" refresh
+  expect pass "nightly-7 18 vCPUs strict"      env SIM_VCPUS=18 "$B/sim_new_san" strict
+  expect fail "disp2 parent with 6 vCPUs"      env SIM_VCPUS=6 "$B/sim_parent_san" refresh
   "$B/sim_new_san" reject-tuning2 0x8000000000000000 # bit 63 reserved
   "$B/sim_new_san" reject-tuning2 0x100000000000000 # bit 56 reserved
 fi

@@ -1074,6 +1074,8 @@ static void run_workloads(const char *mode, u64 flags, u64 tuning, const char *c
 int main(int argc, char **argv)
 {
     const char *what = argc > 1 ? argv[1] : "test";
+    if (getenv("SIM_VCPUS")) /* nightly-7: the shadow display with N vCPUs */
+        hv_win.nr_vcpus = strtoul(getenv("SIM_VCPUS"), NULL, 0);
     legacy_row_ns = 311718; /* measured max (attempt 26) */
     /*
      * Cost scenarios for the card (ns per byte). Both make the r3.2-disp 2x converter cost the
