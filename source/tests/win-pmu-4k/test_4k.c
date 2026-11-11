@@ -193,6 +193,9 @@ static struct {
     u32 flips[BLOCKS];
     bool listed[BLOCKS], scanned[FRAMES];
     unsigned nlisted, close_ticks, npinned, pin_ticks;
+    /* nightly-7 storm guard (hv_win_pmu.c): pins in a row within 300 ticks; 3 -> sticky for 50 sweeps */
+    u64 clock, pin_tick[BLOCKS];
+    unsigned storm_pins[BLOCKS], sticky[BLOCKS];
     u64 frames_scanned, words, denied, write_flips, walk_flips, pins, reprotects, unpins, dma;
 } m;
 
@@ -343,12 +346,16 @@ static void ref_flip(unsigned b, bool walker)
 {
     ref_clear(b);
     m.flips[b] = m.flips[b] + 1 < HV_XT_FLIPS_MAX ? m.flips[b] + 1 : HV_XT_FLIPS_MAX;
-    if (m.flips[b] >= 4 && m.npinned < 256) {
+    if (m.flips[b] >= 4 && m.npinned < 2048) {
         if (!m.npinned)
             m.pin_ticks = 0;
         m.npinned++;
         m.st[b] = HV_XT_PINNED;
         m.pins++;
+        m.storm_pins[b] = (m.storm_pins[b] && m.clock - m.pin_tick[b] <= 300) ? m.storm_pins[b] + 1 : 1;
+        m.pin_tick[b] = m.clock;
+        if (m.storm_pins[b] >= 3 && !m.sticky[b])
+            m.sticky[b] = 50;
         return;
     }
     m.st[b] = HV_XT_DIRTY;
@@ -417,16 +424,23 @@ static void fill(unsigned off, unsigned size, u32 value)
 static void tick(void)
 {
     hv_win_pmu_tick();
+    m.clock++;
     if (m.nlisted && ++m.close_ticks >= 10)
         ref_close();
     if (m.npinned && ++m.pin_ticks >= 100) {
+        unsigned kept = 0;
         for (unsigned b = 0; b < BLOCKS; b++)
             if (m.st[b] == HV_XT_PINNED) {
+                if (m.sticky[b]) { /* nightly-7: a sticky storm block survives the sweep */
+                    m.sticky[b]--;
+                    kept++;
+                    continue;
+                }
                 m.st[b] = HV_XT_DIRTY;
                 m.flips[b] = 0;
                 m.unpins++;
             }
-        m.npinned = 0;
+        m.npinned = kept;
         m.pin_ticks = 0;
     }
     equivalent();
