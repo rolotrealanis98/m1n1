@@ -217,6 +217,48 @@ static inline int dcp_root_write_ok(const unsigned char *zero_bitmap, unsigned l
 #define DCPO_ASC_DROPS  0x20ul
 #define DCPO_MAGIC_VAL  0x4f57354du
 
+/* ---- scanout descriptor (nightly-12 screenshots follow the glass) ----
+ * While the display owner is Windows, the guest tells EL2 which surface the DCP is scanning, so the hypervisor's
+ * panel screenshot shows what is on glass instead of the paused DFB. The guest stages the fields, then writes
+ * COMMIT = 1 (latch) or 0 (clear). All 32-bit registers:
+ *   +0x40 SCAN_PA_LO  +0x44 SCAN_PA_HI   physical address of the first pixel (IPA == PA for guest RAM)
+ *   +0x48 SCAN_STRIDE (bytes)  +0x4c SCAN_WIDTH  +0x50 SCAN_HEIGHT (pixels)
+ *   +0x54 SCAN_FORMAT: 0 = X2R10G10B10 (B in bits 9:0), 1 = X8R8G8B8 (B in bits 7:0, i.e. BGRA8 in memory)
+ *   +0x58 SCAN_COMMIT  W: 1 latches the staged fields as the current scanout, 0 clears it, other values ignored;
+ *                      R: number of accepted commits
+ *   +0x5c SCAN_STATE   R: bit0 a descriptor is latched, bit1 the last commit was rejected, bits 15:8 rejected commits
+ *                      (saturating)
+ * A commit is accepted only when the shape is sane (dcp_scan_shape_ok) and the whole surface lies inside ONE guest RAM
+ * range the launcher registered (never MMIO, the resident or carve-outs). The latch is cleared whenever the owner
+ * changes. Reads of the staging registers return what was staged. */
+#define DCPO_SCAN_PA_LO  0x40ul
+#define DCPO_SCAN_PA_HI  0x44ul
+#define DCPO_SCAN_STRIDE 0x48ul
+#define DCPO_SCAN_WIDTH  0x4cul
+#define DCPO_SCAN_HEIGHT 0x50ul
+#define DCPO_SCAN_FORMAT 0x54ul
+#define DCPO_SCAN_COMMIT 0x58ul
+#define DCPO_SCAN_STATE  0x5cul
+#define DCP_SCAN_DIM_MAX 16384u
+#define DCP_SCAN_BYTES_MAX (64ull << 20)
+
+struct dcp_scan_desc {
+    unsigned long long pa;
+    unsigned int stride, w, h, fmt;
+};
+
+static inline int dcp_scan_shape_ok(const struct dcp_scan_desc *d)
+{
+    unsigned long long size;
+
+    if (!d->w || !d->h || d->w > DCP_SCAN_DIM_MAX || d->h > DCP_SCAN_DIM_MAX || d->fmt > 1)
+        return 0;
+    if ((d->stride & 3) || (unsigned long long)d->stride < 4ull * d->w || !d->pa || (d->pa & 3))
+        return 0;
+    size = (unsigned long long)d->stride * d->h;
+    return size <= DCP_SCAN_BYTES_MAX && d->pa <= ~0ull - size;
+}
+
 struct dcpo_state {
     unsigned int owner;      /* 0 or 1 */
     unsigned int fb_exists;
@@ -225,6 +267,8 @@ struct dcpo_state {
     unsigned int changes;
     unsigned long long passes;
     unsigned int dart_drops, root_drops, asc_drops;
+    struct dcp_scan_desc staged;
+    unsigned int scan_commits, scan_rejects, scan_latched, scan_last_rejected;
 };
 
 static inline unsigned int dcpo_reg32(unsigned long off, const struct dcpo_state *s)
@@ -243,6 +287,16 @@ static inline unsigned int dcpo_reg32(unsigned long off, const struct dcpo_state
         case DCPO_DART_DROPS: return s->dart_drops;
         case DCPO_ROOT_DROPS: return s->root_drops;
         case DCPO_ASC_DROPS: return s->asc_drops;
+        case DCPO_SCAN_PA_LO: return (unsigned int)s->staged.pa;
+        case DCPO_SCAN_PA_HI: return (unsigned int)(s->staged.pa >> 32);
+        case DCPO_SCAN_STRIDE: return s->staged.stride;
+        case DCPO_SCAN_WIDTH: return s->staged.w;
+        case DCPO_SCAN_HEIGHT: return s->staged.h;
+        case DCPO_SCAN_FORMAT: return s->staged.fmt;
+        case DCPO_SCAN_COMMIT: return s->scan_commits;
+        case DCPO_SCAN_STATE:
+            return (s->scan_latched ? 1u : 0) | ((s->scan_last_rejected ? 1u : 0) << 1) |
+                   ((s->scan_rejects > 255 ? 255u : s->scan_rejects) << 8);
         default: return 0;
     }
 }
@@ -257,15 +311,41 @@ static inline unsigned long long dcpo_read(unsigned long off, int width, const s
     return 0;
 }
 
-enum dcpo_op { DCPO_IGNORE = 0, DCPO_SET_OWNER = 1 };
+enum dcpo_op { DCPO_IGNORE = 0, DCPO_SET_OWNER = 1, DCPO_STAGE = 2, DCPO_SCAN_COMMIT_OP = 3, DCPO_SCAN_CLEAR_OP = 4 };
 
-/* a guest write: 32-bit OWNER write of 0 or 1 only; *owner_out gets the new owner */
+/* a guest write: 32-bit only. OWNER 0/1 -> SET_OWNER (*owner_out = new owner); SCAN_* staging registers -> STAGE
+ * (*owner_out = the value); SCAN_COMMIT 1 -> COMMIT, 0 -> CLEAR; everything else ignored */
 static inline enum dcpo_op dcpo_write(unsigned long off, int width, unsigned long long val, unsigned int *owner_out)
 {
-    if (width != 2 || off != DCPO_OWNER || val > 1)
+    if (width != 2)
         return DCPO_IGNORE;
-    *owner_out = (unsigned int)val;
-    return DCPO_SET_OWNER;
+    if (off == DCPO_OWNER) {
+        if (val > 1)
+            return DCPO_IGNORE;
+        *owner_out = (unsigned int)val;
+        return DCPO_SET_OWNER;
+    }
+    if (off >= DCPO_SCAN_PA_LO && off <= DCPO_SCAN_FORMAT && !(off & 3)) {
+        *owner_out = (unsigned int)val;
+        return DCPO_STAGE;
+    }
+    if (off == DCPO_SCAN_COMMIT && val <= 1)
+        return val ? DCPO_SCAN_COMMIT_OP : DCPO_SCAN_CLEAR_OP;
+    return DCPO_IGNORE;
+}
+
+/* apply a staging write to the staged descriptor */
+static inline void dcpo_stage(struct dcp_scan_desc *d, unsigned long off, unsigned int v)
+{
+    switch (off) {
+        case DCPO_SCAN_PA_LO: d->pa = (d->pa & ~0xffffffffull) | v; break;
+        case DCPO_SCAN_PA_HI: d->pa = (d->pa & 0xffffffffull) | ((unsigned long long)v << 32); break;
+        case DCPO_SCAN_STRIDE: d->stride = v; break;
+        case DCPO_SCAN_WIDTH: d->w = v; break;
+        case DCPO_SCAN_HEIGHT: d->h = v; break;
+        case DCPO_SCAN_FORMAT: d->fmt = v; break;
+        default: break;
+    }
 }
 
 #endif

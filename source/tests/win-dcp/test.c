@@ -246,9 +246,42 @@ int main(void)
     CHECK(dcpo_write(0x00, 2, 0xffffffffu, &o) == DCPO_IGNORE, "write all ones ignored");
     CHECK(dcpo_write(0x00, 3, 1, &o) == DCPO_IGNORE, "64-bit write ignored");
     CHECK(dcpo_write(0x00, 0, 1, &o) == DCPO_IGNORE && dcpo_write(0x00, 1, 1, &o) == DCPO_IGNORE, "narrow writes");
-    for (unsigned long off = 4; off < 0x4000; off += 4)
-        CHECK(dcpo_write(off, 2, 1, &o) == DCPO_IGNORE, "write at +0x%lx", off);
+    for (unsigned long off = 4; off < 0x4000; off += 4) {
+        int scan = off >= 0x40 && off <= 0x58;   /* the scanout descriptor registers */
+        unsigned int t = 9;
+        CHECK((dcpo_write(off, 2, 1, &t) == DCPO_IGNORE) == !scan, "write at +0x%lx", off);
+        CHECK(dcpo_write(off, 3, 1, &t) == DCPO_IGNORE && dcpo_write(off, 0, 1, &t) == DCPO_IGNORE, "narrow/wide at +0x%lx", off);
+    }
     CHECK(o == 9, "owner untouched by ignored writes");
+
+    /* ---- scanout descriptor ---- */
+    {
+        struct dcp_scan_desc d = {0x10c0000000ull, 13824, 3456, 2234, 0};
+        CHECK(dcp_scan_shape_ok(&d), "good descriptor");
+        d.fmt = 1; CHECK(dcp_scan_shape_ok(&d), "fmt 1");
+        d.fmt = 2; CHECK(!dcp_scan_shape_ok(&d), "fmt 2"); d.fmt = 0;
+        d.w = 0; CHECK(!dcp_scan_shape_ok(&d), "w 0"); d.w = 3456;
+        d.h = 0; CHECK(!dcp_scan_shape_ok(&d), "h 0"); d.h = 2234;
+        d.w = 16385; d.stride = 16385 * 4; CHECK(!dcp_scan_shape_ok(&d), "w > max"); d.w = 3456; d.stride = 13824;
+        d.stride = 13820; CHECK(!dcp_scan_shape_ok(&d), "stride < w*4"); d.stride = 13826; CHECK(!dcp_scan_shape_ok(&d), "stride unaligned"); d.stride = 13824;
+        d.pa = 0; CHECK(!dcp_scan_shape_ok(&d), "pa 0"); d.pa = 0x10c0000002ull; CHECK(!dcp_scan_shape_ok(&d), "pa unaligned"); d.pa = 0x10c0000000ull;
+        d.pa = ~0ull - 0x1000 + 1; d.pa &= ~3ull; CHECK(!dcp_scan_shape_ok(&d), "pa overflow"); d.pa = 0x10c0000000ull;
+        d.w = 16384; d.h = 16384; d.stride = 65536; CHECK(!dcp_scan_shape_ok(&d), "over 64 MiB");
+        d.h = 1024; CHECK(dcp_scan_shape_ok(&d), "exactly 64 MiB");
+        struct dcp_scan_desc st = {0};
+        dcpo_stage(&st, 0x40, 0x0c0000000u); dcpo_stage(&st, 0x44, 0x10); dcpo_stage(&st, 0x48, 13824);
+        dcpo_stage(&st, 0x4c, 3456); dcpo_stage(&st, 0x50, 2234); dcpo_stage(&st, 0x54, 1);
+        CHECK(st.pa == 0x10c0000000ull && st.stride == 13824 && st.w == 3456 && st.h == 2234 && st.fmt == 1, "staging");
+        unsigned int v = 99;
+        CHECK(dcpo_write(0x40, 2, 0x1234, &v) == DCPO_STAGE && v == 0x1234, "stage op");
+        CHECK(dcpo_write(0x58, 2, 1, &v) == DCPO_SCAN_COMMIT_OP && dcpo_write(0x58, 2, 0, &v) == DCPO_SCAN_CLEAR_OP, "commit/clear");
+        CHECK(dcpo_write(0x58, 2, 2, &v) == DCPO_IGNORE && dcpo_write(0x5c, 2, 1, &v) == DCPO_IGNORE, "commit 2 / state write");
+        struct dcpo_state ss; memset(&ss, 0, sizeof(ss));
+        ss.staged = st; ss.scan_commits = 7; ss.scan_latched = 1; ss.scan_last_rejected = 1; ss.scan_rejects = 300;
+        CHECK(dcpo_read(0x40, 2, &ss) == 0xc0000000u && dcpo_read(0x44, 2, &ss) == 0x10 && dcpo_read(0x48, 2, &ss) == 13824, "staging reads");
+        CHECK(dcpo_read(0x4c, 2, &ss) == 3456 && dcpo_read(0x50, 2, &ss) == 2234 && dcpo_read(0x54, 2, &ss) == 1, "staging reads 2");
+        CHECK(dcpo_read(0x58, 2, &ss) == 7 && dcpo_read(0x5c, 2, &ss) == (3u | (255u << 8)), "commit count and state");
+    }
 
     if (fails) {
         printf("win-dcp FAIL (%d of %lu checks)\n", fails, checks);

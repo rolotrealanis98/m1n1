@@ -146,7 +146,8 @@ int main(void)
     test_fail("x outside", 0, 1, 64, 0, 4, 4, 5);
     test_fail("y outside", 0, 1, 0, 40, 4, 4, 5);
     test_fail("region smaller than scale", 0, 8, 60, 0, 4, 40, 5);
-    test_fail("src 2", 2, 1, 0, 0, 0, 0, 2);
+    test_fail("src 4", 4, 1, 0, 0, 0, 0, 2);   /* dcp-pt: src 2 is now the forced DFB; 3 is the resolved guest scanout, never requestable */
+    test_fail("src 3", 3, 1, 0, 0, 0, 0, 2);
     test_fail("shadow off", 1, 1, 0, 0, 0, 0, 2);
     cur_boot_args.video.depth = 16;
     test_fail("depth 16", 0, 1, 0, 0, 0, 0, 3);
@@ -170,6 +171,44 @@ int main(void)
       free(img); }
     shadow_on = false;
     panel(64, 40, 64 * 4, 30, px10);
+    /* 4b. dcp-pt: the screenshot follows the glass. owner EL2 (scan_state 0): the DFB, as before. */
+    reset_events(); request(0, 4, 0, 0, 0, 0); run(1000);
+    CHECK(nev > 2 && (evs[0].scale_src >> 8) == 0 && evs[0].fmt == 0, "EL2 owns: panel DFB, src code 0");
+    /* Windows owns, nothing published: stale, and the DFB is not shown */
+    scan_state = 2;
+    test_fail("owned, nothing published", 0, 4, 0, 0, 0, 0, 9);
+    reset_events(); request(2, 4, 0, 0, 0, 0); run(1000);
+    CHECK(nev > 2 && (evs[0].scale_src >> 8) == 2, "src 2 forces the DFB even while stale");
+    /* Windows owns and published an 8-bit and then a 10-bit surface in guest RAM; the DFB is deliberately unmapped */
+    {
+        u32 gw = 36, gh = 28, gs = 36 * 4 + 16;
+        u8 *g = malloc((size_t)gs * gh);
+        memset(g, 0x5a, (size_t)gs * gh);
+        for (u32 y = 0; y < gh; y++) for (u32 x = 0; x < gw; x++) ((u32 *)(g + (size_t)y * gs))[x] = px8(x, y);
+        u64 lo = mapped_lo, hi = mapped_hi;
+        mapped_lo = (u64)g; mapped_hi = (u64)g + (size_t)gs * gh;
+        scan_state = 1; scan_mock = (struct hv_win_scanout){(u64)g, gs, gw, gh, 1};
+        reset_events(); request(0, 2, 0, 0, 0, 0); run(1000);
+        u32 ow, oh; u8 *img = collect(&ow, &oh);
+        CHECK(ow == 18 && oh == 14 && (evs[0].scale_src >> 8) == 3 && evs[0].fmt == 1, "guest scanout 18x14, src code 3, 8-bit");
+        CHECK(img && img[0] == ref(px8, false, 0, 0, 2, 0) && img[(14 * 18 - 1) * 3 + 1] == ref(px8, false, 34, 26, 2, 1), "guest scanout pixels");
+        free(img);
+        for (u32 y = 0; y < gh; y++) for (u32 x = 0; x < gw; x++) ((u32 *)(g + (size_t)y * gs))[x] = px10(x, y);
+        scan_mock.fmt = 0;
+        reset_events(); request(0, 1, 4, 3, 10, 9); run(1000);
+        img = collect(&ow, &oh);
+        CHECK(ow == 10 && oh == 9 && evs[0].fmt == 0 && img && img[0] == ref(px10, true, 4, 3, 1, 0), "guest scanout 10-bit crop");
+        free(img);
+        /* the guest surface is not mapped at EL2: clean failure */
+        mapped_hi = mapped_lo + gs * 4;
+        test_fail("guest scanout unmapped", 0, 1, 0, 0, 0, 0, 6);
+        /* a request for the shadow or the forced DFB is not redirected */
+        mapped_lo = lo; mapped_hi = hi;
+        reset_events(); request(2, 4, 0, 0, 0, 0); run(1000);
+        CHECK(nev > 2 && (evs[0].scale_src >> 8) == 2 && evs[0].fmt == 0, "forced DFB while Windows owns");
+        free(g);
+    }
+    scan_state = 0;
     /* 5. request receiver: '!' and the heartbeat byte are never swallowed by a partial request */
     reset_events();
     CHECK(hv_win_shot_rx(HV_WIN_SHOT_BYTE) && hv_win_shot_rx('0') && hv_win_shot_rx('4'), "partial request consumed");

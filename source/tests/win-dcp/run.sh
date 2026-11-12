@@ -23,6 +23,9 @@ grep -q 'hv_win_dcp_start()' "$S/src/hv/hv.c" || { echo "win-dcp FAIL: hv_start 
 grep -q 'HV_WIN_F_DCP_PT | HV_WIN_F_GPU_PS_GUARD))' "$S/src/hv/win/hv_win.c" || { echo "win-dcp FAIL: CONFIGURE does not accept the flag"; exit 1; }
 grep -q 'hv_win_dcp_report();' "$S/src/hv/win/hv_win_psci.c" || { echo "win-dcp FAIL: guest exit does not resume the converter"; exit 1; }
 grep -q 'hv_win_dcp.o' "$S/Makefile" || { echo "win-dcp FAIL: hv_win_dcp.o not in the Makefile"; exit 1; }
+grep -q 'hv_win_storage_guest_ram_contains(dcp_staged.pa' "$G" || { echo "win-dcp FAIL: scanout commit does not check guest RAM"; exit 1; }
+grep -q 'hv_win_storage_guest_ram_contains(dcp_latched.pa' "$G" || { echo "win-dcp FAIL: scanout lookup does not re-check guest RAM"; exit 1; }
+grep -q 'hv_win_dcp_scanout(&sc)' "$S/src/hv/win/hv_win_shot.c" || { echo "win-dcp FAIL: screenshot does not follow the scanout"; exit 1; }
 # the DART mappings must be hooked before the root pages and the owner page; the hooks must come after the checks
 a=$(grep -n 'if (!(read32(asc_base + DCP_ASC_CPU_CONTROL)' "$G" | cut -d: -f1); b=$(grep -n 'hv_map_hook(dart_base' "$G" | cut -d: -f1)
 [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] || { echo "win-dcp FAIL: ADT/running checks must precede the hooks"; exit 1; }

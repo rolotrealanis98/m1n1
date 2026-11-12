@@ -51,6 +51,11 @@ static bool hv_win_fb_shadow_src(u64 *b, u64 *s, u64 *w, u64 *h)
     return true;
 }
 
+/* dcp-pt: who owns the panel (hv_win_dcp_scanout): 0 EL2 (the DFB), 1 Windows + published surface, 2 Windows, none published */
+struct hv_win_scanout { u64 pa, stride; u32 w, h, fmt; };
+static int scan_state; static struct hv_win_scanout scan_mock;
+static int hv_win_dcp_scanout(struct hv_win_scanout *o) { if (scan_state == 1) *o = scan_mock; return scan_state; }
+
 /* proxy link: USB ring with ring_free bytes; every event is recorded */
 iodev_id_t uartproxy_iodev = IODEV_USB0;
 static int lock_depth, lock_max;

@@ -10,6 +10,10 @@
  *           (AcquirePostDisplayOwnership: same pa, pitch and format). Format by video.depth: 30 = X2R10G10B10
  *           (B in bits 9:0), 24/32 = X8R8G8B8.
  *   src 1 = the EL2 shadow (the guest's BGRA8 surface), only while the shadow is active.
+ *   src 2 = the DFB regardless of who owns the panel (stale while Windows owns it).
+ *   dcp-pt: src 0 follows the glass. EL2 owns the panel: the DFB. Windows owns it (display-owner register = 1): the surface
+ *   the guest published in the owner frame (hv_win_dcp_scanout; resolved source 3 in BEGIN), or FAIL SHOT_E_STALE when it
+ *   published none. Never the paused DFB.
  *   scale 1, 2, 4 or 8 (box average of scale x scale source pixels).
  *   x, y, w, h: a region in source pixels; w == 0 or h == 0 means the whole surface. It is clamped to the surface.
  * The host never supplies an address. Every read is computed from the resident's own surface description and
@@ -51,6 +55,7 @@ enum { SHOT_FMT_X2R10G10B10 = 0, SHOT_FMT_X8R8G8B8 = 1 };
 enum {
     SHOT_E_BUSY = 1, SHOT_E_SRC = 2, SHOT_E_FMT = 3, SHOT_E_SCALE = 4, SHOT_E_REGION = 5, SHOT_E_MAP = 6,
     SHOT_E_TIMEOUT = 7, SHOT_E_LINK = 8,
+    SHOT_E_STALE = 9, /* dcp-pt: Windows owns the panel and published no valid scanout surface: the DFB is not on glass */
 };
 
 struct shot_evt {
@@ -185,7 +190,20 @@ static void shot_begin(void)
 
     u64 base = 0, stride = 0, sw = 0, sh = 0;
     u32 fmt = SHOT_FMT_X8R8G8B8;
-    if (src == 0) {
+    struct hv_win_scanout sc = {0};
+    int own = src == 0 ? hv_win_dcp_scanout(&sc) : 0;
+    if (own == 2) {
+        shot_fail_set(SHOT_E_STALE, 1);
+        return;
+    }
+    if (own == 1) {
+        base = sc.pa;
+        stride = sc.stride;
+        sw = sc.w;
+        sh = sc.h;
+        fmt = sc.fmt ? SHOT_FMT_X8R8G8B8 : SHOT_FMT_X2R10G10B10;
+        cap.src = 3;
+    } else if (src == 0 || src == 2) {
         const struct boot_video *v = &cur_boot_args.video;
         base = v->base;
         stride = v->stride;
@@ -387,7 +405,7 @@ void hv_win_shot_tick(void)
     cap.active = false;
     shot.done++;
     printf("HV/win n12 shot %u: %ux%u from %s %ux%u scale %u in %u ms, longest tick slice %lu us (no vCPU stop)\n",
-           shot.seq, cap.ow, cap.oh, cap.src ? "shadow" : "panel", cap.sw, cap.sh, cap.scale, d.aux0,
+           shot.seq, cap.ow, cap.oh, cap.src == 3 ? "guest scanout" : cap.src == 2 ? "DFB (forced)" : cap.src == 1 ? "shadow" : "panel DFB", cap.sw, cap.sh, cap.scale, d.aux0,
            (unsigned long)cap.slice_max);
 }
 

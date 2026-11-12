@@ -68,6 +68,8 @@ static u64 dcp_asc_dropped, dcp_asc_base_addr;
 static u64 dcp_dart_dropped, dcp_dart_passed, dcp_dart_masked, dcp_root_dropped, dcp_root_passed;
 static u64 dcp_owner_writes, dcp_owner_ignored;
 static u32 dcp_owner, dcp_changes;
+static struct dcp_scan_desc dcp_staged, dcp_latched;
+static u32 dcp_scan_commits, dcp_scan_rejects, dcp_scan_has, dcp_scan_last_rej;
 static bool dcp_armed;
 
 static int dcp_dart_of(u64 addr)
@@ -187,6 +189,11 @@ static struct dcpo_state dcp_owner_state(void)
         .passes = hv_win_fb_passes(),
         .dart_drops = dcp_dart_dropped > 0xffffffffu ? 0xffffffffu : (u32)dcp_dart_dropped,
         .root_drops = dcp_root_dropped > 0xffffffffu ? 0xffffffffu : (u32)dcp_root_dropped,
+        .staged = dcp_staged,
+        .scan_commits = dcp_scan_commits,
+        .scan_rejects = dcp_scan_rejects,
+        .scan_latched = dcp_scan_has,
+        .scan_last_rejected = dcp_scan_last_rej,
         .asc_drops = dcp_asc_dropped > 0xffffffffu ? 0xffffffffu : (u32)dcp_asc_dropped,
     };
     return s;
@@ -198,6 +205,7 @@ static void dcp_set_owner(u32 owner)
         return;
     dcp_owner = owner;
     dcp_changes++;
+    dcp_scan_has = 0; /* the scanout descriptor belongs to one ownership period */
     hv_win_fb_set_paused(owner != 0);
     printf("HV/win dcp: display owner -> %s (shadow converter %s, %ld pass(es) so far)\n",
            owner ? "Windows" : "EL2", owner ? "paused" : "resumed, whole shadow reconverted",
@@ -216,8 +224,28 @@ static bool hv_win_dcp_owner_hook(struct exc_info *ctx, u64 addr, u64 *val, bool
     }
     __atomic_fetch_add(&dcp_owner_writes, 1, __ATOMIC_RELAXED);
     u32 owner = 0;
-    if (dcpo_write(off, width, *val, &owner) == DCPO_SET_OWNER) {
+    enum dcpo_op op = dcpo_write(off, width, *val, &owner);
+    if (op == DCPO_SET_OWNER) {
         dcp_set_owner(owner);
+    } else if (op == DCPO_STAGE) {
+        dcpo_stage(&dcp_staged, off, owner);
+    } else if (op == DCPO_SCAN_CLEAR_OP) {
+        dcp_scan_has = 0;
+        dcp_scan_last_rej = 0;
+    } else if (op == DCPO_SCAN_COMMIT_OP) {
+        if (dcp_scan_shape_ok(&dcp_staged) &&
+            hv_win_storage_guest_ram_contains(dcp_staged.pa, (u64)dcp_staged.stride * dcp_staged.h)) {
+            dcp_latched = dcp_staged;
+            dcp_scan_has = 1;
+            dcp_scan_last_rej = 0;
+            dcp_scan_commits++;
+        } else {
+            dcp_scan_last_rej = 1;
+            u64 n = ++dcp_scan_rejects;
+            if (n <= 8)
+                printf("HV/win dcp: scanout commit rejected (#%ld): pa 0x%lx stride %u %ux%u fmt %u\n", (long)n,
+                       (long)dcp_staged.pa, dcp_staged.stride, dcp_staged.w, dcp_staged.h, dcp_staged.fmt);
+        }
     } else {
         u64 n = __atomic_add_fetch(&dcp_owner_ignored, 1, __ATOMIC_RELAXED);
         if (n <= 8)
@@ -363,4 +391,25 @@ void hv_win_dcp_report(void)
            (long)dcp_dart_passed, (long)dcp_dart_masked, (long)dcp_dart_dropped, (long)dcp_root_passed,
            (long)dcp_root_dropped, (long)dcp_asc_dropped, (long)dcp_owner_writes, (long)dcp_owner_ignored, (long)dcp_changes,
            hv_win_fb_paused() ? "PAUSED" : "running", (long)hv_win_fb_passes());
+}
+
+/*
+ * For the panel screenshot (hv_win_shot.c): what is on glass?
+ *   0  EL2 owns the panel (or no DCP passthrough): the DFB, which the shadow converter keeps current
+ *   1  Windows owns it and published a scanout surface: *out describes it (re-validated against guest RAM now)
+ *   2  Windows owns it and published nothing valid: the DFB is stale, the screenshot must say so
+ */
+int hv_win_dcp_scanout(struct hv_win_scanout *out)
+{
+    if (!dcp_armed || !dcp_owner)
+        return 0;
+    if (!dcp_scan_has || !dcp_scan_shape_ok(&dcp_latched) ||
+        !hv_win_storage_guest_ram_contains(dcp_latched.pa, (u64)dcp_latched.stride * dcp_latched.h))
+        return 2;
+    out->pa = dcp_latched.pa;
+    out->stride = dcp_latched.stride;
+    out->w = dcp_latched.w;
+    out->h = dcp_latched.h;
+    out->fmt = dcp_latched.fmt;
+    return 1;
 }

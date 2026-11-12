@@ -171,6 +171,12 @@ bool hv_win_gpu_start(void);
 void hv_win_gpu_report(void);
 
 /* dcp-pt (hv_win_dcp.c): installed by hv_start(); report (and converter resume) at guest exit */
+struct hv_win_scanout {
+    u64 pa, stride;
+    u32 w, h, fmt; /* fmt 0 = X2R10G10B10, 1 = X8R8G8B8 */
+};
+int hv_win_dcp_scanout(struct hv_win_scanout *out); /* 0 EL2 owns the panel, 1 guest scanout in *out, 2 owned, none published */
+bool hv_win_storage_guest_ram_contains(u64 addr, u64 size);
 bool hv_win_dcp_start(void);
 void hv_win_dcp_report(void);
 /* dcp-pt (hv_win_fb.c): pause/resume of the shadow converter for the display-owner register */
