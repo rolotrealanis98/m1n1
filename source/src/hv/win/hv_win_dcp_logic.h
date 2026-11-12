@@ -135,6 +135,28 @@ static inline struct dcp_write dcp_dart_write(int dart, unsigned long off, int w
     return w; /* TTBR, TCR, PROTECT, UNPROTECT, PROTECT_LOCK, ERROR_MASK, ENABLE/DISABLE_STREAMS, other SIDs, ... */
 }
 
+/* ---- DCP ASC window: CPU_CONTROL ----
+ * The first 16 KiB of the ASC window is trapped; reads pass, writes pass except the ones that would stop the DCP CPU:
+ * a store covering CPU_CONTROL (+0x44) must keep RUN (bit 4) set. The mailbox (+0x8000) is another page and stays
+ * native. Linux and our engine never write CPU_CONTROL on adopt (the DCP is already running). */
+#define DCP_ASC_PAGE         0x4000ul
+#define DCP_ASC_CPU_CONTROL  0x44ul
+#define DCP_ASC_RUN          0x10u
+
+/* 1 = the write may reach the register page */
+static inline int dcp_asc_write_ok(unsigned long off, int width, unsigned long long val)
+{
+    unsigned long size = 1ul << width;
+
+    if (off >= DCP_ASC_PAGE || !(off <= DCP_ASC_CPU_CONTROL && off + size > DCP_ASC_CPU_CONTROL))
+        return 1;
+    if (width == 2 && off == DCP_ASC_CPU_CONTROL)
+        return (val & DCP_ASC_RUN) != 0;
+    if (width == 3 && off == DCP_ASC_CPU_CONTROL - 4)
+        return ((val >> 32) & DCP_ASC_RUN) != 0;
+    return 0; /* byte, halfword and odd-aligned stores onto CPU_CONTROL */
+}
+
 /* ---- root (TTBR) table pages ---- */
 #define DCP_ROOT_PAGE        0x4000ul
 #define DCP_ROOT_ENTRIES     2048u
@@ -181,6 +203,7 @@ static inline int dcp_root_write_ok(const unsigned char *zero_bitmap, unsigned l
  *   +0x14 VERSION R   1
  *   +0x18 DART_DROPS R  guest writes dropped by the DART guards (saturating at 0xffffffff)
  *   +0x1c ROOT_DROPS R  guest writes dropped by the root-table guards
+ *   +0x20 ASC_DROPS  R  guest writes dropped by the ASC CPU_CONTROL guard
  * Everything else reads 0; writes to anything but OWNER are ignored.
  */
 #define DCPO_OWNER      0x00ul
@@ -191,6 +214,7 @@ static inline int dcp_root_write_ok(const unsigned char *zero_bitmap, unsigned l
 #define DCPO_VERSION    0x14ul
 #define DCPO_DART_DROPS 0x18ul
 #define DCPO_ROOT_DROPS 0x1cul
+#define DCPO_ASC_DROPS  0x20ul
 #define DCPO_MAGIC_VAL  0x4f57354du
 
 struct dcpo_state {
@@ -200,7 +224,7 @@ struct dcpo_state {
     unsigned int armed;
     unsigned int changes;
     unsigned long long passes;
-    unsigned int dart_drops, root_drops;
+    unsigned int dart_drops, root_drops, asc_drops;
 };
 
 static inline unsigned int dcpo_reg32(unsigned long off, const struct dcpo_state *s)
@@ -218,6 +242,7 @@ static inline unsigned int dcpo_reg32(unsigned long off, const struct dcpo_state
         case DCPO_VERSION: return 1;
         case DCPO_DART_DROPS: return s->dart_drops;
         case DCPO_ROOT_DROPS: return s->root_drops;
+        case DCPO_ASC_DROPS: return s->asc_drops;
         default: return 0;
     }
 }

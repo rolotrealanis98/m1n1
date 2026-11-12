@@ -188,6 +188,30 @@ int main(void)
         open += dcp_root_write_ok(zero, 8ul * e, 3, tbl) + dcp_root_write_ok(zero, 8ul * e, 3, 0);
     CHECK(open == 0, "%lu root entries writable with an all-nonzero handoff", open);
 
+    /* ---- ASC CPU_CONTROL ---- */
+    for (unsigned long off = 0; off < 0x4000; off += 4) {
+        for (int width = 0; width < 4; width++) {
+            if (off & ((1ul << width) - 1))
+                continue;
+            int covers = off <= 0x44 && off + (1ul << width) > 0x44;
+            for (unsigned long long v = 0; v < 0x100; v += 0x08) { /* low byte patterns incl. RUN set/clear */
+                int ok = dcp_asc_write_ok(off, width, v);
+                int want = !covers || (width == 2 && (v & 0x10)) || 0;
+                CHECK(ok == want, "ASC off 0x%lx width %d val 0x%llx: %d want %d", off, width, v, ok, want);
+            }
+        }
+    }
+    CHECK(dcp_asc_write_ok(0x44, 2, 0x10), "RUN write");
+    CHECK(dcp_asc_write_ok(0x44, 2, 0xffffffffu), "all ones keeps RUN");
+    CHECK(!dcp_asc_write_ok(0x44, 2, 0), "stop CPU");
+    CHECK(!dcp_asc_write_ok(0x44, 2, 0x20), "RUN clear");
+    CHECK(dcp_asc_write_ok(0x40, 3, 0x10ull << 32), "64-bit store keeping RUN");
+    CHECK(!dcp_asc_write_ok(0x40, 3, 0xffffffffull), "64-bit store clearing RUN");
+    CHECK(!dcp_asc_write_ok(0x44, 0, 0x10) && !dcp_asc_write_ok(0x44, 1, 0x10), "narrow stores onto CPU_CONTROL");
+    CHECK(!dcp_asc_write_ok(0x44, 3, ~0ull) && dcp_asc_write_ok(0x46, 1, 0x10), "straddling stores");
+    CHECK(dcp_asc_write_ok(0x48, 2, 0) && dcp_asc_write_ok(0x38, 3, 0) && dcp_asc_write_ok(0x3c, 2, 0), "neighbours");
+    CHECK(dcp_asc_write_ok(0x8800, 2, 0) && dcp_asc_write_ok(0x4000 + 0x44, 2, 0), "other pages");
+
     /* ---- owner register page ---- */
     struct dcpo_state s;
     memset(&s, 0, sizeof(s));
@@ -203,7 +227,10 @@ int main(void)
     CHECK(dcpo_read(0x10, 2, &s) == 0x4f57354du, "magic");
     CHECK(dcpo_read(0x10, 3, &s) == (0x4f57354dull | (1ull << 32)), "magic+version 64-bit read");
     CHECK(dcpo_read(0x18, 2, &s) == 3 && dcpo_read(0x1c, 2, &s) == 7, "drop counters");
-    CHECK(dcpo_read(0x20, 2, &s) == 0 && dcpo_read(0x3ff8, 3, &s) == 0, "unused registers read 0");
+    s.asc_drops = 5;
+    CHECK(dcpo_read(0x20, 2, &s) == 5, "asc drops");
+    s.asc_drops = 0;
+    CHECK(dcpo_read(0x24, 2, &s) == 0 && dcpo_read(0x3ff8, 3, &s) == 0, "unused registers read 0");
     CHECK(dcpo_read(0x00, 1, &s) == 0 && dcpo_read(0x01, 2, &s) == 0 && dcpo_read(0x04, 3, &s) == 0, "odd reads");
     s.owner = 1;
     s.fb_paused = 1;

@@ -31,6 +31,10 @@ mut root-shape-unchecked   's/    return dcp_root_value_ok(val);/    return 1;/'
 mut owner-any-value        's/val > 1)/val > 3)/'
 mut owner-width            's/if (width != 2 || off != DCPO_OWNER/if (off != DCPO_OWNER/'
 mut owner-any-offset       's/off != DCPO_OWNER || val > 1/off > 0x20 || val > 1/'
+mut asc-clear-run-ok       's/        return (val \& DCP_ASC_RUN) != 0;/        return 1;/'
+mut asc-64bit-unchecked    's/        return ((val >> 32) \& DCP_ASC_RUN) != 0;/        return 1;/'
+mut asc-narrow-ok          's/    return 0; \/\* byte, halfword/    return 1; \/* byte, halfword/'
+mut asc-page-too-big       's/#define DCP_ASC_PAGE         0x4000ul/#define DCP_ASC_PAGE         0x0ul/'
 mut state-bits             's/((s->fb_paused ? 1u : 0) << 1)/((s->fb_paused ? 1u : 0) << 0)/'
 echo "win-dcp mutants: $killed/$n killed"
 [ "$killed" = "$n" ]

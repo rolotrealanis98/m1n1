@@ -17,6 +17,8 @@ G=$S/src/hv/win/hv_win_dcp.c
 grep -q 'dcp_dart_write(d, off, width, \*val)' "$G" || { echo "win-dcp FAIL: DART write path does not use the logic"; exit 1; }
 grep -q 'dcp_root_write_ok(streams\[i\].zero, off, width, \*val)' "$G" || { echo "win-dcp FAIL: root write path does not use the logic"; exit 1; }
 grep -q 'write32(addr, w.val);' "$G" || { echo "win-dcp FAIL: DART pass is not the filtered value"; exit 1; }
+grep -q 'dcp_asc_write_ok(off, width, \*val)' "$G" || { echo "win-dcp FAIL: ASC path does not use the logic"; exit 1; }
+grep -q 'hv_map_hook(asc_base, hv_win_dcp_asc_hook, DCP_ASC_PAGE)' "$G" || { echo "win-dcp FAIL: ASC page not hooked"; exit 1; }
 grep -q 'hv_win_dcp_start()' "$S/src/hv/hv.c" || { echo "win-dcp FAIL: hv_start does not arm the guards"; exit 1; }
 grep -q 'HV_WIN_F_DCP_PT | HV_WIN_F_GPU_PS_GUARD))' "$S/src/hv/win/hv_win.c" || { echo "win-dcp FAIL: CONFIGURE does not accept the flag"; exit 1; }
 grep -q 'hv_win_dcp_report();' "$S/src/hv/win/hv_win_psci.c" || { echo "win-dcp FAIL: guest exit does not resume the converter"; exit 1; }

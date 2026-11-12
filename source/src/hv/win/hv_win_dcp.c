@@ -64,6 +64,7 @@ static struct dcp_stream streams[3] = {
 };
 static const char *const dart_names[2] = {"dart-dcp", "dart-disp0"};
 static u64 dart_base[2], dart_size[2];
+static u64 dcp_asc_dropped, dcp_asc_base_addr;
 static u64 dcp_dart_dropped, dcp_dart_passed, dcp_dart_masked, dcp_root_dropped, dcp_root_passed;
 static u64 dcp_owner_writes, dcp_owner_ignored;
 static u32 dcp_owner, dcp_changes;
@@ -115,6 +116,31 @@ static bool hv_win_dcp_dart_hook(struct exc_info *ctx, u64 addr, u64 *val, bool 
     return true;
 }
 
+static bool hv_win_dcp_asc_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width)
+{
+    UNUSED(ctx);
+    u64 off = addr - dcp_asc_base_addr;
+
+    if (!write) {
+        *val = dcp_read_raw(addr, width);
+        return true;
+    }
+    if (dcp_asc_write_ok(off, width, *val)) {
+        switch (width) {
+            case 0: write8(addr, *val); break;
+            case 1: write16(addr, *val); break;
+            case 2: write32(addr, *val); break;
+            default: write64(addr, *val); break;
+        }
+        return true;
+    }
+    u64 n = __atomic_add_fetch(&dcp_asc_dropped, 1, __ATOMIC_RELAXED);
+    if (n <= 8)
+        printf("HV/win dcp: ASC +0x%lx width %d value 0x%lx dropped: would stop the DCP CPU (#%ld)\n", (long)off,
+               1 << width, (long)*val, (long)n);
+    return true;
+}
+
 static int dcp_root_of(u64 addr)
 {
     for (int i = 0; i < 3; i++)
@@ -161,6 +187,7 @@ static struct dcpo_state dcp_owner_state(void)
         .passes = hv_win_fb_passes(),
         .dart_drops = dcp_dart_dropped > 0xffffffffu ? 0xffffffffu : (u32)dcp_dart_dropped,
         .root_drops = dcp_root_dropped > 0xffffffffu ? 0xffffffffu : (u32)dcp_root_dropped,
+        .asc_drops = dcp_asc_dropped > 0xffffffffu ? 0xffffffffu : (u32)dcp_asc_dropped,
     };
     return s;
 }
@@ -297,6 +324,11 @@ bool hv_win_dcp_start(void)
                "error clears\n",
                dart_names[d], dart_base[d], dart_size[d]);
     }
+    dcp_asc_base_addr = asc_base;
+    if (hv_map_hook(asc_base, hv_win_dcp_asc_hook, DCP_ASC_PAGE) < 0)
+        return dcp_refuse("ASC CPU_CONTROL page hook failed");
+    printf("HV/win dcp: ASC 0x%lx+0x%lx trapped (CPU_CONTROL page): reads pass, writes that clear RUN dropped; mailbox page native\n",
+           asc_base, DCP_ASC_PAGE);
     for (int i = 0; i < 3; i++) {
         if (hv_map_hook(streams[i].root, hv_win_dcp_root_hook, DCP_ROOT_PAGE) < 0)
             return dcp_refuse("root table hook failed");
@@ -326,9 +358,9 @@ void hv_win_dcp_report(void)
         printf("HV/win dcp: guest exit with Windows as display owner: shadow converter resumes\n");
         dcp_set_owner(0);
     }
-    printf("HV/win dcp: guards: DART writes %ld passed (%ld masked) %ld dropped; root writes %ld passed %ld dropped; "
+    printf("HV/win dcp: guards: DART writes %ld passed (%ld masked) %ld dropped; root writes %ld passed %ld dropped; ASC writes %ld dropped; "
            "owner page %ld write(s), %ld ignored, %ld owner change(s); converter %s, %ld pass(es)\n",
            (long)dcp_dart_passed, (long)dcp_dart_masked, (long)dcp_dart_dropped, (long)dcp_root_passed,
-           (long)dcp_root_dropped, (long)dcp_owner_writes, (long)dcp_owner_ignored, (long)dcp_changes,
+           (long)dcp_root_dropped, (long)dcp_asc_dropped, (long)dcp_owner_writes, (long)dcp_owner_ignored, (long)dcp_changes,
            hv_win_fb_paused() ? "PAUSED" : "running", (long)hv_win_fb_passes());
 }
