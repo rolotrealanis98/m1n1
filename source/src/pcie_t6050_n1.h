@@ -6,6 +6,8 @@ struct n1_addrs;
 int pcie_t6050_n1_addrs(struct n1_addrs *a);
 int pcie_t6050_n1_route(u32 rid, u32 sid);
 int pcie_t6050_n1_cycle(void);
+/* n1pt: the cycle with `pre_train` called after configure, before training (Linux's restore point) */
+int pcie_t6050_n1_cycle_cb(void (*pre_train)(void *), void *ctx);
 int pcie_t6050_n1_park(void);
 /* n1pt: park on a live, broken or down link (always PERST# + LTSSM off); port-state dump on failures */
 int pcie_t6050_n1_park_any(void);

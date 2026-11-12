@@ -193,6 +193,7 @@ void write32(u64 a, u32 v)
     if (M.ntrace < 8192) {
         M.trace[M.ntrace].a = a;
         M.trace[M.ntrace].v = v;
+        M.trace[M.ntrace].t = M.now;
         M.ntrace++;
     }
     u64 p0 = m_port(0);
@@ -457,12 +458,16 @@ void model_reset(void)
         m_set(M_PS + 8 * i, 0x1000030f);
     for (int i = 0; i < 16; i++)
         m_set(M_SART + 4 * i, 0x100 + i);
-    /* root port: Express capability at 0x40, Gen3 advertised in LNKCAP2, unnumbered buses */
+    /* root port as on the machine (capture cap2): PM at 0x40 -> MSI at 0x50 -> Express at 0x70; Gen3 advertised in
+     * LNKCAP2 (0x9c), LNKCTL2 0x45 (0xa0); unnumbered buses */
     m_set(M_ECAM + 0x00, 0x100c106b);
     m_set(M_ECAM + 0x34, 0x40);
-    m_set(M_ECAM + 0x40, 0x00420010);
-    m_set(M_ECAM + 0x40 + 0x2c, 0x0e);
-    m_set(M_ECAM + 0x40 + 0x10, 0x00130000);
+    m_set(M_ECAM + 0x40, 0x00035001);
+    m_set(M_ECAM + 0x50, 0x00007005);
+    m_set(M_ECAM + 0x70, 0x00420010);
+    m_set(M_ECAM + 0x70 + 0x2c, 0x0180003e);
+    m_set(M_ECAM + 0x70 + 0x30, 0x00000045);
+    m_set(M_ECAM + 0x70 + 0x10, 0x00130000);
     for (int fn = 0; fn < 3; fn++)
         fn_reset(fn);
 }

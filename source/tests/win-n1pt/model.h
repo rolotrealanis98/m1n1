@@ -14,7 +14,7 @@ struct model {
     u32 cfg_writes[3][1024];
     bool no_820, pme_stuck;   /* 0x820 bit 2 never sets (w24c); PME_Turn_Off never completes */
     u32 dumps, drops_logged, pm_logged;
-    struct { u64 a; u32 v; } trace[8192];
+    struct { u64 a, t; u32 v; } trace[8192];
     u32 ntrace;
     char log[64];
     u32 nlog;

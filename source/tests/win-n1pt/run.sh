@@ -45,7 +45,7 @@ for f in pcie_t6050.c n1pt_plat.c n1pt_dart.c hv/win/hv_win_n1pt.c hv/win/hv_win
 done
 build "$B" "$O/n1pt"
 "$O/n1pt-logic"
-"$O/n1pt-plat"
+N1PT_LINUX_EXPECTED="$H/linux/linux-cycle.expected" "$O/n1pt-plat"
 
 if [ "${N1PT_MUTANTS:-0}" = 1 ]; then
   killed=0; total=0
@@ -57,7 +57,7 @@ if [ "${N1PT_MUTANTS:-0}" = 1 ]; then
     for tf in $t; do cp "$tf" "$tf.orig"; sed -f "$m" "$tf.orig" > "$tf"
       cmp -s "$tf" "$tf.orig" && { echo "MUTANT $name: sed changed nothing in $file"; exit 1; }; rm "$tf.orig"; done
     if ! build "$md" "$md/t" 2>"$md/build.err"; then echo "MUTANT $name does not build: $md/build.err"; exit 1; fi
-    if "$md/t-logic" >"$md/out.txt" 2>&1 && "$md/t-plat" >>"$md/out.txt" 2>&1; then
+    if "$md/t-logic" >"$md/out.txt" 2>&1 && N1PT_LINUX_EXPECTED="$H/linux/linux-cycle.expected" "$md/t-plat" >>"$md/out.txt" 2>&1; then
       echo "MUTANT $name SURVIVED"
     else
       killed=$((killed + 1)); echo "mutant $name killed"

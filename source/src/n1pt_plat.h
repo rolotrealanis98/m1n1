@@ -28,6 +28,7 @@ struct n1pt_plat {
     struct n1pt_dart_tables dart;
     int four_level;
     int fns_enabled;
+    int pre_train_failed; /* cycle: RID2SID / port MSI restore before training failed */
     const struct n1pt_plat_cb *cb;
 };
 

@@ -743,6 +743,107 @@ static void sc_drop_logged(void)
     CHECK(M.pm_logged == 1 && (m_get(CFG(0) + 0x44) & 0x103) == 0x103);
 }
 
+/* ---- the resident's PORT_CYCLE == Linux's captured phase-1 cycle (capture cap2), write for write ----
+ * linux/linux-cycle.expected comes from linux/cycle2expected.py. Writes the resident makes that Linux does not are
+ * allowed only where listed here, each with its reason. */
+static u64 region_base(const char *r)
+{
+    if (!strcmp(r, "port")) return P0;
+    if (!strcmp(r, "lane")) return m_lane(0);
+    if (!strcmp(r, "i2axi")) return m_i2axi(0);
+    if (!strcmp(r, "rp")) return M_ECAM;
+    if (!strcmp(r, "perst")) return M_GPIO + 4 * 80;
+    return 0;
+}
+static const char *allowed_extra(u64 a)
+{
+    if (a == P0 + 0x3008 || a == P0 + 0x300c)
+        return "RID2SID slots 2/3: EL2 restores the fn1/fn2 routes it set at PREP (Linux had only fn0 adopted)";
+    return NULL;
+}
+static void sc_cycle_equals_linux(void)
+{
+    const char *path = getenv("N1PT_LINUX_EXPECTED");
+    FILE *f = path ? fopen(path, "r") : NULL;
+    CHECK(f != NULL);
+    if (!f)
+        return;
+    setup();
+    CHECK(prep_start() == 0);
+    d3();
+    M.ntrace = 0;
+    u64 t0 = M.now;
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
+    u32 pos = 0, compared = 0, skipped_tunables = 0, extras = 0, n = M.ntrace;
+    while (pos < n && !(M.trace[pos].a == M_ECAM + 0x04)) /* EL2's own link-IRQ mask writes come first */
+        pos++;
+    CHECK(pos < n);
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char kind, region[16], label[64];
+        unsigned off, mask, val, seq;
+        if (line[0] == '#' || sscanf(line, "%c %15s %x %x %x %u %63s", &kind, region, &off, &mask, &val, &seq, label) != 7)
+            continue;
+        if (kind == 'X') {
+            skipped_tunables++;
+            continue;
+        }
+        u64 a = region_base(region) + off;
+        u32 k = pos;
+        while (k < n && M.trace[k].a != a)
+            k++;
+        if (k >= n) {
+            printf("FAIL cycle vs Linux: seq %u %s %s+0x%x (mask 0x%x value 0x%x) never written (from trace %u)\n", seq,
+                   label, region, off, mask, val, pos);
+            fails++;
+            break;
+        }
+        for (u32 j = pos; j < k; j++) {
+            const char *why = allowed_extra(M.trace[j].a);
+            if (!why) {
+                printf("FAIL cycle vs Linux: extra write 0x%lx = 0x%08x before seq %u (%s %s+0x%x)\n",
+                       (unsigned long)M.trace[j].a, M.trace[j].v, seq, label, region, off);
+                fails++;
+                fclose(f);
+                return;
+            }
+            extras++;
+        }
+        if ((M.trace[k].v & mask) != val) {
+            printf("FAIL cycle vs Linux: seq %u %s %s+0x%x wrote 0x%08x, Linux 0x%08x under mask 0x%08x\n", seq, label,
+                   region, off, M.trace[k].v, val, mask);
+            fails++;
+        }
+        checks++;
+        compared++;
+        pos = k + 1;
+    }
+    fclose(f);
+    CHECK(compared > 400 && skipped_tunables == 17 && extras == 2);
+    /* after the window: the bridge's bus numbers back (Linux pci_restore_state) */
+    bool buses = false;
+    for (u32 j = pos; j < n; j++)
+        if (M.trace[j].a == M_ECAM + 0x18 && (M.trace[j].v & 0xffffff) == 0x010100)
+            buses = true;
+    CHECK(buses);
+    /* delays >= Linux's (capture cap2): lane bit 10 -> PERST# release >= 100 us; link up -> next write >= 100 ms;
+     * driver PMCSR write -> reset >= 11 ms (model time, us) */
+    int i10 = -1, iperst = -1, iltssm = -1, ifirst = -1;
+    for (u32 j = 0; j < n; j++) {
+        u64 a = M.trace[j].a;
+        u32 v = M.trace[j].v;
+        if (ifirst < 0 && a == M_ECAM + 0x04) ifirst = (int)j;
+        if (iltssm < 0 && iperst >= 0 && a == P0 + 0x080 && (v & 1)) iltssm = (int)j;
+        if (a == m_lane(0) && (v & 0x400) && ifirst >= 0 && iperst < 0) i10 = (int)j;
+        if (i10 >= 0 && iperst < 0 && a == M_GPIO + 4 * 80 && (v & 0x27f) == 0x203) iperst = (int)j;
+    }
+    CHECK(i10 >= 0 && iperst > i10 && M.trace[iperst].t - M.trace[i10].t >= 100);
+    CHECK(iltssm > 0 && (u32)iltssm + 1 < n && M.trace[iltssm + 1].t - M.trace[iltssm].t >= 100000);
+    CHECK(ifirst >= 0 && M.trace[ifirst].t - t0 >= 11000); /* PMCSR written just before t0 */
+    printf("  cycle vs Linux capture: %u writes compared, %u ADT tunable writes not expanded by the model, %u allowed extras\n",
+           compared, skipped_tunables, extras);
+}
+
 typedef void (*scen_t)(void);
 static int run(const char *name, void (*f)(int), int arg)
 {
@@ -802,6 +903,7 @@ int main(void)
     bad += run("park PME stuck", sc_park_broken, 0); n++;
     bad += run("park link down", sc_park_broken, 1); n++;
     bad += run0("dropped write logged", sc_drop_logged); n++;
+    bad += run0("cycle == Linux capture", sc_cycle_equals_linux); n++;
     printf("%s: win-n1pt plat, %d scenarios, %d failed\n", bad ? "FAIL" : "PASS", n, bad);
     return bad ? 1 : 0;
 }

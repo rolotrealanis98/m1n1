@@ -249,7 +249,16 @@ int n1pt_plat_restore(struct n1pt_plat *p, const u16 cmd[3])
         return -1;
     if (p->fns_enabled && (fn_program(p, 1, cmd[1]) || fn_program(p, 2, cmd[2])))
         return -1;
-    return port_msi_program(p) || routes_program(p) ? -1 : 0;
+    return 0; /* RID2SID and the port MSI were restored before training (cycle_pre_train) */
+}
+
+/* Linux reset_root_port's restore point (capture cap2): RID2SID, MSI address, MSI map, intr2axi, MSICFG, before the
+ * link trains. A failure is remembered and fails the command after the cycle. */
+static void cycle_pre_train(void *ctx)
+{
+    struct n1pt_plat *p = ctx;
+    if (routes_program(p) || port_msi_program(p))
+        p->pre_train_failed = 1;
 }
 
 static int cmd_cycle(struct n1pt_plat *p, struct n1pt *s)
@@ -273,9 +282,12 @@ static int cmd_cycle(struct n1pt_plat *p, struct n1pt *s)
     /* Linux centauri_port_cycle: D3hot | PME_En (the driver, through the config window), then 10 ms, then the reset */
     printf("%sPORT_CYCLE: fn0 PM_CTRL 0x%x COMMAND 0x%x\n", pfx, n1pt_plat_cfg_read(p, 0, 0x44) & 0xffff,
            n1pt_plat_cfg_read(p, 0, CFG_CMD) & 0xffff);
-    mdelay(10);
+    mdelay(11); /* capture cap2: 11 ms from the driver's PMCSR write to reset_root_port */
     pcie_t6050_storage_guard(0);
-    int rc = pcie_t6050_n1_cycle();
+    p->pre_train_failed = 0;
+    int rc = pcie_t6050_n1_cycle_cb(cycle_pre_train, p);
+    if (!rc && p->pre_train_failed)
+        rc = -1;
     if (!rc)
         rc = n1pt_plat_restore(p, cmd);
     if (pcie_t6050_storage_guard(1)) {

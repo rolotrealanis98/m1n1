@@ -912,8 +912,17 @@ static int n1_perst_assert(void)
 static int n1_port_disable(void)
 {
     u64 p2 = pr.ctl;
-    if (!(read32(p2 + PORT_STATUS) & BIT(2)))
-        TRY(poll_set("0x820 bit 2", p2 + 0x820, BIT(2), 10));
+    /* Linux: STATUS bit 2 already set skips the wait (capture cap2: STATUS 0xd there); otherwise 0x820 bit 2, 10 ms.
+     * Here either bit ends the wait (run w24c waited on 0x820 alone and never saw it). */
+    if (!(read32(p2 + PORT_STATUS) & BIT(2))) {
+        u64 t = timeout_calculate(10000);
+        while (!(read32(p2 + PORT_STATUS) & BIT(2)) && !(read32(p2 + 0x820) & BIT(2))) {
+            if (timeout_expired(t))
+                FAIL("0x820 bit 2: 0x%lx = 0x%08x, STATUS 0x%08x after 10 ms\n", p2 + 0x820, read32(p2 + 0x820),
+                     read32(p2 + PORT_STATUS));
+            udelay(1);
+        }
+    }
     {
         u64 t = timeout_calculate(10000);
         u32 st;
@@ -1014,9 +1023,7 @@ static int n1_port_enable(void)
         {0x130, 0x03020000}, {0x140, 0x10}, {0x144, 0x253770}, {0x21c, 0}, {0x834, 0}, {0x83c, 0},
     };
     u64 p2 = pr.ctl;
-    if (read32(p2 + PORT_LINKSTS) & BIT(0) || read32(p2 + PORT_LTSSMCTL) & BIT(0))
-        FAIL("port 0 has a link or LTSSM running\n");
-    for (size_t i = 0; i < ARRAY_SIZE(early); i++)
+    for (size_t i = 0; i < ARRAY_SIZE(early); i++) /* writes LTSSMCTL (0x080) = 0 itself */
         write32(p2 + early[i][0], early[i][1]);
     for (int i = 0; i < 64; i++)
         write32(p2 + PORT_RID2SID + 4 * i, 0);
@@ -1055,30 +1062,45 @@ static int n1_port_train(void)
         write32(pr.perst, value);
     if ((read32(pr.perst) ^ value) & GPIO_PERST_MASK)
         FAIL("PERST# readback 0x%x\n", read32(pr.perst));
-    TRY(stage_e3(&pr, 500));
+    TRY(stage_e3(&pr, 1000)); /* capture cap2: Linux waits up to 1 s for link up */
     return 0;
 }
 
-/* Post-ROM link cycle (P0034 reset_root_port): down half, port enable, configure (stage D = P0033 port_configure),
- * train; then bus numbers (stage F; Linux restores the bridge's saved state). Any failure prints the port state. */
-static int n1_cycle(void)
+/* Post-ROM link cycle (P0034 reset_root_port, as captured on this machine: capture cap2 pcie-cycle.txt): down half
+ * (without the park's LTSSM-off: the reset table clears LTSSMCTL), port enable, configure (stage D = P0033
+ * port_configure), then `pre_train` (Linux restores RID2SID, the port MSI address/map, intr2axi and MSICFG here,
+ * before training), train; then bus numbers (stage F; Linux restores the bridge's saved state). Any failure prints
+ * the port state. */
+static int n1_cycle(void (*pre_train)(void *), void *ctx)
 {
-    TRY(n1_down());
+    u64 p2 = pr.ctl;
+    if (!p2 || !(read32(p2 + PORT_LINKSTS) & BIT(0)))
+        FAIL("n1 cycle: no live link\n");
+    TRY(n1_l2());
+    TRY(n1_perst_assert());
+    TRY(n1_port_disable());
     TRY(n1_port_enable());
     TRY(stage_d(&pr));
+    if (pre_train)
+        pre_train(ctx);
     TRY(n1_port_train());
     TRY(stage_f(&pr, false));
     return 0;
 }
 
-int pcie_t6050_n1_cycle(void)
+int pcie_t6050_n1_cycle_cb(void (*pre_train)(void *), void *ctx)
 {
-    if (n1_cycle()) {
+    if (n1_cycle(pre_train, ctx)) {
         pcie_t6050_n1_dump("cycle");
         return -1;
     }
     printf("pcie-t6050: n1 link cycled\n");
     return 0;
+}
+
+int pcie_t6050_n1_cycle(void)
+{
+    return pcie_t6050_n1_cycle_cb(NULL, NULL);
 }
 
 /* ---- n1pt (wireless/n1-native-20261111): storage guard around the runtime PORT_CYCLE and PARK ---------
