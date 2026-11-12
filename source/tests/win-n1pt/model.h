@@ -12,7 +12,8 @@ struct model {
     bool dart_no_four;
     u32 mmc[3];
     u32 cfg_writes[3][1024];
-    bool no_820, pme_stuck;   /* 0x820 bit 2 never sets (w24c); PME_Turn_Off never completes */
+    bool no_820, pme_stuck;   /* STATUS bit 2 forced off (the w24c/w24d state); PME_Turn_Off never completes */
+    bool en_table, en_msimap, st_bit2; /* STATUS bit 2 model (runs w24c/w24d vs capture cap2), see model.c */
     u32 dumps, drops_logged, pm_logged;
     struct { u64 a, t; u32 v; } trace[8192];
     u32 ntrace;

@@ -145,6 +145,8 @@ struct n1pt {
     uint32_t n_irq, n_dropped, n_cmds, last_us, n_bar_moves;
     uint32_t drop_addr, drop_val, drop_be; /* last dropped config-window write: CFG_ADDR, value, byte enables */
     uint32_t cfgw_addr, cfgw_val, n_cfgw; /* last forwarded config-window write */
+    uint16_t held_cmd[3];  /* COMMAND MEM|MASTER written while the link was down: applied after the next restore */
+    uint32_t held_mask, n_held;
 };
 
 /* ---- emulated headers ------------------------------------------------------------------------- */
@@ -394,6 +396,16 @@ static inline void n1pt_cfg_data_write_be(struct n1pt *s, uint32_t v, uint32_t b
 {
     unsigned fn = (s->cfg_addr >> 12) & 7, off = s->cfg_addr & 0xffc;
     uint32_t lanes = (be & 1 ? 0xffu : 0) | (be & 2 ? 0xff00u : 0) | (be & 4 ? 0xff0000u : 0) | (be & 8 ? 0xff000000u : 0);
+    if (fn <= 2 && off == 0x04 && (lanes & N1PT_CMD_FWD) && !s->dead && !s->parked && !s->guard &&
+        !s->ops->link_up(s->ops->ctx)) {
+        /* COMMAND while the link is down (e.g. the driver's clear-master after a failed cycle): held, applied by
+         * the next successful PORT_CYCLE's restore; not a dropped write */
+        uint16_t m = (uint16_t)(N1PT_CMD_FWD & lanes);
+        s->held_cmd[fn] = (uint16_t)((s->held_cmd[fn] & ~m) | (v & m));
+        s->held_mask |= 1u << fn;
+        s->n_held++;
+        return;
+    }
     if (fn > 2 || !lanes || !n1pt_cfg_write_allowed(off) || !n1pt_live(s)) {
         s->n_dropped++;
         s->drop_addr = s->cfg_addr;

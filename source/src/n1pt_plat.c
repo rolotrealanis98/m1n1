@@ -195,7 +195,9 @@ static int fn_program(struct n1pt_plat *p, unsigned fn, u16 cmd)
 void n1pt_plat_link_irq_enable(struct n1pt_plat *p, int on)
 {
     write32(p->a.port[0] + P_INTSTAT, 0xffffffff);
-    write32(p->a.port[0] + P_INTMSK, on ? ~P_INT_LINK_DOWN : 0xffffffff);
+    /* Linux's mask (capture cap2: 0xfffffff0, INTx bits 0-3 open) is kept at all times; EL2 adds only the link-down
+     * bit. Run w24d: with 0xffffffff the port never reported STATUS bit 2 at the cycle (hypothesis, see BUILD-NOTES) */
+    write32(p->a.port[0] + P_INTMSK, on ? (0xfffffff0u & ~(u32)P_INT_LINK_DOWN) : 0xfffffff0u);
 }
 
 u32 n1pt_plat_link_irq_ack(struct n1pt_plat *p)
@@ -297,6 +299,14 @@ static int cmd_cycle(struct n1pt_plat *p, struct n1pt *s)
     }
     if (rc)
         return n1pt_plat_link_up(p) ? N1PT_E_IO : N1PT_E_NOLINK;
+    for (unsigned fn = 0; fn < 3; fn++) { /* COMMAND writes the guest made while the link was down */
+        if (!(s->held_mask & (1u << fn)) || (fn && !p->fns_enabled))
+            continue;
+        u64 c = N1PT_FN_CFG(p, fn) + CFG_CMD;
+        write32(c, (read32(c) & 0xffff & ~(CMD_MEM | CMD_MASTER)) | (s->held_cmd[fn] & (CMD_MEM | CMD_MASTER)));
+        printf("%sheld COMMAND for fn%u applied: 0x%x\n", pfx, fn, read32(c) & 0xffff);
+    }
+    s->held_mask = 0;
     p->cb->map_bars(p->cb->ctx, 1, p->fns_enabled);
     n1pt_plat_link_irq_enable(p, 1);
     p->cb->link_irq(p->cb->ctx, 1);

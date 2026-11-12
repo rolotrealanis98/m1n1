@@ -155,7 +155,7 @@ static void check_prepared(bool four)
         CHECK(w.n == PAGES && w.bad == 0 && w.doorbell == 0); /* every pool page, nothing else */
     }
     /* link-down interrupt unmasked at the port */
-    CHECK(m_get(P0 + 0x104) == ~(u32)(1u << 14));
+    CHECK(m_get(P0 + 0x104) == (0xfffffff0u & ~(u32)(1u << 14)));
     /* storage untouched */
     CHECK(m_get(M_NVME + 0x1300) == 0xde71ce55 && (m_get(M_ANS + 0x44) & 0x10));
 }
@@ -288,7 +288,7 @@ static void sc_cycle(void)
     for (u32 s = 1; s <= 3; s++)
         CHECK(m_get(P0 + 0x3000 + 4 * s) == (0x80000000u | (s << 16) | (0x100 + s - 1)));
     CHECK(m_get(P0 + 0x3800 + 4 * 33) == (0x80000000u | 97) && (m_get(P0 + 0x124) & 1));
-    CHECK(m_get(P0 + 0x104) == ~(u32)(1u << 14) && G.unmask[1523] == um + 1);
+    CHECK(m_get(P0 + 0x104) == (0xfffffff0u & ~(u32)(1u << 14)) && G.unmask[1523] == um + 1);
     CHECK((svc(N1SV_STATUS) & (N1SV_ST_LINK | N1SV_ST_GUARD)) == N1SV_ST_LINK);
     /* the DART is not on the link: still translating */
     struct walk w = walk_sid(2, hv_win_n1pt_stat(1));
@@ -697,7 +697,7 @@ static void sc_cycle_fail_dump(void)
     setup();
     CHECK(prep_start() == 0);
     d3();
-    M.no_820 = true; /* run w24c: 0x820 bit 2 never sets */
+    M.no_820 = true; /* runs w24c/w24d: neither STATUS bit 2 nor 0x820 bit 2 */
     s32 r = cmd(N1PT_CMD_PORT_CYCLE);
     CHECK(r == N1PT_E_IO || r == N1PT_E_NOLINK);
     CHECK(M.dumps >= 1);
@@ -844,6 +844,104 @@ static void sc_cycle_equals_linux(void)
            compared, skipped_tunables, extras);
 }
 
+/* compare trace [pos..n) with an expected list; returns the number compared, -1 on a mismatch (printed) */
+static int compare_expected(const char *path, u32 pos, u32 n, u32 *tunables, u32 *extras, u32 *endpos)
+{
+    FILE *f = path ? fopen(path, "r") : NULL;
+    if (!f)
+        return -1;
+    char line[256];
+    int compared = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char kind, region[16], label[64];
+        unsigned off, mask, val, seq;
+        if (line[0] == '#' || sscanf(line, "%c %15s %x %x %x %u %63s", &kind, region, &off, &mask, &val, &seq, label) != 7)
+            continue;
+        if (kind == 'X') {
+            (*tunables)++;
+            continue;
+        }
+        u64 a = region_base(region) + off;
+        u32 k = pos;
+        while (k < n && M.trace[k].a != a)
+            k++;
+        if (k >= n) {
+            printf("FAIL vs Linux: seq %u %s %s+0x%x never written (from trace %u)\n", seq, label, region, off, pos);
+            fclose(f);
+            return -1;
+        }
+        for (u32 j = pos; j < k; j++) {
+            if (!allowed_extra(M.trace[j].a)) {
+                printf("FAIL vs Linux: extra write 0x%lx = 0x%08x before seq %u (%s %s+0x%x)\n",
+                       (unsigned long)M.trace[j].a, M.trace[j].v, seq, label, region, off);
+                fclose(f);
+                return -1;
+            }
+            (*extras)++;
+        }
+        if ((M.trace[k].v & mask) != val) {
+            printf("FAIL vs Linux: seq %u %s %s+0x%x wrote 0x%08x, Linux 0x%08x under mask 0x%08x\n", seq, label,
+                   region, off, M.trace[k].v, val, mask);
+            fclose(f);
+            return -1;
+        }
+        compared++;
+        pos = k + 1;
+    }
+    fclose(f);
+    *endpos = pos;
+    return compared;
+}
+
+/* PREP's port training == Linux's cold_train port part (capture cap2 lines 454-893), write for write */
+static void sc_prep_equals_linux_cold(void)
+{
+    setup();
+    M.ntrace = 0;
+    CHECK(prep() == 0);
+    u32 n = M.ntrace, pos = 0, tun = 0, ext = 0, end = 0;
+    while (pos < n && !(M.trace[pos].a == P0 + 0x088 && M.trace[pos].v == 0x110))
+        pos++;
+    CHECK(pos < n);
+    int c = compare_expected(getenv("N1PT_LINUX_COLD"), pos, n, &tun, &ext, &end);
+    CHECK(c > 300 && tun == 17 && ext == 0);
+    if (c < 0)
+        fails++;
+    else
+        checks += c;
+    /* gP13 power before the port reset by >= 150 ms (Linux: PWREN, 150 ms) and PERST# held >= 250 ms before it */
+    CHECK(M.ngp13 == 2);
+    printf("  PREP vs Linux cold_train: %d writes compared, %u ADT tunable writes not expanded, %u extras\n", c, tun, ext);
+}
+
+/* the cycle starts from the state Linux's cold_train leaves: STATUS bit 2 set (runs w24c/w24d had it clear) */
+static void sc_status_bit2_after_prep(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    CHECK(read32(P0 + 0x804) & 4);
+    d3();
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
+    CHECK(read32(P0 + 0x804) & 4); /* and again after the cycle's own port enable */
+}
+
+/* COMMAND while the link is down: held (not dropped), applied by the next successful cycle */
+static void sc_command_held(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    M.link = false;
+    gw(BAR4 + N1SV_CFG_ADDR, 0x04);
+    guest_write(BAR4 + N1SV_CFG_DATA, 1, 0x0006); /* MEM | MASTER */
+    CHECK(svc(N1SV_CNT_DROPPED) == 0 && M.drops_logged == 0);
+    M.link = true;
+    u32 c0 = m_get(CFG(0) + 0x04);
+    CHECK(!(c0 & 4));                    /* not written while down */
+    d3();
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
+    CHECK((m_get(CFG(0) + 0x04) & 6) == 6); /* applied after the restore */
+}
+
 typedef void (*scen_t)(void);
 static int run(const char *name, void (*f)(int), int arg)
 {
@@ -904,6 +1002,9 @@ int main(void)
     bad += run("park link down", sc_park_broken, 1); n++;
     bad += run0("dropped write logged", sc_drop_logged); n++;
     bad += run0("cycle == Linux capture", sc_cycle_equals_linux); n++;
+    bad += run0("PREP == Linux cold_train", sc_prep_equals_linux_cold); n++;
+    bad += run0("STATUS bit 2 after PREP", sc_status_bit2_after_prep); n++;
+    bad += run0("COMMAND held link down", sc_command_held); n++;
     printf("%s: win-n1pt plat, %d scenarios, %d failed\n", bad ? "FAIL" : "PASS", n, bad);
     return bad ? 1 : 0;
 }

@@ -680,6 +680,9 @@ static int n1_smc_release(const struct port_regs *pp)
     return 0;
 }
 
+static int n1_port_enable(void);
+static int n1_port_train(void);
+
 int pcie_t6050_n1_train(unsigned int flags)
 {
     static int state = 1;
@@ -716,6 +719,18 @@ int pcie_t6050_n1_train(unsigned int flags)
         } else {
             printf("pcie-t6050: shared GP init already in place\n");
         }
+        if (flags & N1_TRAIN_LINUX) {
+            /* Linux cold_train (capture cap2): PERST# held 250 ms, then power (PWREN = gP13; here m1n1's gP13 pulse,
+             * which ends 150 ms before the port reset as Linux's 150 ms), then P0033 port_enable (two-half reset
+             * table, INTMSK 0xfffffff0, RID2SID/MSIMAP cleared), port_configure (stage D), port_train. */
+            mdelay(250);
+            if (flags & N1_TRAIN_SMC)
+                TRY(n1_smc_release(&pr));
+            TRY(n1_port_enable());
+            TRY(stage_d(&pr));
+            TRY(n1_port_train());
+            goto trained;
+        }
         if (flags & N1_TRAIN_SMC)
             TRY(n1_smc_release(&pr));
         TRY(stage_b(&pr));
@@ -734,6 +749,7 @@ int pcie_t6050_n1_train(unsigned int flags)
         }
         TRY(stage_e3(&pr, flags & N1_TRAIN_SMC ? 1000 : 500));
     }
+trained:
     TRY(stage_f(&pr, flags & N1_TRAIN_SMC));
     TRY(storage_check("after F", false));
     TRY(stage_g(&pr));

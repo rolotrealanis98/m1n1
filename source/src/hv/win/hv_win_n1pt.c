@@ -168,7 +168,7 @@ static bool win_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int w
         n1pt_window_write(&st, off, (u32)*val, width); /* the command runs without the IRQ lock */
         return true;
     }
-    u32 d0 = st.n_dropped, w0 = st.n_cfgw;
+    u32 d0 = st.n_dropped, w0 = st.n_cfgw, h0 = st.n_held;
     spin_lock(&irq_lock);
     if (write)
         n1pt_window_write(&st, off, (u32)*val, width);
@@ -180,6 +180,9 @@ static bool win_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int w
                st.drop_addr >> 12, st.drop_addr & 0xffc, st.drop_be, (u32)__builtin_popcount(st.drop_be), st.drop_val,
                (st.drop_addr >> 12) > 2 ? "no such function" : n1pt_cfg_write_allowed(st.drop_addr & 0xffc) ?
                "no link / parked / guard" : "offset not allowed");
+    else if (st.n_held != h0)
+        printf("n1pt: cfg write fn%u COMMAND held (link down): MEM|MASTER 0x%x applied after the next restore\n",
+               (st.cfg_addr >> 12) & 7, st.held_cmd[((st.cfg_addr >> 12) & 7) % 3]);
     else if (st.n_cfgw != w0 && (st.cfgw_addr & 0xffc) == 0x44)
         printf("n1pt: cfg write fn%u PM_CTRL <- 0x%08x (dword written)\n", st.cfgw_addr >> 12, st.cfgw_val);
     return true;
@@ -206,7 +209,7 @@ s64 hv_win_n1pt_prep(u64 win, u64 ecam, u64 iova, u64 spi)
     if (pcie_t6050_n1_addrs(&plat.a))
         return -4;
     printf("n1pt: training apcie0 port 0 (gP13 pulse + m1n1 mode 4 with the storage snapshot/NVMe compare)\n");
-    if (pcie_t6050_n1_train_ans(N1_TRAIN_SMC)) {
+    if (pcie_t6050_n1_train_ans(N1_TRAIN_SMC | N1_TRAIN_LINUX)) {
         pcie_t6050_n1_park(); /* only a live link is touched: the GP side may never have powered up */
         printf("n1pt: N1 REFUSED: training failed (port parked); Windows boots without it\n");
         return -5;
