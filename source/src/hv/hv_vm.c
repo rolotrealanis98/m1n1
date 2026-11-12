@@ -16,6 +16,7 @@
 #include "utils.h"
 
 #include "win/hv_win.h"
+#include "win/hv_win_n1pt.h"
 
 extern uint64_t ram_base;
 
@@ -1614,6 +1615,10 @@ bool hv_handle_dabort(struct exc_info *ctx)
     u64 pte = hv_pt_walk(ipa);
 
     if (!pte) {
+        if (hv_win_n1pt_unmapped(ipa)) { /* n1pt: its ranges are repaired in EL2, never escalated */
+            ctx->elr -= 4;
+            return true;
+        }
         printf("HV: Unmapped IPA 0x%lx\n", ipa);
         return false;
     }

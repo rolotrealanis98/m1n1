@@ -9,5 +9,6 @@ bool hv_win_smcp_claims_spi(u64 gsiv);
 s64 hv_win_smcp_stat(void);                        /* P_HV_WIN_SMCP_STAT */
 s64 hv_win_smcp_power(u64 action);                 /* P_HV_WIN_SMCP_POWER: 1 off, 2 restart; guest stopped */
 void hv_win_smcp_after_exit(void);                 /* hv_start exit: honours the power-actions flag */
+bool hv_win_smcp_attempted(void);     /* n1pt: SMCP configure was tried (the SMC client may be live) */
 bool hv_win_smcp_actions_armed(void); /* nightly-2: configured with the power-actions flag */
 #endif

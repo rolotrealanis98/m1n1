@@ -21,6 +21,7 @@
 #include "hv_win_smcp.h"
 #include "hv_win_m5wn.h"
 #include "hv_win_n1.h"
+#include "win/hv_win_n1pt.h"
 
 #define HV_TICK_RATE      1000
 #define HV_SLOW_TICK_RATE 1
@@ -270,6 +271,8 @@ void hv_start(void *entry, u64 regs[4])
         printf("HV: GPU power-state guard failed; guest refused\n");
         return;
     }
+
+    hv_win_n1pt_start(); /* n1pt: no-op unless P_HV_WIN_N1PT_PREP passed; never refuses the guest */
 
     if (!hv_cpu_state_setup_hook()) {
         printf("CPU state hook setup failed, can't start the hypervisor\n");
