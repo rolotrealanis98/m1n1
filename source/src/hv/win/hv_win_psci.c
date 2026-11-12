@@ -225,6 +225,7 @@ static void psci_system_exit(u32 reason)
                reason == HV_WIN_EXIT_SYSTEM_OFF ? "SYSTEM_OFF" : "SYSTEM_RESET", smp_id());
     hv_win_pmu_report();
     hv_win_gpu_report(); /* gpu-pt */
+    hv_win_dcp_report(); /* dcp-pt: also resumes the shadow converter if Windows owned the panel */
     /* smp2d: on a guest reset/bugcheck dump the resetting CPU's exit ring and the WFI/debug/integrity
      * counters, so a single hardware run settles the WFI-state-loss question. */
     hv_win_wfi_report();

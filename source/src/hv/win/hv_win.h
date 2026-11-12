@@ -81,6 +81,8 @@ enum hv_win_irq_model {
 #define HV_WIN_F_NO_WFI_TRAP BIT(3)
 /* gpu-pt (launcher --gpu passthrough): guard PMGR GPX/AFR/GFX against power-off, refuse start with GFX off */
 #define HV_WIN_F_GPU_PS_GUARD BIT(4)
+/* dcp-pt (launcher --dcp passthrough): DART/root-table write guards, display-owner register, ADT checks; refuse start on mismatch */
+#define HV_WIN_F_DCP_PT BIT(5)
 
 /* P_HV_WIN_STATUS */
 enum hv_win_exit {
@@ -167,6 +169,15 @@ extern struct hv_win_state hv_win;
 /* gpu-pt (hv_win_gpu.c): PS guard, installed by hv_start(); report at guest exit */
 bool hv_win_gpu_start(void);
 void hv_win_gpu_report(void);
+
+/* dcp-pt (hv_win_dcp.c): installed by hv_start(); report (and converter resume) at guest exit */
+bool hv_win_dcp_start(void);
+void hv_win_dcp_report(void);
+/* dcp-pt (hv_win_fb.c): pause/resume of the shadow converter for the display-owner register */
+void hv_win_fb_set_paused(bool paused);
+bool hv_win_fb_paused(void);
+bool hv_win_fb_active(void);
+u64 hv_win_fb_passes(void);
 
 enum hv_win_diag_stage {
     HV_WIN_DIAG_TRAP,

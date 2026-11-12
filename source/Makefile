@@ -161,6 +161,7 @@ HV_OBJECTS := $(patsubst %,hv/%, \
 	win/hv_win_pmu.o \
 	win/hv_win_pmu_rewrite.o \
 	win/hv_win_gpu.o \
+	win/hv_win_dcp.o \
 	win/hv_vgic3.o)
 
 OBJECTS := \

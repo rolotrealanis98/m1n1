@@ -96,3 +96,6 @@ QF	win-session	source/src/hv/win/hv_win_session.c source/tests/win-session/*	OUT
 QF	win-gpu	source/src/hv/win/hv_win_gpu* source/src/hv/win/hv_win_t6050_routes.h source/src/hv/hv.c source/src/hv/win/hv_win.c source/tests/win-gpu/*	OUT=$FB_OUT/wg sh source/tests/win-gpu/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 # ---- nightly-12: read-only framebuffer snapshot (request bytes in hv_tick, image as proxy events, no vCPU stop)
 QF	win-shot	source/src/hv/win/hv_win_shot.c source/src/hv/win/hv_win.h source/tests/win-shot/*	OUT=$FB_OUT/wsh sh source/tests/win-shot/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+||||||| eb0dc37
+QF	win-dcp	source/src/hv/win/hv_win_dcp* source/src/hv/win/hv_win_fb.c source/src/hv/hv.c source/src/hv/win/hv_win.c source/src/hv/win/hv_win.h source/src/hv/win/hv_win_psci.c source/tests/win-dcp/* harness/*	OUT=$FB_OUT/wd sh source/tests/win-dcp/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+M	win-dcp-mutants	source/src/hv/win/hv_win_dcp_logic.h source/tests/win-dcp/*	OUT=$FB_OUT/wdm sh source/tests/win-dcp/mutants.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
