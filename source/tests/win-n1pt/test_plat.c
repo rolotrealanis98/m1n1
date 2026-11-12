@@ -956,6 +956,63 @@ static void sc_command_held(void)
     CHECK((m_get(CFG(0) + 0x04) & 6) == 6); /* applied after the restore */
 }
 
+/* N1 AIC lines are retargeted like the USB line (known to reach the session's CPU), restored at retire */
+#define AICCFG(l) (0x280400000UL + 0x10000 + 4 * (u64)(l))
+static void sc_aic_targets(void)
+{
+    setup();
+    m_set(AICCFG(1451), 0x1);
+    for (u32 d = 0; d < 64; d++)
+        m_set(AICCFG(1888 + d), 0x22);
+    m_set(AICCFG(1523), 0x2);
+    CHECK(prep_start() == 0);
+    int bad = 0;
+    for (u32 d = 0; d < 64; d++)
+        bad += (m_get(AICCFG(1888 + d)) & 0xf) != (n1pt_msi_bit(d) >= 0 ? 0x1u : 0x2u);
+    CHECK(bad == 0 && (m_get(AICCFG(1888)) & ~0xfu) == 0x20 && (m_get(AICCFG(1523)) & 0xf) == 1);
+    CHECK(m_get(AICCFG(1451)) == 0x1);
+    CHECK(hv_win_n1pt_irq(1888 + 17) && hv_win_n1pt_irq(1888 + 17) && hv_win_n1pt_irq(1888 + 32));
+    hv_win_n1pt_retire();
+    bad = 0;
+    for (u32 d = 0; d < 64; d++)
+        bad += m_get(AICCFG(1888 + d)) != 0x22;
+    CHECK(bad == 0 && m_get(AICCFG(1523)) == 0x2);
+}
+
+/* the MSI setup EL2 programs is intact after PREP, ENABLE_FUNCTIONS and a PORT_CYCLE (the restore order changed in cap2) */
+static void check_msi_all(int fns)
+{
+    static const u32 mme[3] = {2, 4, 1}, data[3] = {0, 16, 32};
+    for (int fn = 0; fn < fns; fn++) {
+        u32 mc = m_get(CFG(fn) + 0x50) >> 16;
+        CHECK((mc & 1) && ((mc >> 4) & 7) == mme[fn]);
+        CHECK(m_get(CFG(fn) + 0x54) == 0xfffff000u && m_get(CFG(fn) + 0x58) == 0 && (m_get(CFG(fn) + 0x5c) & 0xffff) == data[fn]);
+        CHECK(m_get(CFG(fn) + 0x04) & 0x4 || fn == 0); /* fn1/fn2: MASTER (MSI writes are DMA) */
+    }
+    int bad = 0;
+    for (u32 i = 0; i < 64; i++)
+        bad += m_get(P0 + 0x3800 + 4 * i) != (0x80000000u | (64 + i));
+    CHECK(bad == 0 && m_get(P0 + 0x16c) == 0xfffff000u && m_get(P0 + 0x170) == 0 && (m_get(P0 + 0x124) & 1));
+    for (u32 s = 1; s <= 3; s++)
+        CHECK(m_get(P0 + 0x3000 + 4 * s) == (0x80000000u | (s << 16) | (0x100 + s - 1)));
+}
+static void sc_msi_intact(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    check_msi_all(1);
+    d3();
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
+    check_msi_all(1);
+    M.fw_running = true;
+    M.rom_stage = 1;
+    CHECK(cmd(N1PT_CMD_ENABLE) == 0);
+    check_msi_all(3);
+    d3();
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
+    check_msi_all(3);
+}
+
 typedef void (*scen_t)(void);
 static int run(const char *name, void (*f)(int), int arg)
 {
@@ -1020,6 +1077,8 @@ int main(void)
     bad += run0("cycle from hw state", sc_cycle_from_hw_state); n++;
     bad += run0("park from L2 (w24e)", sc_park_from_l2); n++;
     bad += run0("COMMAND held link down", sc_command_held); n++;
+    bad += run0("AIC targets", sc_aic_targets); n++;
+    bad += run0("MSI intact", sc_msi_intact); n++;
     printf("%s: win-n1pt plat, %d scenarios, %d failed\n", bad ? "FAIL" : "PASS", n, bad);
     return bad ? 1 : 0;
 }

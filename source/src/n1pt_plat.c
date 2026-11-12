@@ -235,6 +235,7 @@ int n1pt_plat_prepare(struct n1pt_plat *p, u64 pool, u64 iova, u64 size)
         return -1;
     }
     n1pt_plat_link_irq_enable(p, 1);
+    n1pt_plat_msi_dump(p, "after PREP");
     printf("%sready: fn0 BAR0 0x%lx, MSI 4 at data 0, RID 0x100-0x102 -> SID 1-3, DART %u-level 0x%lx+0x%lx -> "
            "IOVA 0x%lx\n", pfx, N1PT_FN_BAR(p, 0), p->four_level ? 4 : 3, pool, size, iova);
     return 0;
@@ -261,6 +262,32 @@ static void cycle_pre_train(void *ctx)
     struct n1pt_plat *p = ctx;
     if (routes_program(p) || port_msi_program(p))
         p->pre_train_failed = 1;
+}
+
+/* every function's MSI capability (control, address, data, COMMAND) and the port's MSI setup */
+void n1pt_plat_msi_dump(struct n1pt_plat *p, const char *why)
+{
+    if (!n1pt_plat_link_up(p))
+        return;
+    for (unsigned fn = 0; fn < 3; fn++) {
+        if (fn && !p->fns_enabled)
+            continue;
+        u64 c = N1PT_FN_CFG(p, fn);
+        int cap = find_cap(c, 0x05);
+        if (cap < 0)
+            continue;
+        u32 ctl = read32(c + cap) >> 16, d64 = ctl & BIT(7);
+        printf("%sMSI fn%u (%s): ctrl 0x%x (enable %u, MME %u), addr 0x%x:%08x, data 0x%x, COMMAND 0x%x\n", pfx, fn, why,
+               ctl, ctl & 1, (ctl >> 4) & 7, d64 ? read32(c + cap + 8) : 0, read32(c + cap + 4),
+               read32(c + cap + (d64 ? 12 : 8)) & 0xffff, read32(c + CFG_CMD) & 0xffff);
+    }
+    u64 port = p->a.port[0];
+    printf("%sport MSI (%s): MSICFG 0x%x MSIADDR 0x%x:%08x MSIMAP[0] 0x%x [3] 0x%x [16] 0x%x [31] 0x%x [32] 0x%x [33] 0x%x, "
+           "INTMSK 0x%x, RID2SID[1..3] 0x%x 0x%x 0x%x\n", pfx, why, read32(port + P_MSICFG), read32(port + P_MSIADDR_HI),
+           read32(port + P_MSIADDR), read32(port + P_MSIMAP), read32(port + P_MSIMAP + 12),
+           read32(port + P_MSIMAP + 64), read32(port + P_MSIMAP + 124), read32(port + P_MSIMAP + 128),
+           read32(port + P_MSIMAP + 132), read32(port + P_INTMSK), read32(port + 0x3004), read32(port + 0x3008),
+           read32(port + 0x300c));
 }
 
 static int cmd_cycle(struct n1pt_plat *p, struct n1pt *s)
@@ -307,6 +334,7 @@ static int cmd_cycle(struct n1pt_plat *p, struct n1pt *s)
         printf("%sheld COMMAND for fn%u applied: 0x%x\n", pfx, fn, read32(c) & 0xffff);
     }
     s->held_mask = 0;
+    n1pt_plat_msi_dump(p, "after PORT_CYCLE");
     p->cb->map_bars(p->cb->ctx, 1, p->fns_enabled);
     n1pt_plat_link_irq_enable(p, 1);
     p->cb->link_irq(p->cb->ctx, 1);
@@ -339,6 +367,7 @@ static int cmd_enable(struct n1pt_plat *p, struct n1pt *s)
         return N1PT_E_IO;
     printf("%sfunctions 1/2 enabled: BAR2 0x%lx (fn1 MSI 16 at data 16, fn2 MSI 2 at data 32)\n", pfx,
            N1PT_FN_BAR(p, 1));
+    n1pt_plat_msi_dump(p, "after ENABLE_FUNCTIONS");
     return 0;
 }
 

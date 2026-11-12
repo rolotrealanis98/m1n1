@@ -3,6 +3,10 @@
 #include <sys/mman.h>
 #include "glue.h"
 #include "hv_win.h"
+#include "aic.h"
+
+static struct aic aic_t6050 = {0x280400000UL, 4096, {0x10000}};
+struct aic *aic = &aic_t6050;
 
 struct glue G;
 bool hv_started_cpus[MAX_CPUS];

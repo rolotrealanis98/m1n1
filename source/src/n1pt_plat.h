@@ -61,5 +61,7 @@ u32 n1pt_plat_link_irq_ack(struct n1pt_plat *p);
 
 /* the service-page commands (struct n1pt_ops.command); sets s->guard/parked/fns_enabled */
 int n1pt_plat_command(struct n1pt_plat *p, struct n1pt *s, unsigned cmd);
+/* console dump of every function's MSI capability and the port's MSI setup */
+void n1pt_plat_msi_dump(struct n1pt_plat *p, const char *why);
 
 #endif

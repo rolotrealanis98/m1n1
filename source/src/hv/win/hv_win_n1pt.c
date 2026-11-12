@@ -43,6 +43,49 @@ static u32 gsiv;
 static bool attempted, prepped, armed, irq_armed, retired;
 static u32 remaps; /* hv_win_n1pt_unmapped() repairs, bounded */
 static u32 link_events;
+static u32 vec_count[32];  /* AIC events per IRQ_STATUS bit (0-21 MSI, 31 port) */
+static bool first_irq_seen;
+/* AIC IRQ_CFG target of the N1 lines: copied from the Windows USB line (delivered to the CPU the session runs on);
+ * the original values are put back at retire */
+#define N1PT_AIC_REF_LINE 1451
+static u32 cfg_saved[64 + 1];
+static bool cfg_changed;
+
+static u64 aic_cfg_reg(u32 line) { return aic->base + aic->regs.config + 4 * (u64)line; }
+
+static void aic_targets_set(void)
+{
+    u32 ref = read32(aic_cfg_reg(N1PT_AIC_REF_LINE)) & 0xf;
+    u32 n = 0, first_old = 0;
+    for (u32 d = 0; d <= 64; d++) {
+        u32 line = d == 64 ? N1PT_LINK_AIC : N1PT_MSI_AIC_BASE + d;
+        if (d < 64 && n1pt_msi_bit(d) < 0)
+            continue;
+        u32 old = read32(aic_cfg_reg(line));
+        cfg_saved[d] = old;
+        if ((old & 0xf) != ref) {
+            if (!n++)
+                first_old = old;
+            write32(aic_cfg_reg(line), (old & ~0xfu) | ref);
+        }
+    }
+    cfg_changed = n != 0;
+    printf("n1pt: AIC IRQ_CFG: line %u 0x%x (reference), 1888 0x%x, 1904 0x%x, 1920 0x%x, 1523 0x%x; %u N1 lines retargeted "
+           "to 0x%x%s (first old 0x%x)\n", N1PT_AIC_REF_LINE, read32(aic_cfg_reg(N1PT_AIC_REF_LINE)), cfg_saved[0],
+           cfg_saved[16], cfg_saved[32], cfg_saved[64], n, ref, n ? "" : " (already)", first_old);
+}
+
+static void aic_targets_restore(void)
+{
+    if (!cfg_changed)
+        return;
+    for (u32 d = 0; d <= 64; d++) {
+        if (d < 64 && n1pt_msi_bit(d) < 0)
+            continue;
+        write32(aic_cfg_reg(d == 64 ? N1PT_LINK_AIC : N1PT_MSI_AIC_BASE + d), cfg_saved[d]);
+    }
+    cfg_changed = false;
+}
 static DECLARE_SPINLOCK(irq_lock);
 
 extern bool hv_started_cpus[];
@@ -283,6 +326,7 @@ bool hv_win_n1pt_start(void)
         return true;
     }
     if (!hv_win_storage_claims_spi(gsiv) && hv_vgic3_spi_unassigned(gsiv) && hv_win_aic_claim_t6050()) {
+        aic_targets_set();
         for (u32 d = 0; d < 64; d++)
             if (n1pt_msi_bit(d) >= 0)
                 aic_unmask(N1PT_MSI_AIC_BASE + d);
@@ -352,6 +396,11 @@ bool hv_win_n1pt_irq(u32 line)
     if (bit < 0)
         return false;
     u32 bits = BIT(bit);
+    vec_count[bit]++;
+    if (!first_irq_seen) {
+        first_irq_seen = true;
+        printf("n1pt: first N1 interrupt: AIC line %u -> IRQ_STATUS bit %d\n", line, bit);
+    }
     if (bit == 31) {
         u32 v = n1pt_plat_link_irq_ack(&plat);
         bits = (v & BIT(14)) ? N1PT_IRQ_LINK : 0;
@@ -379,6 +428,7 @@ void hv_win_n1pt_retire(void)
             if (n1pt_msi_bit(d) >= 0)
                 aic_mask(N1PT_MSI_AIC_BASE + d);
         aic_mask(N1PT_LINK_AIC);
+        aic_targets_restore();
     }
     int r = 0;
     if (st.guard)
@@ -388,4 +438,11 @@ void hv_win_n1pt_retire(void)
     printf("n1pt: retire: park %d; irqs %u, commands %u (last %d, %u us), dropped cfg writes %u, BAR moves %u, "
            "link events %u, guard %d\n",
            r, st.n_irq, st.n_cmds, st.cmd_result, st.last_us, st.n_dropped, st.n_bar_moves, link_events, st.guard);
+    char buf[256];
+    int k = 0;
+    for (u32 b = 0; b < 32 && k < (int)sizeof(buf) - 24; b++)
+        if (vec_count[b])
+            k += snprintf(buf + k, sizeof(buf) - k, " %s%u=%u", b < 4 ? "f0v" : b < 20 ? "f1v" : b < 22 ? "f2v" : "link",
+                          b < 4 ? b : b < 20 ? b - 4 : b < 22 ? b - 20 : 0, vec_count[b]);
+    printf("n1pt: retire: interrupts per vector:%s\n", k ? buf : " none (no N1 AIC event reached EL2)");
 }
