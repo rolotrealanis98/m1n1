@@ -133,23 +133,19 @@ u32 read32(u64 a)
             return 0xffffffff;
         return fn_read((int)(off >> 12), off & 0xffc);
     }
-    if (a == p0 + 0x208)
-        return (M.link ? 1 : 0) | (M.l2 ? BIT(6) : 0);
+    if (a == p0 + 0x208) /* LINKSTS values from the hardware dump (L2: 0x9b001345) and cap2 (up: 0x9b001001) */
+        return M.l2 ? 0x9b001345 : M.link ? 0x9b001001 : 0;
     for (int p = 1; p < 4; p++)
         if (a == m_port(p) + 0x208)
             return 0;
     if (a == p0 + 0x0a8)
         return (m_get(p0 + 0x800) & 1) | ((m_get(p0 + 0x82c) & BIT(24)) ? BIT(16) : 0);
     if (a == p0 + 0x804) {
-        /* STATUS bit 0: port ready. Bit 2 (what port_disable needs; 0x820 bit 2 never sets on this machine, runs
-         * w24c/w24d): Linux saw it set from its cold port_enable on (cap2 0x5, 0xd at the cycle); m1n1 mode 4 + EL2
-         * never had it (0x9). Modelled hypothesis, covering both candidate causes: latched at the ready transition
-         * of a port enable done Linux's way (reset table with INTMSK 0xfffffff0, then the MSI map cleared), and
-         * reported only while INTMSK keeps bits 0-3 open. Cleared when the port is disabled (APPCLK off). */
+        /* STATUS as measured on this machine after m1n1's PREP (runs w24c/d/e dump): 0x9 = ready + bit 3 while the port
+         * is up; bit 2 never set (Linux saw 0xd there; the w24d model rule that a Linux-style enable sets bit 2 was
+         * disproved by w24e and removed) */
         bool ready = (m_get(p0 + 0x800) & 1) && (m_get(p0 + 0x82c) & 1);
-        if (ready && M.en_table && M.en_msimap)
-            M.st_bit2 = true;
-        return (ready ? 1 : 0) | ((M.st_bit2 && !M.no_820 && !(m_get(p0 + 0x104) & 0xf)) ? 4 : 0);
+        return ready ? (0x1 | ((M.link || M.l2) ? 0x8 : 0)) : 0;
     }
     if (a == p0 + 0x820)
         return 0; /* as measured: bit 2 never seen (w24c, w24d) */
@@ -186,8 +182,7 @@ u32 read32(u64 a)
 static void perst_assert(void)
 {
     M.perst_asserts++;
-    M.link = false;
-    M.l2 = false;
+    M.link = false; /* L2 (if reached) stays reported until the port is disabled, as on hardware (w24e dump) */
     for (int fn = 0; fn < 3; fn++)
         fn_reset(fn);
     if (M.trip_storage_on_perst)
@@ -248,16 +243,9 @@ void write32(u64 a, u32 v)
     }
     if (a == p0 + 0x800 && !(v & 1)) {
         M.link = false;
-        M.st_bit2 = false;
+        M.l2 = false;
     }
-    if (a == p0 + 0x088 && v == 0x110) {   /* reset table starts */
-        M.en_table = false;
-        M.en_msimap = false;
-    }
-    if (a == p0 + 0x104 && v == 0xfffffff0)
-        M.en_table = true;
-    if (a == p0 + 0x38fc && v == 0 && M.en_table)
-        M.en_msimap = true;
+
     for (int p = 0; p < 4; p++)
         if (a == m_lane(p))
             v = (v & ~0xcu) | ((v & 3) << 2);
@@ -318,6 +306,10 @@ int model_printf(const char *fmt, ...)
         M.drops_logged++;
     if (strstr(buf, "PM_CTRL <-"))
         M.pm_logged++;
+    if (strstr(buf, "parked with errors"))
+        M.park_errors++;
+    if (strstr(buf, "already in L2"))
+        M.l2_skips++;
     return n;
 }
 

@@ -208,7 +208,7 @@ s64 hv_win_n1pt_prep(u64 win, u64 ecam, u64 iova, u64 spi)
     }
     if (pcie_t6050_n1_addrs(&plat.a))
         return -4;
-    printf("n1pt: training apcie0 port 0 (gP13 pulse + m1n1 mode 4 with the storage snapshot/NVMe compare)\n");
+    printf("n1pt: training apcie0 port 0 (gP13 pulse, shared PHY by m1n1 stages A/S, port as Linux cold_train; storage snapshot/NVMe compare)\n");
     if (pcie_t6050_n1_train_ans(N1_TRAIN_SMC | N1_TRAIN_LINUX)) {
         pcie_t6050_n1_park(); /* only a live link is touched: the GP side may never have powered up */
         printf("n1pt: N1 REFUSED: training failed (port parked); Windows boots without it\n");

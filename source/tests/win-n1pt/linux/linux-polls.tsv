@@ -1,0 +1,23 @@
+# phase	func	region	offset	mask	expect	cond	timeout_us	seq  (capture cap2 POLL lines)
+cold	cold_train	?	0x879f4058	0x1	0x1	eq	250000	449
+cold	port_enable	port	0xa8	0x10001	0x10001	ne	10000	805
+cold	port_enable/wait	port	0xa8	0x1	0x1	eq	20000	808
+cold	port_enable/wait	port	0x804	0x1	0x1	eq	250000	811
+cold	port_enable/wait	port	0x208	0x4	0x0	eq	250000	814
+cold	port_train/wait	lane	0x0	0x4	0x4	eq	500000	879
+cold	port_train/wait	lane	0x0	0x8	0x8	eq	500000	882
+cold	port_train/wait	port	0x208	0x1	0x1	eq	1000000	894
+cycle	reset_root_port/wait	port	0x88	0x1	0x0	eq	500000	936
+cycle	reset_root_port/wait	port	0x208	0x40	0x40	eq	500000	937
+cycle	port_disable	port	0x820	0x1ff	0xff0000	either-zero	10000	944
+cycle	port_disable	rp	0x728	0x3f	0x14	ne	5000	947
+cycle	port_disable/wait	port	0xa8	0x1	0x1	eq	10000	948
+cycle	port_disable/wait	port	0xa8	0x10000	0x10000	eq	2000	951
+cycle	port_disable/wait	port	0x804	0x1	0x0	eq	250000	977
+cycle	port_enable	port	0xa8	0x10001	0x10001	ne	10000	1330
+cycle	port_enable/wait	port	0xa8	0x1	0x1	eq	20000	1333
+cycle	port_enable/wait	port	0x804	0x1	0x1	eq	250000	1336
+cycle	port_enable/wait	port	0x208	0x4	0x0	eq	250000	1339
+cycle	port_train/wait	lane	0x0	0x4	0x4	eq	500000	1475
+cycle	port_train/wait	lane	0x0	0x8	0x8	eq	500000	1478
+cycle	port_train/wait	port	0x208	0x1	0x1	eq	1000000	1490

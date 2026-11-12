@@ -928,11 +928,16 @@ static int n1_perst_assert(void)
 static int n1_port_disable(void)
 {
     u64 p2 = pr.ctl;
-    /* Linux: STATUS bit 2 already set skips the wait (capture cap2: STATUS 0xd there); otherwise 0x820 bit 2, 10 ms.
-     * Here either bit ends the wait (run w24c waited on 0x820 alone and never saw it). */
+    /* Linux: STATUS bit 2 set skips the wait, otherwise 0x820 bit 2 (10 ms). Deliberate deviation (runs w24c/d/e): on
+     * this machine, after m1n1's training, STATUS reads 0x9 and 0x820 reads 0 (fully idle) and bit 2 never sets.
+     * The step also proceeds when 0x820 is idle, which is exactly what the next poll requires; every following step
+     * polls with its own timeout and fails safely if the port is not ready. Linux itself would wait on 0x820 bit 2
+     * here; the capture cannot prove it passes on an m1n1-trained port. */
     if (!(read32(p2 + PORT_STATUS) & BIT(2))) {
         u64 t = timeout_calculate(10000);
-        while (!(read32(p2 + PORT_STATUS) & BIT(2)) && !(read32(p2 + 0x820) & BIT(2))) {
+        u32 st;
+        while (!(read32(p2 + PORT_STATUS) & BIT(2)) && !((st = read32(p2 + 0x820)) & BIT(2)) &&
+               (st & 0x1ff) && (st & 0xff0000)) {
             if (timeout_expired(t))
                 FAIL("0x820 bit 2: 0x%lx = 0x%08x, STATUS 0x%08x after 10 ms\n", p2 + 0x820, read32(p2 + 0x820),
                      read32(p2 + PORT_STATUS));
@@ -1006,8 +1011,13 @@ int pcie_t6050_n1_park_any(void)
     int bad = 0;
     if (!p2)
         return -1;
-    bool link = read32(p2 + PORT_LINKSTS) & BIT(0);
-    if (link && n1_l2()) {
+    u32 ls = read32(p2 + PORT_LINKSTS);
+    bool link = ls & BIT(0);
+    /* PME_Turn_Off only from L0: already in L2 (bit 6, the state a failed cycle leaves) there is nothing to turn off
+     * and no ack comes (run w24e: a 500 ms stall and "parked with errors") */
+    if (link && (ls & BIT(6)))
+        printf("pcie-t6050: n1 park: link already in L2 (LINKSTS 0x%08x): no PME_Turn_Off\n", ls);
+    else if (link && n1_l2()) {
         printf("pcie-t6050: n1 park: no L2 (link broken): asserting PERST# anyway\n");
         bad++;
     }

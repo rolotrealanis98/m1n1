@@ -697,7 +697,7 @@ static void sc_cycle_fail_dump(void)
     setup();
     CHECK(prep_start() == 0);
     d3();
-    M.no_820 = true; /* runs w24c/w24d: neither STATUS bit 2 nor 0x820 bit 2 */
+    M.pme_stuck = true; /* a cycle that cannot reach L2 */
     s32 r = cmd(N1PT_CMD_PORT_CYCLE);
     CHECK(r == N1PT_E_IO || r == N1PT_E_NOLINK);
     CHECK(M.dumps >= 1);
@@ -914,15 +914,29 @@ static void sc_prep_equals_linux_cold(void)
     printf("  PREP vs Linux cold_train: %d writes compared, %u ADT tunable writes not expanded, %u extras\n", c, tun, ext);
 }
 
-/* the cycle starts from the state Linux's cold_train leaves: STATUS bit 2 set (runs w24c/w24d had it clear) */
-static void sc_status_bit2_after_prep(void)
+/* runs w24c/d/e: at port_disable the hardware shows STATUS 0x9 (bit 2 clear), 0x820 0, 0x088 0x10, LINKSTS 0x9b001345;
+ * the model returns exactly these. The cycle must get past port_disable on that state and complete. */
+static void sc_cycle_from_hw_state(void)
 {
     setup();
     CHECK(prep_start() == 0);
-    CHECK(read32(P0 + 0x804) & 4);
+    CHECK(read32(P0 + 0x804) == 0x9 && read32(P0 + 0x820) == 0);
     d3();
     CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
-    CHECK(read32(P0 + 0x804) & 4); /* and again after the cycle's own port enable */
+    CHECK(M.dumps == 0 && M.link);
+}
+
+/* the state a failed w24e cycle left (L2, LINKSTS 0x9b001345): PARK completes cleanly, no PME_Turn_Off, no stall */
+static void sc_park_from_l2(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    M.l2 = true;
+    CHECK(read32(P0 + 0x208) == 0x9b001345);
+    u64 t0 = M.now;
+    CHECK(cmd(N1PT_CMD_PARK) == 0);
+    CHECK(M.now - t0 < 100000 && M.park_errors == 0 && M.l2_skips == 1 && M.dumps == 0);
+    CHECK((m_get(M_GPIO + 4 * 80) & 0x27f) == 0x202 && !(m_get(P0 + 0x080) & 1) && !(m_get(P0 + 0x800) & 1));
 }
 
 /* COMMAND while the link is down: held (not dropped), applied by the next successful cycle */
@@ -1003,7 +1017,8 @@ int main(void)
     bad += run0("dropped write logged", sc_drop_logged); n++;
     bad += run0("cycle == Linux capture", sc_cycle_equals_linux); n++;
     bad += run0("PREP == Linux cold_train", sc_prep_equals_linux_cold); n++;
-    bad += run0("STATUS bit 2 after PREP", sc_status_bit2_after_prep); n++;
+    bad += run0("cycle from hw state", sc_cycle_from_hw_state); n++;
+    bad += run0("park from L2 (w24e)", sc_park_from_l2); n++;
     bad += run0("COMMAND held link down", sc_command_held); n++;
     printf("%s: win-n1pt plat, %d scenarios, %d failed\n", bad ? "FAIL" : "PASS", n, bad);
     return bad ? 1 : 0;

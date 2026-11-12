@@ -43,6 +43,8 @@ for f in pcie_t6050.c n1pt_plat.c n1pt_dart.c hv/win/hv_win_n1pt.c hv/win/hv_win
   case $f in hv/win/hv_win_n1pt.c) c=$B/glue/hv_win_n1pt.c ;; *) c=$B/$f ;; esac
   cmp -s "$S/$f" "$c" || { echo "FAIL: copy of $f differs"; exit 1; }
 done
+python3 -I "$H/linux/poll_audit.py" check "$H/linux/linux-polls.tsv" "$S/pcie_t6050.c" > "$O/poll-audit.txt" || { cat "$O/poll-audit.txt"; echo "FAIL: poll audit"; exit 1; }
+tail -1 "$O/poll-audit.txt"
 build "$B" "$O/n1pt"
 "$O/n1pt-logic"
 N1PT_LINUX_EXPECTED="$H/linux/linux-cycle.expected" N1PT_LINUX_COLD="$H/linux/linux-cold-port.expected" "$O/n1pt-plat"
