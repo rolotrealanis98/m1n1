@@ -143,7 +143,7 @@ u32 read32(u64 a)
     if (a == p0 + 0x804)
         return ((m_get(p0 + 0x800) & 1) && (m_get(p0 + 0x82c) & 1)) ? 1 : 0;
     if (a == p0 + 0x820)
-        return 0x4;
+        return M.no_820 ? 0 : 0x4;
     if (a == M_RC + 0x58)
         return m_get(M_RC + 0x50) & 1;
     if (a == M_PHYCTL + 0x08) {
@@ -190,6 +190,11 @@ void write32(u64 a, u32 v)
 {
     tick();
     M.writes++;
+    if (M.ntrace < 8192) {
+        M.trace[M.ntrace].a = a;
+        M.trace[M.ntrace].v = v;
+        M.ntrace++;
+    }
     u64 p0 = m_port(0);
     if (in(a, M_ECAM + (1UL << 20), 0x3000)) {
         u32 off = (u32)(a - M_ECAM - (1UL << 20));
@@ -219,7 +224,7 @@ void write32(u64 a, u32 v)
         return;
     }
     if (a == p0 + 0x088) {
-        if (v == 0x11 && M.link) {
+        if (v == 0x11 && M.link && !M.pme_stuck) {
             M.l2 = true;
             m_set(a, 0x10);
         } else {
@@ -287,6 +292,12 @@ int model_printf(const char *fmt, ...)
         fputs(buf, stdout);
     if (strstr(buf, "STOP") || strstr(buf, "GUARD") || strstr(buf, "guard:"))
         M.stops++;
+    if (strstr(buf, "n1 dump ("))
+        M.dumps++;
+    if (strstr(buf, "cfg write DROPPED"))
+        M.drops_logged++;
+    if (strstr(buf, "PM_CTRL <-"))
+        M.pm_logged++;
     return n;
 }
 

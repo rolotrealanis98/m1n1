@@ -258,12 +258,22 @@ static int cmd_cycle(struct n1pt_plat *p, struct n1pt *s)
 
     if (!n1pt_plat_link_up(p))
         return N1PT_E_NOLINK;
+    u32 pmcsr = n1pt_plat_cfg_read(p, 0, 0x44) & 0xffff;
+    if ((pmcsr & 3) != 3) { /* Linux: D3hot | PME_En before PME_Turn_Off, or the port never quiesces (run w24c) */
+        printf("%sPORT_CYCLE refused: fn0 PMCSR 0x%x is not D3hot (write D3hot | PME_En through the config window "
+               "first); nothing touched\n", pfx, pmcsr);
+        return N1PT_E_DSTATE;
+    }
     for (unsigned fn = 0; fn < 3; fn++)
         if (!fn || p->fns_enabled)
             cmd[fn] = read32(N1PT_FN_CFG(p, fn) + CFG_CMD) & (CMD_MEM | CMD_MASTER);
     p->cb->map_bars(p->cb->ctx, 0, 0); /* no guest access to a BAR while the link is down */
     p->cb->link_irq(p->cb->ctx, 0);
     n1pt_plat_link_irq_enable(p, 0);
+    /* Linux centauri_port_cycle: D3hot | PME_En (the driver, through the config window), then 10 ms, then the reset */
+    printf("%sPORT_CYCLE: fn0 PM_CTRL 0x%x COMMAND 0x%x\n", pfx, n1pt_plat_cfg_read(p, 0, 0x44) & 0xffff,
+           n1pt_plat_cfg_read(p, 0, CFG_CMD) & 0xffff);
+    mdelay(10);
     pcie_t6050_storage_guard(0);
     int rc = pcie_t6050_n1_cycle();
     if (!rc)
@@ -323,7 +333,7 @@ static int cmd_park(struct n1pt_plat *p, struct n1pt *s)
         if (p->dart.root4)
             n1pt_dart_block(p->a.dart, 0xe);
     }
-    int rc = pcie_t6050_n1_park();
+    int rc = pcie_t6050_n1_park_any(); /* live, broken or down link: PERST# and LTSSM off in every case */
     s->parked = true;
     if (pcie_t6050_storage_guard(1)) {
         s->guard = true;

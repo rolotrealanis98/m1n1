@@ -859,24 +859,59 @@ int pcie_t6050_n1_route(u32 rid, u32 sid)
     return read32(pr.ctl + PORT_RID2SID + 4 * sid) == want ? 0 : -1;
 }
 
-/* First half of the cycle, and the whole of a park (shutdown/retire, as 0085's shutdown hook):
- * bridge decoding off, PME_Turn_Off to L2, PERST# asserted, port disabled. */
-static int n1_down(void)
+/* n1pt (2026-11-11, after hardware run w24c): the down half follows LINUX-MAP 2.3 / P0034 reset_root_port step by
+ * step: root port COMMAND (16-bit) = 0 and the secondary/subordinate bus numbers cleared, APPCLK bit 8, PME_Turn_Off,
+ * L2, PERST# (pad written as Linux's perst helper: input enable last), PHY bit 31; then P0033 port_disable, whose
+ * timeouts are Linux's (0x820 bit 2 10 ms, idle 10 ms, LTSSM out of L1 5 ms, clk/rst 10 ms / 2 ms, not-ready 250 ms).
+ * Every failure prints the port state (pcie_t6050_n1_dump). Behaviour description, no Linux code. */
+void pcie_t6050_n1_dump(const char *why)
 {
     u64 p2 = pr.ctl;
-    if (!p2 || !(read32(p2 + PORT_LINKSTS) & BIT(0)))
-        FAIL("n1 down: no live link\n");
-    write32(pr.rp + PCI_COMMAND, read32(pr.rp + PCI_COMMAND) & 0xffff0000); /* bridge decoding off */
-    TRY(rmw("APPCLK bit 8", p2 + PORT_APPCLK, 0, BIT(8)));
+    if (!p2)
+        return;
+    printf("pcie-t6050: n1 dump (%s): 0x820 0x%08x STATUS 0x%08x LINKSTS 0x%08x 0x088 0x%08x APPCLK 0x%08x\n", why,
+           read32(p2 + 0x820), read32(p2 + PORT_STATUS), read32(p2 + PORT_LINKSTS), read32(p2 + 0x088),
+           read32(p2 + PORT_APPCLK));
+    printf("pcie-t6050: n1 dump (%s): INT_RESET 0x%08x CLKRST 0x%08x LTSSMCTL 0x%08x 0x13c 0x%08x DBI 0x728 0x%08x "
+           "lane 0x%08x PERST 0x%08x RP CMD 0x%08x buses 0x%08x\n",
+           why, read32(p2 + PORT_INT_RESET), read32(p2 + PORT_CLKRST), read32(p2 + PORT_LTSSMCTL), read32(p2 + 0x13c),
+           read32(pr.rp + 0x728), read32(pr.lane), read32(pr.perst), read32(pr.rp + PCI_COMMAND),
+           read32(pr.rp + PCI_PRIMARY_BUS));
+}
+
+/* bridge decoding off, secondary bus unnumbered, PME_Turn_Off, L2 */
+static int n1_l2(void)
+{
+    u64 p2 = pr.ctl;
+    write16(pr.rp + PCI_COMMAND, 0);
+    write32(pr.rp + PCI_PRIMARY_BUS, read32(pr.rp + PCI_PRIMARY_BUS) & 0xff0000ff);
+    write32(p2 + PORT_APPCLK, read32(p2 + PORT_APPCLK) | BIT(8));
     write32(p2 + 0x088, 0x11);                                              /* PME_Turn_Off */
     TRY(poll_clear("PME_Turn_Off done", p2 + 0x088, BIT(0), 500));
     TRY(poll_set("link in L2", p2 + PORT_LINKSTS, BIT(6), 500));
-    u32 old = read32(pr.perst);                                             /* PERST# asserted */
+    return 0;
+}
+
+/* PERST# asserted as Linux's helper writes the pad (the input enable, bit 9, goes on after the rest), then PHY bit 31 */
+static int n1_perst_assert(void)
+{
+    u32 old = read32(pr.perst);
     if (old & GPIO_PERST_LOCK)
         FAIL("PERST# pad locked\n");
-    write32(pr.perst, (old & ~GPIO_PERST_MASK) | GPIO_PERST_LOW);
-    TRY(rmw("lane bit 31 clear", pr.lane, BIT(31), 0));
-    /* port disable */
+    u32 value = (old & ~GPIO_PERST_MASK) | GPIO_PERST_LOW;
+    write32(pr.perst, (value & ~0x200u) | (old & 0x200u));
+    if (!(old & 0x200))
+        write32(pr.perst, value);
+    if ((read32(pr.perst) ^ value) & GPIO_PERST_MASK)
+        FAIL("PERST# readback 0x%x\n", read32(pr.perst));
+    write32(pr.lane, read32(pr.lane) & ~BIT(31));
+    return 0;
+}
+
+/* P0033 port_disable */
+static int n1_port_disable(void)
+{
+    u64 p2 = pr.ctl;
     if (!(read32(p2 + PORT_STATUS) & BIT(2)))
         TRY(poll_set("0x820 bit 2", p2 + 0x820, BIT(2), 10));
     {
@@ -888,26 +923,39 @@ static int n1_down(void)
             udelay(1);
         }
     }
-    TRY(rmw("0x13c bit 8", p2 + 0x13c, 0, BIT(8)));
+    write32(p2 + 0x13c, read32(p2 + 0x13c) | BIT(8));
     TRY(wait32("LTSSM out of L1", pr.rp + 0x728, 0x3f, 0x14, false, 5));
     TRY(poll_set("clk/rst bit 0", p2 + PORT_CLKRST, BIT(0), 10));
-    TRY(rmw("PERST bit 24", p2 + PORT_INT_RESET, 0, BIT(24)));
+    write32(p2 + PORT_INT_RESET, read32(p2 + PORT_INT_RESET) | BIT(24));
     TRY(poll_set("clk/rst bit 16", p2 + PORT_CLKRST, BIT(16), 2));
-    TRY(rmw("PERST bit 16", p2 + PORT_INT_RESET, 0, BIT(16)));
+    write32(p2 + PORT_INT_RESET, read32(p2 + PORT_INT_RESET) | BIT(16));
     udelay(1);
-    TRY(rmw("PERST off", p2 + PORT_INT_RESET, BIT(0), 0));
+    write32(p2 + PORT_INT_RESET, read32(p2 + PORT_INT_RESET) & ~BIT(0));
     udelay(1);
-    TRY(rmw("PERST bit 24 clear", p2 + PORT_INT_RESET, BIT(24), 0));
-    TRY(rmw("0x13c bit 8 clear", p2 + 0x13c, BIT(8), 0));
-    TRY(rmw("lane bit 10 clear", pr.lane, BIT(10), 0));
-    TRY(rmw("lane bit 9 clear", pr.lane, BIT(9), 0));
-    TRY(rmw("lane bit 4", pr.lane, 0, BIT(4)));
-    TRY(rmw("lane clk0 off", pr.lane, BIT(0), 0));
-    TRY(rmw("lane clk1 off", pr.lane, BIT(1), 0));
+    write32(p2 + PORT_INT_RESET, read32(p2 + PORT_INT_RESET) & ~BIT(24));
+    write32(p2 + 0x13c, read32(p2 + 0x13c) & ~BIT(8));
+    write32(pr.lane, read32(pr.lane) & ~BIT(31));
+    write32(pr.lane, read32(pr.lane) & ~BIT(10));
+    write32(pr.lane, read32(pr.lane) & ~BIT(9));
+    write32(pr.lane, read32(pr.lane) | BIT(4));
+    write32(pr.lane, read32(pr.lane) & ~BIT(0));
+    write32(pr.lane, read32(pr.lane) & ~BIT(1));
     write32(p2 + 0x100, 0xffffffff);
-    TRY(rmw("APPCLK off", p2 + PORT_APPCLK, BIT(0), 0));
+    write32(p2 + PORT_APPCLK, read32(p2 + PORT_APPCLK) & ~BIT(0));
     TRY(poll_clear("port not ready", p2 + PORT_STATUS, BIT(0), 250));
-    write32(p2 + PORT_LTSSMCTL, read32(p2 + PORT_LTSSMCTL) & ~BIT(0)); /* LTSSM off, as port_park */
+    return 0;
+}
+
+/* the whole down half (the old path's park and the first half of the cycle) */
+static int n1_down(void)
+{
+    u64 p2 = pr.ctl;
+    if (!p2 || !(read32(p2 + PORT_LINKSTS) & BIT(0)))
+        FAIL("n1 down: no live link\n");
+    TRY(n1_l2());
+    TRY(n1_perst_assert());
+    TRY(n1_port_disable());
+    write32(p2 + PORT_LTSSMCTL, read32(p2 + PORT_LTSSMCTL) & ~BIT(0)); /* LTSSM off, as port_park (stage B requires it) */
     return 0;
 }
 
@@ -915,29 +963,120 @@ int pcie_t6050_n1_park(void)
 {
     if (!pr.ctl || !(read32(pr.ctl + PORT_LINKSTS) & BIT(0)))
         return 0; /* nothing live: leave it alone (0086: never touch an N1 that never booted) */
-    TRY(n1_down());
+    if (n1_down()) {
+        pcie_t6050_n1_dump("park");
+        return -1;
+    }
     printf("pcie-t6050: n1 port parked (PERST# asserted, port off)\n");
     return 0;
 }
 
-/* Post-ROM link cycle: n1_down(), then this file's B-F again. */
-int pcie_t6050_n1_cycle(void)
+/* n1pt PARK: works on a live, a broken or a down link. With a link: PME_Turn_Off/L2 tried (a timeout is printed and
+ * the park goes on); always: PERST# asserted, PHY bit 31; port disable only while the port is still clocked (APPCLK
+ * bit 0), its failures printed with the port state and the park goes on; LTSSM off. The next boot finds PERST#
+ * asserted and the LTSSM off (m1n1's warm entry parks any live link again before training). 0 if every step took. */
+int pcie_t6050_n1_park_any(void)
 {
     u64 p2 = pr.ctl;
-    TRY(n1_down());
-    /* enable (B, RID2SID and MSI map cleared, C, C2), configure (D), train (E, E2, E3), buses (F) */
-    TRY(stage_b(&pr));
+    int bad = 0;
+    if (!p2)
+        return -1;
+    bool link = read32(p2 + PORT_LINKSTS) & BIT(0);
+    if (link && n1_l2()) {
+        printf("pcie-t6050: n1 park: no L2 (link broken): asserting PERST# anyway\n");
+        bad++;
+    }
+    if (n1_perst_assert())
+        bad++;
+    if (read32(p2 + PORT_APPCLK) & BIT(0)) {
+        if (n1_port_disable()) {
+            pcie_t6050_n1_dump("park port-disable");
+            bad++;
+        }
+    }
+    write32(p2 + PORT_LTSSMCTL, read32(p2 + PORT_LTSSMCTL) & ~BIT(0));
+    printf("pcie-t6050: n1 port parked%s (PERST# 0x%08x, LTSSMCTL 0x%08x, link was %s)\n", bad ? " with errors" : "",
+           read32(pr.perst), read32(p2 + PORT_LTSSMCTL), link ? "up" : "down");
+    return bad ? -1 : 0;
+}
+
+/* P0033 port_enable for the cycle: the reset table in Linux's two halves with RID2SID and the MSI map cleared between
+ * them (INTMSK 0xfffffff0 as Linux; EL2 sets its own mask after the cycle), INT_RESET bit 16 required, config
+ * tunables, APPCLK, the internal-reset handshake (20 ms), port ready (250 ms), APPCLK bit 8, not busy (250 ms). */
+static int n1_port_enable(void)
+{
+    static const u32 early[][2] = {
+        {0x088, 0x110}, {0x100, 0xffffffff}, {0x148, 0xffffffff}, {0x210, 0xffffffff}, {0x080, 0},
+        {0x084, 0},     {0x104, 0xfffffff0}, {0x124, 0x100},      {0x16c, 0},          {0x13c, 0},
+        {0x800, 0x100100}, {0x808, 0x1001ff}, {0x82c, 0x10000},
+    };
+    static const u32 late[][2] = {
+        {0x130, 0x03020000}, {0x140, 0x10}, {0x144, 0x253770}, {0x21c, 0}, {0x834, 0}, {0x83c, 0},
+    };
+    u64 p2 = pr.ctl;
+    if (read32(p2 + PORT_LINKSTS) & BIT(0) || read32(p2 + PORT_LTSSMCTL) & BIT(0))
+        FAIL("port 0 has a link or LTSSM running\n");
+    for (size_t i = 0; i < ARRAY_SIZE(early); i++)
+        write32(p2 + early[i][0], early[i][1]);
     for (int i = 0; i < 64; i++)
         write32(p2 + PORT_RID2SID + 4 * i, 0);
     for (int i = 0; i < 256; i++)
         write32(p2 + 0x3800 + 4 * i, 0);
+    for (size_t i = 0; i < ARRAY_SIZE(late); i++)
+        write32(p2 + late[i][0], late[i][1]);
+    if (!(read32(p2 + PORT_INT_RESET) & BIT(16)))
+        FAIL("n1 cycle: INT_RESET bit 16 clear after the reset table\n");
     TRY(stage_c(&pr));
     TRY(stage_c2(&pr, false));
-    TRY(stage_d(&pr));
-    TRY(stage_e(&pr));
-    TRY(stage_e2(&pr));
+    return 0;
+}
+
+/* P0033 port_train: lane clocks (500 ms each), bit 4 clear, 1 us, bits 9/10, 100 us (Tperst-clk), PERST# released as
+ * Linux's helper writes the pad, LTSSM, link up (500 ms), 100 ms */
+static int n1_port_train(void)
+{
+    if (read32(pr.lane) & BIT(28))
+        FAIL("lane PHY bit 28 set\n");
+    write32(pr.lane, read32(pr.lane) | BIT(0));
+    TRY(poll_set("lane clk0 ack", pr.lane, BIT(2), 500));
+    write32(pr.lane, read32(pr.lane) | BIT(1));
+    TRY(poll_set("lane clk1 ack", pr.lane, BIT(3), 500));
+    write32(pr.lane, read32(pr.lane) & ~BIT(4));
+    udelay(1);
+    write32(pr.lane, read32(pr.lane) | BIT(9));
+    write32(pr.lane, read32(pr.lane) | BIT(10));
+    udelay(110);
+    u32 old = read32(pr.perst);
+    if (old & GPIO_PERST_LOCK)
+        FAIL("PERST# pad locked\n");
+    u32 value = (old & ~GPIO_PERST_MASK) | GPIO_PERST_LOW | 1;
+    write32(pr.perst, (value & ~0x200u) | (old & 0x200u));
+    if (!(old & 0x200))
+        write32(pr.perst, value);
+    if ((read32(pr.perst) ^ value) & GPIO_PERST_MASK)
+        FAIL("PERST# readback 0x%x\n", read32(pr.perst));
     TRY(stage_e3(&pr, 500));
+    return 0;
+}
+
+/* Post-ROM link cycle (P0034 reset_root_port): down half, port enable, configure (stage D = P0033 port_configure),
+ * train; then bus numbers (stage F; Linux restores the bridge's saved state). Any failure prints the port state. */
+static int n1_cycle(void)
+{
+    TRY(n1_down());
+    TRY(n1_port_enable());
+    TRY(stage_d(&pr));
+    TRY(n1_port_train());
     TRY(stage_f(&pr, false));
+    return 0;
+}
+
+int pcie_t6050_n1_cycle(void)
+{
+    if (n1_cycle()) {
+        pcie_t6050_n1_dump("cycle");
+        return -1;
+    }
     printf("pcie-t6050: n1 link cycled\n");
     return 0;
 }

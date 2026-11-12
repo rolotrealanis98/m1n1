@@ -168,12 +168,20 @@ static bool win_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int w
         n1pt_window_write(&st, off, (u32)*val, width); /* the command runs without the IRQ lock */
         return true;
     }
+    u32 d0 = st.n_dropped, w0 = st.n_cfgw;
     spin_lock(&irq_lock);
     if (write)
         n1pt_window_write(&st, off, (u32)*val, width);
     else
         *val = width > 2 ? ~0UL : n1pt_window_read(&st, off, width);
     spin_unlock(&irq_lock);
+    if (st.n_dropped != d0) /* every dropped config-window write, with its function/offset/value (4 bytes) */
+        printf("n1pt: cfg write DROPPED fn%u +0x%03x byte-enables 0x%x (size %u) value 0x%08x (%s)\n",
+               st.drop_addr >> 12, st.drop_addr & 0xffc, st.drop_be, (u32)__builtin_popcount(st.drop_be), st.drop_val,
+               (st.drop_addr >> 12) > 2 ? "no such function" : n1pt_cfg_write_allowed(st.drop_addr & 0xffc) ?
+               "no link / parked / guard" : "offset not allowed");
+    else if (st.n_cfgw != w0 && (st.cfgw_addr & 0xffc) == 0x44)
+        printf("n1pt: cfg write fn%u PM_CTRL <- 0x%08x (dword written)\n", st.cfgw_addr >> 12, st.cfgw_val);
     return true;
 }
 
@@ -199,7 +207,7 @@ s64 hv_win_n1pt_prep(u64 win, u64 ecam, u64 iova, u64 spi)
         return -4;
     printf("n1pt: training apcie0 port 0 (gP13 pulse + m1n1 mode 4 with the storage snapshot/NVMe compare)\n");
     if (pcie_t6050_n1_train_ans(N1_TRAIN_SMC)) {
-        pcie_t6050_n1_park();
+        pcie_t6050_n1_park(); /* only a live link is touched: the GP side may never have powered up */
         printf("n1pt: N1 REFUSED: training failed (port parked); Windows boots without it\n");
         return -5;
     }
@@ -208,7 +216,7 @@ s64 hv_win_n1pt_prep(u64 win, u64 ecam, u64 iova, u64 spi)
     plat.win = win;
     plat.cb = &plat_cb;
     if (n1pt_plat_prepare(&plat, pool, iova, N1PT_POOL_SIZE)) {
-        pcie_t6050_n1_park();
+        pcie_t6050_n1_park_any();
         printf("n1pt: N1 REFUSED: preparation failed (port parked); pool 0x%lx stays out of guest RAM\n", pool);
         return -6;
     }

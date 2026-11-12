@@ -423,12 +423,38 @@ static void test_cfg_window(void)
                 CHECK(H.nwrites == w0 + 1 && sr(N1SV_CNT_DROPPED) == d0);
                 if (off == 0x04)
                     CHECK(H.w[(w0) % 64].v == ((real & 0xffff & ~6u) | 6u)); /* only MEM|MASTER change */
+                else if (off == 0x44) /* PMCSR: PowerState, PME_En, PME_Status only; the rest the real value */
+                    CHECK(H.cfg[fn][off / 4] == (((real & ~0x8000u) & ~0x8103u) | (0xa5a5ffffu & 0x8103u)));
                 else
                     CHECK(H.cfg[fn][off / 4] == 0xa5a5ffffu);
             } else {
                 CHECK(H.nwrites == w0 && sr(N1SV_CNT_DROPPED) == d0 + 1);
             }
         }
+    /* 1/2-byte writes with byte enables (Linux writes PMCSR as a word: 0x010b = D3hot | PME_En | NoSoftReset) */
+    fresh();
+    H.cfg[0][0x44 / 4] = 0x00c08008u;  /* BSE/Data in the upper half, NoSoftReset, PME_Status pending */
+    sw(N1SV_CFG_ADDR, 0x44);
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA, 0x010b, 1);
+    CHECK(H.nwrites == 1 && H.cfg[0][0x44 / 4] == 0x00c0010bu); /* D3hot | PME_En; PME_Status not cleared */
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA, 0x0008, 1);
+    CHECK(H.cfg[0][0x44 / 4] == 0x00c00008u);                  /* back to D0 */
+    H.cfg[0][0x44 / 4] = 0x00c08008u;
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA + 1, 0x80, 0); /* byte lane 1: PME_Status W1C */
+    CHECK(H.w[H.nwrites - 1].v == 0x00c08008u && sr(N1SV_CNT_DROPPED) == 0);
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA + 2, 0xffff, 1); /* upper half: nothing writable */
+    CHECK((H.w[H.nwrites - 1].v >> 16) == 0x00c0);
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA + 1, 0x80, 1); /* unaligned halfword: dropped silently */
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA, 0x3, 0);      /* byte write of the D-state */
+    CHECK((H.cfg[0][0x44 / 4] & 3) == 3);
+    H.cfg[0][1] = 0xffff0140u;          /* STATUS error bits set: never written back */
+    sw(N1SV_CFG_ADDR, 0x04);
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA, 0x0006, 1);
+    CHECK(H.w[H.nwrites - 1].v == 0x00000146u);
+    unsigned d1 = sr(N1SV_CNT_DROPPED);
+    sw(N1SV_CFG_ADDR, 0x10);            /* not allowed: dropped, recorded with its byte enables */
+    n1pt_window_write(&S, N1PT_BAR4_OFF + N1SV_CFG_DATA + 2, 0x1234, 1);
+    CHECK(sr(N1SV_CNT_DROPPED) == d1 + 1 && S.drop_be == 0xc && S.drop_val == 0x12340000u && S.drop_addr == 0x10);
     /* no link: reads all-ones, writes dropped */
     H.link = false;
     sw(N1SV_CFG_ADDR, 0x44);

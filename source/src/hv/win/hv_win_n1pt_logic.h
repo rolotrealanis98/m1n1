@@ -73,6 +73,7 @@
 #define N1PT_E_NODEV  (-19)
 #define N1PT_E_INVAL  (-22)
 #define N1PT_E_NOLINK (-67)
+#define N1PT_E_DSTATE (-77) /* PORT_CYCLE: the endpoint is not in D3hot (driver must write PMCSR D3hot | PME_En first) */
 
 /* IRQ_STATUS bits */
 #define N1PT_IRQ_LINK (1u << 31)
@@ -142,6 +143,8 @@ struct n1pt {
     int32_t cmd_result;
     uint32_t irq_status;
     uint32_t n_irq, n_dropped, n_cmds, last_us, n_bar_moves;
+    uint32_t drop_addr, drop_val, drop_be; /* last dropped config-window write: CFG_ADDR, value, byte enables */
+    uint32_t cfgw_addr, cfgw_val, n_cfgw; /* last forwarded config-window write */
 };
 
 /* ---- emulated headers ------------------------------------------------------------------------- */
@@ -374,18 +377,46 @@ static inline uint32_t n1pt_cfg_data_read(struct n1pt *s)
     return s->ops->cfg_read(s->ops->ctx, fn, off);
 }
 
-static inline void n1pt_cfg_data_write(struct n1pt *s, uint32_t v)
+/* bits of a real function's config dword the guest may change through the window */
+static inline uint32_t n1pt_cfg_write_mask(uint32_t off)
+{
+    if (off == 0x04)
+        return N1PT_CMD_FWD;   /* COMMAND MEM | MASTER */
+    if (off == 0x44)
+        return 0x8103u;        /* PMCSR: PowerState, PME_En, PME_Status (W1C) */
+    return 0xffffffffu;        /* 0xf88 / 0xf8c / 0xf90 */
+}
+
+/* a 1-, 2- or 4-byte write to CFG_DATA: `be` = byte enables (bit per byte lane of the CFG_ADDR dword), `v` already
+ * shifted to its lanes. Read-modify-write of the real dword with only the allowed bits of the enabled lanes:
+ * COMMAND's upper half (STATUS, W1C) is written 0, PMCSR's PME_Status only when the guest's lanes carry it. */
+static inline void n1pt_cfg_data_write_be(struct n1pt *s, uint32_t v, uint32_t be)
 {
     unsigned fn = (s->cfg_addr >> 12) & 7, off = s->cfg_addr & 0xffc;
-    if (fn > 2 || !n1pt_cfg_write_allowed(off) || !n1pt_live(s)) {
+    uint32_t lanes = (be & 1 ? 0xffu : 0) | (be & 2 ? 0xff00u : 0) | (be & 4 ? 0xff0000u : 0) | (be & 8 ? 0xff000000u : 0);
+    if (fn > 2 || !lanes || !n1pt_cfg_write_allowed(off) || !n1pt_live(s)) {
         s->n_dropped++;
+        s->drop_addr = s->cfg_addr;
+        s->drop_val = v;
+        s->drop_be = be;
         return;
     }
-    if (off == 0x04) {
-        uint32_t real = s->ops->cfg_read(s->ops->ctx, fn, 0x04) & 0xffffu;
-        v = (real & ~N1PT_CMD_FWD) | (v & N1PT_CMD_FWD);
-    }
-    s->ops->cfg_write(s->ops->ctx, fn, off, v);
+    uint32_t m = n1pt_cfg_write_mask(off) & lanes;
+    uint32_t real = s->ops->cfg_read(s->ops->ctx, fn, off);
+    if (off == 0x04)
+        real &= 0xffffu;                         /* never write STATUS back (W1C) */
+    if (off == 0x44)
+        real &= ~0x8000u;                        /* PME_Status: only an explicit 1 clears it */
+    uint32_t w = (real & ~m) | (v & m);
+    s->n_cfgw++;
+    s->cfgw_addr = s->cfg_addr;
+    s->cfgw_val = w;
+    s->ops->cfg_write(s->ops->ctx, fn, off, w);
+}
+
+static inline void n1pt_cfg_data_write(struct n1pt *s, uint32_t v)
+{
+    n1pt_cfg_data_write_be(s, v, 0xf);
 }
 
 static inline void n1pt_run_command(struct n1pt *s, uint32_t cmd)
@@ -454,8 +485,18 @@ static inline uint32_t n1pt_window_read(struct n1pt *s, uint64_t off, int width)
 
 static inline void n1pt_window_write(struct n1pt *s, uint64_t off, uint32_t v, int width)
 {
-    if (!s->dead && width == 2 && !(off & 3) && off >= N1PT_BAR4_OFF && off < N1PT_BAR4_OFF + N1PT_BAR4_SIZE)
-        n1pt_svc_write(s, (uint32_t)(off - N1PT_BAR4_OFF), v);
+    if (s->dead || off < N1PT_BAR4_OFF || off >= N1PT_BAR4_OFF + N1PT_BAR4_SIZE || width < 0 || width > 2 ||
+        (off & ((1u << width) - 1)))
+        return;
+    uint32_t r = (uint32_t)(off - N1PT_BAR4_OFF);
+    if ((r & ~3u) == N1SV_CFG_DATA) { /* config data: 1/2/4-byte writes with byte enables */
+        unsigned sh = (r & 3) * 8;
+        uint32_t be = (width == 2 ? 0xfu : width == 1 ? 0x3u : 0x1u) << (r & 3);
+        n1pt_cfg_data_write_be(s, (v & n1pt_width_mask(width)) << sh, be);
+        return;
+    }
+    if (width == 2)
+        n1pt_svc_write(s, r, v);
 }
 
 #endif

@@ -51,6 +51,7 @@ static u32 gr(u64 ipa) { u64 v = 0xdead; return guest_read(ipa, 2, &v) < 0 ? 0xb
 static void gw(u64 ipa, u32 v) { guest_write(ipa, 2, v); }
 static u32 svc(u32 off) { return gr(BAR4 + off); }
 static s32 cmd(u32 c) { gw(BAR4 + N1SV_CMD, c); return (s32)svc(N1SV_CMD_RESULT); }
+static void d3(void) { gw(BAR4 + N1SV_CFG_ADDR, 0x44); gw(BAR4 + N1SV_CFG_DATA, 0x0103); } /* driver: D3hot | PME_En */
 static int mapped_dev(u64 ipa) { u64 v; return guest_read(ipa, 2, &v); } /* 1 device map, 0 hook, -1 none */
 
 static void setup(void)
@@ -294,6 +295,7 @@ static void sc_cycle(void)
     CHECK(w.n == PAGES && w.bad == 0);
     CHECK(svc(N1SV_CNT_LAST_US) > 100000); /* includes the 100 ms settle, in model time */
     /* a second cycle works too */
+    d3();
     CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0 && M.perst_asserts == pa + 2);
 }
 
@@ -302,6 +304,7 @@ static void sc_cycle_nolink(void)
     setup();
     CHECK(prep_start() == 0);
     M.never_link = true; /* the link does not come back */
+    d3();
     s32 r = cmd(N1PT_CMD_PORT_CYCLE);
     CHECK(r == N1PT_E_NOLINK || r == N1PT_E_IO);
     CHECK(mapped_dev(WIN + N1PT_BAR0_OFF) == 0 && gr(WIN + N1PT_BAR0_OFF) == 0xffffffffu);
@@ -317,6 +320,8 @@ static void sc_guard(int which)
     CHECK(cmd(N1PT_CMD_ENABLE) == 0);
     M.trip_storage_on_perst = true;
     u32 pa = M.perst_asserts;
+    if (which == N1PT_CMD_PORT_CYCLE)
+        d3();
     CHECK(cmd(which) == N1PT_E_IO);
     CHECK((svc(N1SV_STATUS) & N1SV_ST_GUARD) && (hv_win_n1pt_stat(0) & 0x10));
     CHECK(M.perst_asserts == pa + 1);
@@ -391,6 +396,7 @@ static void sc_irq(void)
     CHECK(hv_win_n1pt_stat(10) == 302);
     CHECK(G.unmask[1523] == 1 + 256);
     u32 um = G.unmask[1523];
+    d3();
     CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
     CHECK(G.unmask[1523] == um);
     CHECK(hv_win_n1pt_stat(5) == 3 + 1 + 254); /* latched: 3 MSI, 1 link, 254 storm events below the cap */
@@ -599,6 +605,144 @@ static void sc_unmapped_ecam_hook_failed(void)
     CHECK(guest_access(ECAMI + (1UL << 20), false, &v) == 0 && (u32)v == 0xffffffffu); /* hooked on the abort */
 }
 
+/* ---- run w24c: the cycle in Linux's order (P0034 reset_root_port + P0033 port_disable/enable/configure/train) ---- */
+struct step { const char *what; u64 a; u32 mask, want; };
+static int find_step(u32 from, const struct step *st)
+{
+    for (u32 i = from; i < M.ntrace; i++)
+        if (M.trace[i].a == st->a && (M.trace[i].v & st->mask) == st->want)
+            return (int)i;
+    return -1;
+}
+static void sc_cycle_linux_order(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    d3();
+    M.ntrace = 0;
+    u64 RP = M_ECAM, P = P0, PERST = M_GPIO + 4 * 80, LANE = m_lane(0);
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
+    const struct step seq[] = {
+        {"RP COMMAND = 0 (word)", RP + 0x04, 0xffff, 0},
+        {"secondary/subordinate bus cleared", RP + 0x18, 0x00ffff00, 0},
+        {"APPCLK bit 8", P + 0x800, 0x100, 0x100},
+        {"PME_Turn_Off", P + 0x088, 0xffffffff, 0x11},
+        {"PERST# output low", PERST, 0x27f, 0x202},
+        {"PHY bit 31 clear", LANE, 0x80000000, 0},
+        {"0x13c bit 8 set", P + 0x13c, 0x100, 0x100},
+        {"INT_RESET bit 24 set", P + 0x82c, 0x1000000, 0x1000000},
+        {"INT_RESET bit 16 set", P + 0x82c, 0x10000, 0x10000},
+        {"PERST_OFF clear", P + 0x82c, 0x1, 0},
+        {"INT_RESET bit 24 clear", P + 0x82c, 0x1000000, 0},
+        {"0x13c bit 8 clear", P + 0x13c, 0x100, 0},
+        {"lane bit 10 clear", LANE, 0x400, 0},
+        {"lane bit 9 clear", LANE, 0x200, 0},
+        {"lane bit 4 set", LANE, 0x10, 0x10},
+        {"lane refclk0 req clear", LANE, 0x1, 0},
+        {"lane refclk1 req clear", LANE, 0x2, 0},
+        {"INTSTAT all", P + 0x100, 0xffffffff, 0xffffffff},
+        {"APPCLK off", P + 0x800, 0x1, 0},
+        /* port_enable */
+        {"reset table first entry", P + 0x088, 0xffffffff, 0x110},
+        {"INTMSK 0xfffffff0", P + 0x104, 0xffffffff, 0xfffffff0},
+        {"INT_RESET 0x10000", P + 0x82c, 0xffffffff, 0x10000},
+        {"RID2SID 63 cleared", P + 0x3000 + 4 * 63, 0xffffffff, 0},
+        {"MSIMAP 255 cleared", P + 0x3800 + 4 * 255, 0xffffffff, 0},
+        {"late table first entry", P + 0x130, 0xffffffff, 0x03020000},
+        {"late table last entry", P + 0x83c, 0xffffffff, 0},
+        {"APPCLK enable", P + 0x800, 0x1, 0x1},
+        {"PERST_OFF set", P + 0x82c, 0x1, 0x1},
+        {"INT_RESET bit 16 clear", P + 0x82c, 0x10000, 0},
+        {"APPCLK CGDIS", P + 0x800, 0x100, 0x100},
+        /* port_train */
+        {"lane refclk0 req", LANE, 0x1, 0x1},
+        {"lane refclk1 req", LANE, 0x2, 0x2},
+        {"lane bit 4 clear", LANE, 0x10, 0},
+        {"lane bit 9", LANE, 0x200, 0x200},
+        {"lane bit 10", LANE, 0x400, 0x400},
+        {"PERST# released", PERST, 0x27f, 0x203},
+        {"LTSSM start", P + 0x080, 0x1, 0x1},
+    };
+    u32 at = 0;
+    for (size_t i = 0; i < ARRAY_SIZE(seq); i++) {
+        int k = find_step(at, &seq[i]);
+        if (k < 0) {
+            printf("FAIL linux order: step %zu '%s' not found after trace %u\n", i, seq[i].what, at);
+            fails++;
+            break;
+        }
+        at = (u32)k + 1;
+        checks++;
+    }
+    /* L2 was reached between PME_Turn_Off and PERST# (the model sets it only on a 0x11 with the link up) */
+    CHECK(M.trace[0].a == RP + 0x04 || find_step(0, &seq[0]) >= 0);
+    CHECK(M.pm_logged == 1 && M.drops_logged == 0 && M.dumps == 0);
+}
+
+static void sc_cycle_not_d3(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    u32 pa = M.perst_asserts;
+    M.ntrace = 0;
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == N1PT_E_DSTATE);
+    CHECK(M.perst_asserts == pa && M.link && M.ntrace == 0); /* nothing written */
+    CHECK(mapped_dev(WIN + N1PT_BAR0_OFF) == 1);            /* BAR0 stays mapped */
+    d3();
+    CHECK(cmd(N1PT_CMD_PORT_CYCLE) == 0);
+}
+
+static void sc_cycle_fail_dump(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    d3();
+    M.no_820 = true; /* run w24c: 0x820 bit 2 never sets */
+    s32 r = cmd(N1PT_CMD_PORT_CYCLE);
+    CHECK(r == N1PT_E_IO || r == N1PT_E_NOLINK);
+    CHECK(M.dumps >= 1);
+    CHECK(mapped_dev(WIN + N1PT_BAR0_OFF) == 0);
+    /* PARK after the broken cycle (the retire of run w24c): PERST# asserted and the LTSSM off whatever happens */
+    u32 pa = M.perst_asserts;
+    hv_win_n1pt_retire();
+    CHECK((m_get(M_GPIO + 4 * 80) & 0x27f) == 0x202 && !(m_get(P0 + 0x080) & 1) && M.perst_asserts >= pa);
+    CHECK(hv_win_n1pt_stat(0) & 0x88);
+}
+
+static void sc_park_broken(int k)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    M.fw_running = true;
+    M.rom_stage = 1;
+    CHECK(cmd(N1PT_CMD_ENABLE) == 0);
+    if (k == 0)
+        M.pme_stuck = true;  /* link up but PME_Turn_Off never completes */
+    else
+        M.link = false;      /* link already down */
+    s32 r = cmd(N1PT_CMD_PARK);
+    CHECK(r == 0 || r == N1PT_E_IO);
+    CHECK((m_get(M_GPIO + 4 * 80) & 0x27f) == 0x202);  /* PERST# asserted */
+    CHECK(!(m_get(P0 + 0x080) & 1));                   /* LTSSM off */
+    CHECK(svc(N1SV_STATUS) & N1SV_ST_PARKED);
+    CHECK(mapped_dev(WIN + N1PT_BAR0_OFF) == 0 && mapped_dev(WIN + N1PT_BAR2_OFF) == 0);
+    if (k == 0)
+        CHECK(r == N1PT_E_IO && !(m_get(P0 + 0x800) & 1)); /* port disabled after the failed L2 */
+}
+
+static void sc_drop_logged(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    gw(BAR4 + N1SV_CFG_ADDR, 0x10);
+    gw(BAR4 + N1SV_CFG_DATA, 0);
+    guest_write(BAR4 + N1SV_CFG_DATA + 2, 1, 0x1234);
+    CHECK(M.drops_logged == 2 && svc(N1SV_CNT_DROPPED) == 2);
+    gw(BAR4 + N1SV_CFG_ADDR, 0x44);
+    guest_write(BAR4 + N1SV_CFG_DATA, 1, 0x010b); /* the Linux word write */
+    CHECK(M.pm_logged == 1 && (m_get(CFG(0) + 0x44) & 0x103) == 0x103);
+}
+
 typedef void (*scen_t)(void);
 static int run(const char *name, void (*f)(int), int arg)
 {
@@ -652,6 +796,12 @@ int main(void)
     bad += run0("pool map fails", sc_map_fail); n++;
     bad += run0("unmapped repair", sc_unmapped_repair); n++;
     bad += run0("unmapped ecam (dead)", sc_unmapped_ecam_hook_failed); n++;
+    bad += run0("cycle in Linux order", sc_cycle_linux_order); n++;
+    bad += run0("cycle refused not D3", sc_cycle_not_d3); n++;
+    bad += run0("cycle fail dump+park", sc_cycle_fail_dump); n++;
+    bad += run("park PME stuck", sc_park_broken, 0); n++;
+    bad += run("park link down", sc_park_broken, 1); n++;
+    bad += run0("dropped write logged", sc_drop_logged); n++;
     printf("%s: win-n1pt plat, %d scenarios, %d failed\n", bad ? "FAIL" : "PASS", n, bad);
     return bad ? 1 : 0;
 }
