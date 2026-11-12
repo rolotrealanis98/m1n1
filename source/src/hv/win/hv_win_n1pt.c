@@ -10,9 +10,14 @@
  *      port MSI, RID2SID, the 128 MiB pool off the top of RAM and its DART tables). Any failure parks the port
  *      and returns < 0: the launcher then boots Windows without the N1.
  *  P_HV_WIN_N1PT_STAT (index)                       state words for the launcher (pool address, flags, counters)
+ *  P_HV_WIN_N1PT_MAP ()                             after the launcher's final stage-2 build, before the guest: identity
+ *      map of the DMA pool for the guest (normal memory, the guest's stage-1 attributes, RW); 0 only if every pool
+ *      page then resolves to itself. The pool is outside Windows' memory map (m5w,memory) but the driver writes it.
  *  hv_win_n1pt_start()  in hv_start(): ECAM and window hooks, BAR0 Device-nGnRnE, AIC lines; never refuses the
  *      guest (a failure leaves an all-ones bus and parks the N1).
  *  hv_win_n1pt_irq()    AIC events of the N1 MSI lines and the port interrupt -> IRQ_STATUS -> one level SPI.
+ *  hv_win_n1pt_unmapped() a guest abort on an unmapped IPA inside an n1pt range (ECAM, window, pool): EL2 restores
+ *      the hook/map and retries; never escalated to the host (a session must not depend on the host for the N1).
  *  hv_win_n1pt_retire() guest exit (SYSTEM_OFF/RESET, host stop, dead-man) and resident retire: PARK.
  */
 
@@ -36,6 +41,7 @@ static struct n1pt_plat plat;
 static u64 ecam_ipa, pool;
 static u32 gsiv;
 static bool attempted, prepped, armed, irq_armed, retired;
+static u32 remaps; /* hv_win_n1pt_unmapped() repairs, bounded */
 static u32 link_events;
 static DECLARE_SPINLOCK(irq_lock);
 
@@ -89,6 +95,58 @@ static void cb_link_irq(void *c, int on)
         aic_mask(N1PT_LINK_AIC);
 }
 static const struct n1pt_plat_cb plat_cb = {0, cb_map_bars, cb_link_irq};
+
+/* ---- the DMA pool in the guest's stage 2 ---- */
+#define N1PT_S2AP_RW    (3UL << 6)
+#define N1PT_MEMATTR_S1 (0xfUL << 2) /* stage-2 MemAttr 1111: the guest's stage-1 type (as guest RAM) */
+
+/* every pool page resolves to itself, RW, normal memory with the guest's attributes */
+static bool pool_ok(void)
+{
+    if (!prepped || !pool)
+        return false;
+    for (u64 off = 0; off < N1PT_POOL_SIZE;) {
+        struct hv_s2_leaf l;
+        u64 ipa = pool + off;
+        if (!hv_pt_resolve_leaf(ipa, &l) || l.pa_base + (ipa - l.ipa_base) != ipa ||
+            (l.descriptor & N1PT_S2AP_RW) != N1PT_S2AP_RW || (l.descriptor & N1PT_MEMATTR_S1) != N1PT_MEMATTR_S1)
+            return false;
+        off += l.size - (ipa - l.ipa_base);
+    }
+    return true;
+}
+
+/* 0 mapped (or already), < 0 refused: something else holds a pool page, or the map did not take */
+static int pool_map(void)
+{
+    if (!prepped || !pool)
+        return -1;
+    if (pool_ok())
+        return 0;
+    for (u64 off = 0; off < N1PT_POOL_SIZE; off += 0x4000) {
+        if (hv_pt_walk(pool + off)) {
+            printf("n1pt: pool page 0x%lx already has a stage-2 entry: not mapping the pool\n", pool + off);
+            return -2;
+        }
+    }
+    if (hv_map_hw(pool, pool, N1PT_POOL_SIZE) < 0)
+        return -3;
+    s2_flush();
+    if (!pool_ok())
+        return -4;
+    printf("n1pt: pool 0x%lx+0x%lx identity-mapped for the guest (normal, RW; not in Windows' memory map)\n", pool,
+           (u64)N1PT_POOL_SIZE);
+    return 0;
+}
+
+s64 hv_win_n1pt_map(void)
+{
+    if (guest_started()) {
+        printf("n1pt: MAP refused: guest running\n");
+        return -5;
+    }
+    return pool_map();
+}
 
 /* ---- guest traps (under the big HV lock) ---- */
 static bool ecam_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width)
@@ -179,6 +237,8 @@ u64 hv_win_n1pt_stat(u64 index)
     case 8: return st.n_bar_moves;
     case 9: return (u64)(s64)st.cmd_result;
     case 10: return link_events;
+    case 11: return pool_ok();
+    case 12: return remaps;
     default: return 0;
     }
 }
@@ -204,6 +264,13 @@ bool hv_win_n1pt_start(void)
         return true;
     }
     s2_flush();
+    if (pool_map()) {
+        printf("n1pt: N1 REFUSED at start: the DMA pool is not mapped for the guest (bus reads all-ones)\n");
+        st.dead = true;
+        cb_map_bars(0, 0, 0);
+        st.ops->command(&st, N1PT_CMD_PARK, 0);
+        return true;
+    }
     if (!hv_win_storage_claims_spi(gsiv) && hv_vgic3_spi_unassigned(gsiv) && hv_win_aic_claim_t6050()) {
         for (u32 d = 0; d < 64; d++)
             if (n1pt_msi_bit(d) >= 0)
@@ -219,6 +286,49 @@ bool hv_win_n1pt_start(void)
            "0x%lx (all-ones until ENABLE_FUNCTIONS), service page 0x%lx, SPI %u%s\n",
            ecam_ipa, (u64)(plat.win + N1PT_BAR0_OFF), (u64)(plat.win + N1PT_BAR2_OFF), (u64)(plat.win + N1PT_BAR4_OFF), gsiv,
            irq_armed ? " (MSI AIC 1888+, link AIC 1523)" : "");
+    return true;
+}
+
+/* hv_handle_dabort(): the guest touched an unmapped IPA. Inside an n1pt range EL2 puts the hook/map back and the access
+ * is retried (true); outside, false (not ours). Bounded: after 64 repairs the range stays as it is and false is
+ * returned, so a broken stage 2 cannot loop forever. */
+static bool razwi_hook(struct exc_info *ctx, u64 addr, u64 *val, bool write, int width)
+{
+    UNUSED(ctx);
+    UNUSED(addr);
+    if (!write)
+        *val = width > 2 ? ~0UL : (u64)n1pt_width_mask(width);
+    return true;
+}
+
+bool hv_win_n1pt_unmapped(u64 ipa)
+{
+    if (!prepped)
+        return false;
+    bool ecam = ipa >= ecam_ipa && ipa < ecam_ipa + N1PT_ECAM_SIZE;
+    bool win = ipa >= plat.win && ipa < plat.win + N1PT_WIN_SIZE;
+    bool inpool = ipa >= pool && ipa < pool + N1PT_POOL_SIZE;
+    if (!ecam && !win && !inpool)
+        return false;
+    if (remaps >= 64) {
+        if (remaps++ == 64)
+            printf("n1pt: unmapped IPA 0x%lx: repair limit reached\n", ipa);
+        return false;
+    }
+    remaps++;
+    int r;
+    if (ecam)
+        r = hv_map_hook(ecam_ipa, ecam_hook, N1PT_ECAM_SIZE);
+    else if (win)
+        r = hv_map_hook(plat.win, win_hook, N1PT_WIN_SIZE); /* BARs back to all-ones: the driver sees a dead device */
+    else if (st.dead || (r = pool_map()) < 0)
+        r = hv_map_hook(pool, razwi_hook, N1PT_POOL_SIZE); /* no usable pool: reads all-ones, writes dropped */
+    s2_flush();
+    printf("n1pt: unmapped IPA 0x%lx (%s) repaired in EL2: %d\n", ipa, ecam ? "ECAM" : win ? "window" : "pool", r);
+    if (r < 0)
+        return false;
+    if (win && armed && !st.dead && !st.parked && !st.guard)
+        cb_map_bars(0, n1pt_plat_link_up(&plat), st.fns_enabled && n1pt_plat_link_up(&plat));
     return true;
 }
 

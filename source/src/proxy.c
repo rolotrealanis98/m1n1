@@ -709,6 +709,9 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
         case P_HV_WIN_N1PT_STAT:
             reply->retval = hv_win_n1pt_stat(request->args[0]);
             break;
+        case P_HV_WIN_N1PT_MAP:
+            reply->retval = hv_win_n1pt_map();
+            break;
         case P_HV_WIN_SMP_DUMP:
             reply->retval = hv_win_smp_dump("host request");
             break;

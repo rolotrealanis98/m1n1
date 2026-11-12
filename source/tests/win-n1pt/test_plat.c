@@ -58,6 +58,7 @@ static void setup(void)
     model_reset();
     glue_reset();
     M.verbose = getenv("N1PT_VERBOSE") != NULL;
+    G.tables_built = true; /* the launcher's final stage-2 build precedes P_HV_START */
 }
 
 static int prep(void) { return (int)hv_win_n1pt_prep(WIN, ECAMI, IOVA, SPI); }
@@ -479,6 +480,125 @@ static void sc_storage_guard_unit(void)
     }
 }
 
+
+/* every IPA the guest is told about (service page POOL, BAR0, BAR2, BAR4, ECAM) is handled in EL2: mapped or trapped */
+static int acc(u64 ipa, bool w) { u64 v = 0x5a5a5a5a; return guest_access(ipa, w, &v); }
+static void all_advertised_handled(bool enabled)
+{
+    u64 pool = (u64)svc(N1SV_POOL_IPA_HI) << 32 | svc(N1SV_POOL_IPA_LO);
+    u64 size = svc(N1SV_POOL_SIZE);
+    CHECK(pool && pool == hv_win_n1pt_stat(1) && size == N1PT_POOL_SIZE);
+    int unresolved = 0;
+    for (u64 off = 0; off < size; off += 0x4000) /* every pool page, read and write: guest RAM-like */
+        unresolved += acc(pool + off, true) != 1 || acc(pool + off + 0x3ff8, false) != 1;
+    CHECK(unresolved == 0);
+    for (u64 off = 0; off < N1PT_WIN_SIZE; off += 0x1000)
+        unresolved += acc(WIN + off, false) < 0 || acc(WIN + off, true) < 0;
+    for (u64 off = 0; off < N1PT_ECAM_SIZE; off += 0x1000)
+        unresolved += acc(ECAMI + off, false) < 0 || acc(ECAMI + off + 4, true) < 0;
+    CHECK(unresolved == 0);
+    CHECK(acc(WIN + N1PT_BAR0_OFF, false) == 1 && acc(WIN + N1PT_BAR4_OFF, false) == 0);
+    CHECK(acc(WIN + N1PT_BAR2_OFF, false) == (enabled ? 1 : 0));
+}
+
+static void sc_pool_map(void)
+{
+    setup();
+    CHECK(prep() == 0);
+    CHECK(hv_win_n1pt_stat(11) == 0);       /* not mapped before the launcher's MAP / hv_start */
+    CHECK(hv_win_n1pt_map() == 0 && hv_win_n1pt_stat(11) == 1);
+    CHECK(hv_win_n1pt_map() == 0);          /* idempotent */
+    u32 nmap = G.nmap;
+    hv_win_n1pt_start();
+    CHECK(hv_win_n1pt_stat(11) == 1 && (hv_win_n1pt_stat(0) & 0x42) == 0x02);
+    for (u32 i = nmap; i < G.nmap; i++)     /* start did not map the pool a second time */
+        CHECK(!G.map[i].ram);
+    /* the driver's first write, as in hardware run w24: va = pool start */
+    u64 pool = hv_win_n1pt_stat(1), v = 0x1122334455667788UL;
+    CHECK(guest_access(pool, true, &v) == 1 && *(u64 *)(uintptr_t)pool == 0x1122334455667788UL);
+    all_advertised_handled(false);
+    M.fw_running = true;
+    M.rom_stage = 1;
+    CHECK(cmd(N1PT_CMD_ENABLE) == 0);
+    all_advertised_handled(true);
+    hv_started_cpus[0] = true;
+    CHECK(hv_win_n1pt_map() == -5);         /* MAP is pre-guest only */
+    hv_started_cpus[0] = false;
+}
+
+static void sc_pool_at_start(void)
+{
+    setup();
+    CHECK(prep_start() == 0);               /* no MAP call: hv_start maps it */
+    CHECK(hv_win_n1pt_stat(11) == 1 && !(hv_win_n1pt_stat(0) & 0x40));
+    all_advertised_handled(false);
+}
+
+static void sc_pool_conflict(void)
+{
+    setup();
+    CHECK(prep() == 0);
+    G.foreign_ipa = hv_win_n1pt_stat(1) + 0x100000; /* another stage-2 user inside the pool */
+    CHECK(hv_win_n1pt_map() == -2 && hv_win_n1pt_stat(11) == 0);
+    u32 pa = M.perst_asserts;
+    hv_win_n1pt_start();                    /* refuses the N1, never the guest */
+    CHECK((hv_win_n1pt_stat(0) & 0x48) == 0x48 && M.perst_asserts == pa + 1);
+    CHECK(svc(N1SV_MAGIC) == 0xffffffffu && gr(ECAMI + (1UL << 20)) == 0xffffffffu);
+    /* a stray guest access to the (unusable) pool still never leaves EL2: all-ones / dropped */
+    u64 v = 0;
+    CHECK(guest_access(hv_win_n1pt_stat(1), false, &v) == 0 && v == 0xffffffffu);
+}
+
+static void sc_map_fail(void)
+{
+    setup();
+    CHECK(prep() == 0);
+    G.ram_fail = true;
+    CHECK(hv_win_n1pt_map() == -3);
+    hv_win_n1pt_start();
+    CHECK(hv_win_n1pt_stat(0) & 0x40);
+    u64 v = 0;
+    CHECK(guest_access(hv_win_n1pt_stat(1) + 0x4000, true, &v) == 0); /* RAZ/WI hook, not the host */
+}
+
+/* a range lost from stage 2 while the guest runs: repaired in EL2 on the abort, never escalated */
+static void sc_unmapped_repair(void)
+{
+    setup();
+    CHECK(prep_start() == 0);
+    M.fw_running = true;
+    M.rom_stage = 1;
+    CHECK(cmd(N1PT_CMD_ENABLE) == 0);
+    u64 pool = hv_win_n1pt_stat(1), v;
+    glue_unmap(pool, N1PT_POOL_SIZE);
+    v = 7;
+    CHECK(guest_access(pool + 0x200000, true, &v) == 1 && hv_win_n1pt_stat(11) == 1);
+    glue_unmap(ECAMI, N1PT_ECAM_SIZE);
+    CHECK(guest_access(ECAMI + (1UL << 20), false, &v) == 0 && (u32)v == 0x1900106b);
+    glue_unmap(WIN, N1PT_WIN_SIZE);
+    CHECK(guest_access(BAR4, false, &v) == 0 && (u32)v == 0x5653314e);
+    CHECK(mapped_dev(WIN + N1PT_BAR0_OFF) == 1 && mapped_dev(WIN + N1PT_BAR2_OFF) == 1);
+    CHECK(hv_win_n1pt_stat(12) == 3);
+    /* outside every n1pt range: not ours (the resident's usual path) */
+    CHECK(guest_access(0x7000000000UL, false, &v) == -1 && hv_win_n1pt_stat(12) == 3);
+    /* bounded */
+    for (int i = 0; i < 80; i++)
+        glue_unmap(ECAMI, N1PT_ECAM_SIZE), acc(ECAMI, false);
+    glue_unmap(ECAMI, N1PT_ECAM_SIZE);
+    CHECK(acc(ECAMI, false) == -1);
+}
+
+static void sc_unmapped_ecam_hook_failed(void)
+{
+    setup();
+    G.hook_fail_at = 1;                     /* the ECAM hook at start fails: N1 refused, ECAM unmapped */
+    CHECK(prep() == 0);
+    hv_win_n1pt_start();
+    CHECK(hv_win_n1pt_stat(0) & 0x40);
+    u64 v = 0;
+    CHECK(guest_access(ECAMI + (1UL << 20), false, &v) == 0 && (u32)v == 0xffffffffu); /* hooked on the abort */
+}
+
 typedef void (*scen_t)(void);
 static int run(const char *name, void (*f)(int), int arg)
 {
@@ -526,6 +646,12 @@ int main(void)
     bad += run("start fail ecam", sc_start_fail, 1); n++;
     bad += run("start fail window", sc_start_fail, 2); n++;
     bad += run0("storage guard unit", sc_storage_guard_unit); n++;
+    bad += run0("pool map + advertised", sc_pool_map); n++;
+    bad += run0("pool mapped at start", sc_pool_at_start); n++;
+    bad += run0("pool conflict", sc_pool_conflict); n++;
+    bad += run0("pool map fails", sc_map_fail); n++;
+    bad += run0("unmapped repair", sc_unmapped_repair); n++;
+    bad += run0("unmapped ecam (dead)", sc_unmapped_ecam_hook_failed); n++;
     printf("%s: win-n1pt plat, %d scenarios, %d failed\n", bad ? "FAIL" : "PASS", n, bad);
     return bad ? 1 : 0;
 }
