@@ -129,6 +129,10 @@ void hv_win_gpu_report(void) /* gpu-pt: link stub, as hv_win_pmu_report */
 {
 }
 
+void hv_win_dcp_report(void) /* dcp-pt: link stub, as hv_win_gpu_report */
+{
+}
+
 /* smp2d: psci_system_exit() now also dumps the WFI/debug/integrity counters and the exit ring */
 void hv_win_wfi_report(void)
 {

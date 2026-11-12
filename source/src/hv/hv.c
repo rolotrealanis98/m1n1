@@ -271,6 +271,11 @@ void hv_start(void *entry, u64 regs[4])
         return;
     }
 
+    if (!hv_win_dcp_start()) { /* dcp-pt: no-op unless HV_WIN_F_DCP_PT */
+        printf("HV: DCP passthrough guards failed; guest refused\n");
+        return;
+    }
+
     if (!hv_cpu_state_setup_hook()) {
         printf("CPU state hook setup failed, can't start the hypervisor\n");
         return;

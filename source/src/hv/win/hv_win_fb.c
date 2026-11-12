@@ -163,6 +163,7 @@ static struct {
     u64 ndirty, npass, first_dirty, first_dirty_stop, pass_t0, pass_stop0, next_page;
     bool fault_this_tick, pass_active;
     bool attempted;
+    bool paused; /* dcp-pt: Windows drives the panel (display-owner register); the converter does nothing */
 } win_fb;
 
 /*
@@ -808,7 +809,7 @@ static void hv_win_fb_tick_passes(void);
 
 void hv_win_fb_tick(void)
 {
-    if (win_fb.state != 2 || (win_fb.flags & FB_F_NO_COPY))
+    if (win_fb.state != 2 || (win_fb.flags & FB_F_NO_COPY) || win_fb.paused)
         return;
     hv_win_fb_tick_passes();
     if (win_fb.refresh_ticks) {
@@ -960,4 +961,55 @@ u64 hv_win_fb_stat(u64 idx)
         }
     }
     return v[idx];
+}
+
+/*
+ * dcp-pt: the display-owner register (hv_win_dcp.c). Called with bhl held (a trapped guest write, or the guest-exit
+ * report). Pausing only stops the tick: stage-2 write faults still mark pages dirty (one fault per page, then the
+ * page stays writable). Resuming reprotects every dirty page and queues the whole frame as one forced pass (nothing
+ * of what the panel showed while Windows owned it is trusted), exactly like the start-up pass.
+ */
+void hv_win_fb_set_paused(bool paused)
+{
+    if (paused == win_fb.paused)
+        return;
+    win_fb.paused = paused;
+    if (paused || win_fb.state != 2)
+        return;
+    u64 words = (win_fb.pages + 63) / 64;
+    if ((win_fb.flags & FB_F_DIRTY) && win_fb.ndirty) {
+        bool small = win_fb.ndirty <= FB_SMALL_PASS;
+        for (u64 w = 0; w < words; w++)
+            if (win_fb.dirty[w])
+                fb_wp_word(w, win_fb.dirty[w], small);
+        fb_wp_done(small);
+    }
+    for (u64 w = 0; w < words; w++) {
+        u64 all = (w + 1) * 64 <= win_fb.pages ? ~0UL : BIT(win_fb.pages % 64) - 1;
+        win_fb.dirty[w] = 0;
+        win_fb.pass[w] = all;
+        win_fb.force[w] = all;
+    }
+    win_fb.ndirty = 0;
+    win_fb.npass = win_fb.pages;
+    win_fb.pass_active = true;
+    win_fb.cursor = 0;
+    win_fb.next_page = 0;
+    win_fb.pass_t0 = win_fb.first_dirty = get_ticks();
+    win_fb.pass_stop0 = win_fb.first_dirty_stop = win_fb.stopped;
+}
+
+bool hv_win_fb_paused(void)
+{
+    return win_fb.paused;
+}
+
+bool hv_win_fb_active(void)
+{
+    return win_fb.state == 2;
+}
+
+u64 hv_win_fb_passes(void)
+{
+    return win_fb.passes;
 }
