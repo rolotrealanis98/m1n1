@@ -1512,6 +1512,15 @@ bool usb_dwc3_can_write(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
     return dev->pipe[pipe].ready;
 }
 
+/* nightly-12: bytes the device-to-host ring takes right now without waiting (0 when the pipe is not ready). Callers
+ * that must queue a whole record or nothing hold the iodev lock across this check and the write. */
+size_t usb_dwc3_write_free(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+{
+    if (!dev || pipe >= CDC_ACM_PIPE_MAX || !dev->pipe[pipe].ready || !dev->pipe[pipe].device2host)
+        return 0;
+    return ringbuffer_get_free(dev->pipe[pipe].device2host);
+}
+
 void usb_dwc3_flush(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
 {
     if (!dev || !dev->pipe[pipe].ready)

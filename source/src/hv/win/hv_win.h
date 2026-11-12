@@ -97,6 +97,14 @@ s64 hv_win_session_heartbeat(u64 seconds);
 void hv_win_session_tick(void);
 #define HV_WIN_HEARTBEAT_BYTE 0x16 /* nightly-10: host heartbeat byte on the proxy link (SYN); '!' still interrupts */
 void hv_win_session_heartbeat_byte(void);
+/* nightly-12: framebuffer snapshot (hv_win_shot.c): request byte on the proxy link + 18 hex digits; the image
+ * comes back as EVT_M5W_SHOT proxy events, sliced over hv_tick, no proxy entry, no vCPU stop */
+#define HV_WIN_SHOT_BYTE 0x17
+#define EVT_M5W_SHOT 0x10
+bool hv_win_shot_rx(u8 b);
+void hv_win_shot_tick(void);
+u64 hv_win_shot_stat(u64 idx);
+bool hv_win_fb_shadow_src(u64 *base, u64 *stride, u64 *width, u64 *height); /* hv_win_fb.c, active shadow */
 /* nightly-10 stall evidence (hv_exc.c): longest bhl hold per reason, and all-vCPU stops (proxy rendezvous) */
 enum { HV_HOLD_SYNC, HV_HOLD_IRQ, HV_HOLD_FIQ, HV_HOLD_TICK, HV_HOLD_PROXY, HV_HOLD_NR };
 struct hv_stall_stats {

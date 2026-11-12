@@ -94,3 +94,5 @@ QF	trace-1cpu	source/src/hv/win/* source/src/hv/win/s1/* tests/native/*	FB_JOBS=
 # ---- nightly-7: cable-independent session end (host stop, dead-man, uncollected guest exit)
 QF	win-session	source/src/hv/win/hv_win_session.c source/tests/win-session/*	OUT=$FB_OUT/ws sh source/tests/win-session/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
 QF	win-gpu	source/src/hv/win/hv_win_gpu* source/src/hv/win/hv_win_t6050_routes.h source/src/hv/hv.c source/src/hv/win/hv_win.c source/tests/win-gpu/*	OUT=$FB_OUT/wg sh source/tests/win-gpu/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0
+# ---- nightly-12: read-only framebuffer snapshot (request bytes in hv_tick, image as proxy events, no vCPU stop)
+QF	win-shot	source/src/hv/win/hv_win_shot.c source/src/hv/win/hv_win.h source/tests/win-shot/*	OUT=$FB_OUT/wsh sh source/tests/win-shot/run.sh 2>&1 | tail -1; test ${PIPESTATUS[0]} = 0

@@ -720,6 +720,8 @@ void hv_tick(struct exc_info *ctx)
         u8 b = 0;
         if (iodev_read(uartproxy_iodev, &b, 1) != 1)
             break;
+        if (hv_win_shot_rx(b)) /* nightly-12: snapshot request bytes (no proxy entry) */
+            continue;
         if (b == HV_WIN_HEARTBEAT_BYTE) {
             hv_win_session_heartbeat_byte();
             continue;
@@ -740,6 +742,7 @@ void hv_tick(struct exc_info *ctx)
     hv_win_pmu_tick();
     HV_DOING(HV_DO_FB_TICK);
     hv_win_fb_tick();
+    hv_win_shot_tick(); /* nightly-12: one bounded slice of a running framebuffer snapshot */
     HV_DOING(HV_DO_TICK);
     /* smp2: per-vCPU timer/SGI report every 10 s with N > 1 vCPUs; no-op otherwise */
     hv_win_tick();

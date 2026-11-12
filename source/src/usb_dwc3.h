@@ -21,6 +21,7 @@ void usb_dwc3_handle_events(dwc3_dev_t *dev);
 
 ssize_t usb_dwc3_can_read(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe);
 bool usb_dwc3_can_write(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe);
+size_t usb_dwc3_write_free(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe); /* nightly-12 */
 
 u8 usb_dwc3_getbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe);
 void usb_dwc3_putbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, u8 byte);

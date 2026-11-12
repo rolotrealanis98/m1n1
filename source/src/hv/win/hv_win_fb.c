@@ -361,6 +361,18 @@ static void fb_tlbi_el2(void)
 }
 
 /* Host-only proxy operation, before final guest memory planning. */
+/* nightly-12: the active shadow surface (guest BGRA8), for the read-only framebuffer snapshot (hv_win_shot.c) */
+bool hv_win_fb_shadow_src(u64 *base, u64 *stride, u64 *width, u64 *height)
+{
+    if (win_fb.state != 2)
+        return false;
+    *base = win_fb.shadow;
+    *stride = win_fb.gstride;
+    *width = win_fb.gwidth;
+    *height = win_fb.gheight;
+    return true;
+}
+
 s64 hv_win_fb_prepare(u64 expected_native, u64 flags, u64 tuning)
 {
     if ((flags & ~FB_F_ALL) || win_fb.attempted || !fb_idle_single_cpu())
